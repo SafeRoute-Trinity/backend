@@ -4,4 +4,4 @@ app = FastAPI()
 
 @app.get("/")
 def data_cleaner():
-    return {"message": "Hello FastAPI"}
+    return {"message": "SOS service"}

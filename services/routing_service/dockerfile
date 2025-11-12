@@ -15,14 +15,15 @@ RUN apt-get update && apt-get install -y \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制依赖文件并安装
+# 复制依赖文件并安装（从根目录）
 COPY requirements.txt .
+COPY libs/ ./libs/
 
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
-# 复制项目代码
-COPY . .
+# 复制服务代码
+COPY services/routing_service/ .
 
 # 暴露端口（FastAPI 默认12345）
 EXPOSE 12345
