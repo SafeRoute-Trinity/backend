@@ -3,7 +3,6 @@
 
 ```source venv/bin/activate```
 
-
 ## Install necessary packages
 
 ```pip install -r requirements.txt```
@@ -11,3 +10,7 @@
 ## Run the backend
 
 ```uvicorn main:app --reload```
+
+## Unit Test
+
+```pytest```
