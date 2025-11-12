@@ -38,6 +38,7 @@ class SafetyWeightsResponse(BaseModel):
     status: Literal["updated"]; user_id: str; weights: SafetyWeights; weights_sum: float; updated_at: datetime
 
 @app.get("/")
+<<<<<<< HEAD
 async def root(): return {"service": "safety_scoring", "status": "running"}
 
 @app.get("/health")
@@ -67,3 +68,7 @@ async def update_weights(body: SafetyWeightsRequest):
     total = w.cctv_coverage + w.street_lighting + w.business_activity + w.crime_rate + w.pedestrian_traffic
     return SafetyWeightsResponse(status="updated", user_id=body.user_id, weights=w,
                                  weights_sum=total, updated_at=datetime.utcnow())
+=======
+def data_cleaner():
+    return {"message": "safety scoring service"}
+>>>>>>> refs/remotes/origin/main

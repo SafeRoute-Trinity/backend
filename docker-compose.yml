@@ -1,0 +1,75 @@
+version: "3.9"
+
+services:
+  feedback:
+    build:
+      context: .
+      dockerfile: services/feedback/dockerfile
+    image: saferoute/feedback:latest
+    container_name: saferoute-feedback
+    ports:
+      - "12345:12345"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  notification:
+    build:
+      context: .
+      dockerfile: services/notification/dockerfile
+    image: saferoute/notification:latest
+    container_name: saferoute-notification
+    ports:
+      - "12346:12345"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  routing_service:
+    build:
+      context: .
+      dockerfile: services/routing_service/dockerfile
+    image: saferoute/routing-service:latest
+    container_name: saferoute-routing-service
+    ports:
+      - "12347:12345"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  safety_scoring:
+    build:
+      context: .
+      dockerfile: services/safety_scoring/dockerfile
+    image: saferoute/safety-scoring:latest
+    container_name: saferoute-safety-scoring
+    ports:
+      - "12348:12345"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  sos:
+    build:
+      context: .
+      dockerfile: services/sos/dockerfile
+    image: saferoute/sos:latest
+    container_name: saferoute-sos
+    ports:
+      - "12349:12345"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  user_management:
+    build:
+      context: .
+      dockerfile: services/user_management/dockerfile
+    image: saferoute/user-management:latest
+    container_name: saferoute-user-management
+    ports:
+      - "12350:12345"
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
