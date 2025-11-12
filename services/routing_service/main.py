@@ -41,7 +41,6 @@ class NavigationStartResponse(BaseModel):
     session_id:str; status:Literal["active"]; started_at:datetime
 
 @app.get("/")
-<<<<<<< HEAD
 async def root(): return {"service": "routing_service", "status": "running"}
 
 @app.get("/health")
@@ -69,7 +68,3 @@ async def nav_start(body: NavigationStartRequest):
     sid=f"nav_{uuid.uuid4().hex[:8]}"; now=datetime.utcnow()
     NAV[sid]={"route_id":body.route_id,"user_id":body.user_id,"started_at":now}
     return NavigationStartResponse(session_id=sid,status="active",started_at=now)
-=======
-def data_cleaner():
-    return {"message": "routing service"}
->>>>>>> refs/remotes/origin/main

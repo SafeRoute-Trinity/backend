@@ -30,7 +30,6 @@ class EmergencyStatusResponse(BaseModel):
     sms_status: Literal["sent","failed","not_sent"]; last_update: datetime
 
 @app.get("/")
-<<<<<<< HEAD
 async def root(): return {"service": "sos", "status": "running"}
 
 @app.get("/health")
@@ -54,7 +53,3 @@ async def get_status(sos_id: str = Path(..., description="SOS event to check")):
     now = datetime.utcnow()
     s = STATUS.get(sos_id, {"sos_id": sos_id, "call_status": "not_triggered", "sms_status": "not_sent", "last_update": now})
     return EmergencyStatusResponse(**s)
-=======
-def data_cleaner():
-    return {"message": "SOS service"}
->>>>>>> refs/remotes/origin/main

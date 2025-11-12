@@ -1,3 +1,7 @@
+#pytest services/user_management/tests/test_main.py -q
+#pytest services/user_management/tests/test_main.py -k test_register_user -q
+
+
 from fastapi.testclient import TestClient
 from services.user_management.main import app
 from datetime import datetime

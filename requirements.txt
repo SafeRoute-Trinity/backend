@@ -1,3 +1,9 @@
+#pip install -r requirements.txt
+#pip install -r requirements-dev.txt
+#pytest -q
+#pytest --cov=services --cov-report=term-missing
+
+
 # 项目依赖
 fastapi>=0.100.0
 uvicorn[standard]>=0.24.0

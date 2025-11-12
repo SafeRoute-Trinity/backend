@@ -33,7 +33,6 @@ class FeedbackStatusResponse(BaseModel):
     created_at: datetime; updated_at: datetime
 
 @app.get("/")
-<<<<<<< HEAD
 async def root(): return {"service": "feedback", "status": "running"}
 
 @app.get("/health")
@@ -64,7 +63,3 @@ async def status(feedback_id: str):
         fb = {"ticket_number": f"TKT-{now.year}-DEMO", "status": "under_review",
               "type": "safety_issue", "severity": "high", "created_at": now, "updated_at": now}
     return FeedbackStatusResponse(feedback_id=feedback_id, **fb)
-=======
-def data_cleaner():
-    return {"message": "feedback service"}
->>>>>>> refs/remotes/origin/main

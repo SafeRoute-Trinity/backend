@@ -45,7 +45,6 @@ class StatusResp(BaseModel):
     created_at: datetime; updated_at: datetime
 
 @app.get("/")
-<<<<<<< HEAD
 async def root(): return {"service": "notification", "status": "running"}
 
 @app.get("/health")
@@ -68,7 +67,3 @@ async def get_status(notification_id: str):
                "results": {"sms_status": "delivered", "call_status": "not_triggered"},
                "created_at": now, "updated_at": now}
     return StatusResp(**ntf)
-=======
-def data_cleaner():
-    return {"message": "notification service"}
->>>>>>> refs/remotes/origin/main
