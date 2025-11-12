@@ -1,5 +1,5 @@
 from fastapi.testclient import TestClient
-from services.data_cleaner import app
+from services.data_cleaner.main import app
 
 client = TestClient(app)
 

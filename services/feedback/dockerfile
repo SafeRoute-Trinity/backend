@@ -1,0 +1,31 @@
+# 使用官方 Python 基础镜像
+FROM python:3.9
+
+# 设置环境变量
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+# 设置工作目录
+WORKDIR /app
+
+# 安装系统依赖（用于 psycopg2 等）
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制依赖文件并安装
+COPY requirements.txt .
+
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt
+
+# 复制项目代码
+COPY . .
+
+# 暴露端口（FastAPI 默认12345）
+EXPOSE 12345
+
+# 启动命令（生产环境建议用 --workers 4）
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "12345"]
