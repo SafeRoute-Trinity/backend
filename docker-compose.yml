@@ -5,8 +5,10 @@ services:
     build:
       context: .
       dockerfile: services/feedback/dockerfile
+      platform: linux/amd64
     image: saferoute/feedback:latest
     container_name: saferoute-feedback
+    platform: linux/amd64
     ports:
       - "12345:12345"
     environment:
@@ -17,8 +19,10 @@ services:
     build:
       context: .
       dockerfile: services/notification/dockerfile
+      platform: linux/amd64
     image: saferoute/notification:latest
     container_name: saferoute-notification
+    platform: linux/amd64
     ports:
       - "12346:12345"
     environment:
@@ -29,8 +33,10 @@ services:
     build:
       context: .
       dockerfile: services/routing_service/dockerfile
+      platform: linux/amd64
     image: saferoute/routing-service:latest
     container_name: saferoute-routing-service
+    platform: linux/amd64
     ports:
       - "12347:12345"
     environment:
@@ -41,8 +47,10 @@ services:
     build:
       context: .
       dockerfile: services/safety_scoring/dockerfile
+      platform: linux/amd64
     image: saferoute/safety-scoring:latest
     container_name: saferoute-safety-scoring
+    platform: linux/amd64
     ports:
       - "12348:12345"
     environment:
@@ -53,8 +61,10 @@ services:
     build:
       context: .
       dockerfile: services/sos/dockerfile
+      platform: linux/amd64
     image: saferoute/sos:latest
     container_name: saferoute-sos
+    platform: linux/amd64
     ports:
       - "12349:12345"
     environment:
@@ -65,11 +75,12 @@ services:
     build:
       context: .
       dockerfile: services/user_management/dockerfile
+      platform: linux/amd64
     image: saferoute/user-management:latest
     container_name: saferoute-user-management
+    platform: linux/amd64
     ports:
       - "12350:12345"
     environment:
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
-
