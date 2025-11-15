@@ -111,7 +111,7 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "data_cleaner", "test": "ok", "som": "not"}
+    return {"status": "ok", "service": "data_cleaner"}
 
 
 @app.post("/v1/data/collect", response_model=DataCollectResponse)

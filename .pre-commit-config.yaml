@@ -27,7 +27,6 @@ repos:
             echo ""
             echo -e "⚙️  \033[33mThe following files were automatically reformatted:\033[0m"
             echo ""
-            # 🔹 逐行輸出，每行一個檔案
             while IFS= read -r file; do
               echo -e "   \033[34m$file\033[0m"
             done <<< "$CHANGED"
