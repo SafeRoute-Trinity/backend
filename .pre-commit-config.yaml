@@ -20,4 +20,4 @@ repos:
         name: Run pytest before push
         entry: pytest -q
         language: system
-        stages: [push]
+        stages: [pre-push]
