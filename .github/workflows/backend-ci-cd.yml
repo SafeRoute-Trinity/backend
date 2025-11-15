@@ -6,7 +6,7 @@ on:
   pull_request:
 
 jobs:
-  tests:
+  backend-ci:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,22 +18,26 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dev dependencies
         run: |
           python -m pip install --upgrade pip
-          # Prefer dev requirements if they exist
           if [ -f "requirements_dev.txt" ]; then
             pip install -r requirements_dev.txt
           elif [ -f "requirements.txt" ]; then
             pip install -r requirements.txt
           else
-            echo "No requirements file found"
+            echo "No requirements file found" && exit 1
           fi
 
-      - name: Run pytest
+      - name: Run pre-commit (black, ruff, etc.)
+        run: |
+          # Run all hooks against all files
+          pre-commit run --all-files
+
+      - name: Run pytest (unit tests)
         run: |
           if [ -f "pytest.ini" ] || [ -d "tests" ]; then
             pytest
           else
-            echo "No tests configured yet, skipping"
+            echo "No pytest configuration found, skipping tests"
           fi
