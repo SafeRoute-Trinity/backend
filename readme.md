@@ -5,7 +5,12 @@
 
 ## Install necessary packages
 
-```pip install -r requirements.txt```
+```pip install -r requirements_dev.txt```
+
+## Turn on the development hooks
+
+```pre-commit install --hook-type pre-commit```
+```pre-commit install --hook-type pre-push```
 
 ## Run the backend
 
