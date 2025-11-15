@@ -18,6 +18,6 @@ repos:
     hooks:
       - id: pytest-before-push
         name: Run pytest before push
-        entry: pytest -q services/*/tests
+        entry: pytest -q services/
         language: system
         stages: [pre-push]
