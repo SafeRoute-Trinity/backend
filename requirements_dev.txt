@@ -18,6 +18,7 @@ pytest-cov>=5.0.0
 
 # --- Dev Tools ---
 black>=24.4.2 # Linter
+flake8>=7.1.0 # Linter
 isort>=5.13.2 # Sort import
 mypy>=1.10.0 # Check types
 ruff>=0.14.5 # Formatter
