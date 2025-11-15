@@ -1,21 +1,23 @@
-#pytest -q
+# pytest -q
 ##或者只测试一个服务
-#pytest services/sos/tests/test_main.py -q
-#pip install pytest
-#pip install pytest httpx requests
+# pytest services/sos/tests/test_main.py -q
+# pip install pytest
+# pip install pytest httpx requests
 
 
 from fastapi.testclient import TestClient
+
 from services.sos.main import app
 
 client = TestClient(app)
+
 
 def test_emergency_call_sms_status():
     call_req = {
         "sos_id": "SOS-TEST",
         "phone_number": "+112",
         "user_location": {"lat": 53.34, "lon": -6.26},
-        "call_reason": "Test emergency"
+        "call_reason": "Test emergency",
     }
     r = client.post("/v1/emergency/call", json=call_req)
     assert r.status_code == 200
@@ -25,7 +27,7 @@ def test_emergency_call_sms_status():
         "sos_id": "SOS-TEST",
         "recipient_phone": "+353800000222",
         "message": "Emergency! Need help.",
-        "location_url": "https://maps.google.com/?q=53.34,-6.26"
+        "location_url": "https://maps.google.com/?q=53.34,-6.26",
     }
     r2 = client.post("/v1/emergency/sms", json=sms_req)
     assert r2.status_code == 200

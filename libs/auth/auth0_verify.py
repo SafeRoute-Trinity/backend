@@ -11,14 +11,15 @@ Env vars (with safe defaults for local dev):
 - API_AUDIENCE   e.g. https://api.saferoute.dev
 """
 
-import os
 import json
-import requests
+import os
+
 import certifi
 import jwt
-from jwt.algorithms import RSAAlgorithm
+import requests
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jwt.algorithms import RSAAlgorithm
 
 # ---------- Config ----------
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "dev-ne8wedb5815zl4wf.us.auth0.com")
@@ -29,6 +30,7 @@ ALGORITHMS = ["RS256"]
 
 # ---------- Security scheme ----------
 security = HTTPBearer()
+
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
@@ -63,31 +65,47 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         return payload
 
     except requests.exceptions.SSLError as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail=f"SSL error fetching JWKS: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"SSL error fetching JWKS: {e}",
+        ) from e
     except requests.RequestException as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail=f"HTTP error fetching JWKS: {e}")
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
-    except jwt.InvalidAudienceError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid audience")
-    except jwt.InvalidIssuerError:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid issuer")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"HTTP error fetching JWKS: {e}",
+        ) from e
+    except jwt.ExpiredSignatureError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
+        ) from e
+    except jwt.InvalidAudienceError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid audience"
+        ) from e
+    except jwt.InvalidIssuerError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid issuer"
+        ) from e
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail=f"Token verification failed: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Token verification failed: {e}",
+        ) from e
+
 
 # ---------- Router (recommended) ----------
 router = APIRouter(prefix="/auth0", tags=["auth"])
+
 
 @router.get("/verify")
 def verify(payload: dict = Depends(verify_token)):
     """Protected endpoint—returns user info if token is valid."""
     return {"message": "Token valid ✅", "user": payload.get("sub")}
 
+
 # ---------- Minimal standalone app (optional for local testing) ----------
 if os.getenv("AUTH0_STANDALONE", "0") == "1":
     from fastapi import FastAPI
+
     app = FastAPI()
     app.include_router(router)

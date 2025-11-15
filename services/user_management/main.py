@@ -1,9 +1,9 @@
-from fastapi import FastAPI, Path, Query
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
-from typing import List, Optional, Dict, Literal
-from datetime import datetime
 import uuid
+from datetime import datetime
+from typing import Dict, List, Literal, Optional
+
+from fastapi import FastAPI, Query
+from pydantic import BaseModel
 
 app = FastAPI(
     title="SafeRoute API (Mock)",
@@ -27,11 +27,14 @@ emergency_status: Dict[str, dict] = {}
 
 # ========= 共用模型 =========
 
+
 class Point(BaseModel):
     lat: float
     lon: float
 
+
 # ========= 1. User Management =========
+
 
 class RegisterRequest(BaseModel):
     email: str
@@ -40,9 +43,11 @@ class RegisterRequest(BaseModel):
     phone: Optional[str] = None
     name: Optional[str] = None
 
+
 class AuthInfo(BaseModel):
     token: str
     expires_in: int = 3600
+
 
 class RegisterResponse(BaseModel):
     user_id: str
@@ -54,10 +59,12 @@ class RegisterResponse(BaseModel):
     device_id: str
     created_at: datetime
 
+
 class LoginRequest(BaseModel):
     email: str
     password_hash: str
     device_id: str
+
 
 class LoginResponse(BaseModel):
     user_id: str
@@ -67,16 +74,19 @@ class LoginResponse(BaseModel):
     device_id: str
     last_login: datetime
 
+
 class PreferencesRequest(BaseModel):
     voice_guidance: Literal["on", "off"]
     safety_bias: Optional[Literal["safest", "fastest"]] = None
     units: Optional[Literal["metric", "imperial"]] = None
+
 
 class PreferencesResponse(BaseModel):
     user_id: str
     status: Literal["preferences_saved"]
     preferences: PreferencesRequest
     updated_at: datetime
+
 
 class TrustedContactUpsertRequest(BaseModel):
     contact_id: Optional[str] = None
@@ -85,6 +95,7 @@ class TrustedContactUpsertRequest(BaseModel):
     relationship: Optional[str] = None
     is_primary: Optional[bool] = None
 
+
 class TrustedContact(BaseModel):
     contact_id: str
     name: str
@@ -92,12 +103,14 @@ class TrustedContact(BaseModel):
     relationship: Optional[str] = None
     is_primary: Optional[bool] = None
 
+
 class TrustedContactUpsertResponse(BaseModel):
     user_id: str
     contact_id: str
     status: Literal["contact_upserted"]
     contact: TrustedContact
     updated_at: datetime
+
 
 class UserResponse(BaseModel):
     user_id: str
@@ -107,12 +120,18 @@ class UserResponse(BaseModel):
     created_at: datetime
     last_login: Optional[datetime] = None
 
+
 class TrustedContactsListResponse(BaseModel):
     user_id: str
     contacts: List[TrustedContact]
+
+
 # ========= User Management =========
 
-@app.post("/v1/users/register", response_model=RegisterResponse, tags=["User Management"])
+
+@app.post(
+    "/v1/users/register", response_model=RegisterResponse, tags=["User Management"]
+)
 async def register_user(payload: RegisterRequest):
     user_id = f"usr_{uuid.uuid4().hex[:8]}"
     now = datetime.utcnow()
@@ -135,6 +154,7 @@ async def register_user(payload: RegisterRequest):
         device_id=payload.device_id,
         created_at=now,
     )
+
 
 @app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
 async def login(payload: LoginRequest):
@@ -163,9 +183,12 @@ async def login(payload: LoginRequest):
         last_login=now,
     )
 
-@app.post("/v1/users/{user_id}/preferences",
-          response_model=PreferencesResponse,
-          tags=["User Management"])
+
+@app.post(
+    "/v1/users/{user_id}/preferences",
+    response_model=PreferencesResponse,
+    tags=["User Management"],
+)
 async def save_preferences(user_id: str, payload: PreferencesRequest):
     now = datetime.utcnow()
     users.setdefault(user_id, {"user_id": user_id})
@@ -177,9 +200,12 @@ async def save_preferences(user_id: str, payload: PreferencesRequest):
         updated_at=now,
     )
 
-@app.post("/v1/users/{user_id}/trusted-contacts",
-          response_model=TrustedContactUpsertResponse,
-          tags=["User Management"])
+
+@app.post(
+    "/v1/users/{user_id}/trusted-contacts",
+    response_model=TrustedContactUpsertResponse,
+    tags=["User Management"],
+)
 async def upsert_trusted_contact(user_id: str, payload: TrustedContactUpsertRequest):
     contacts = trusted_contacts.setdefault(user_id, [])
     if payload.contact_id:
@@ -205,9 +231,8 @@ async def upsert_trusted_contact(user_id: str, payload: TrustedContactUpsertRequ
         updated_at=now,
     )
 
-@app.get("/v1/users/{user_id}",
-         response_model=UserResponse,
-         tags=["User Management"])
+
+@app.get("/v1/users/{user_id}", response_model=UserResponse, tags=["User Management"])
 async def get_user(user_id: str):
     u = users.get(user_id)
     if not u:
@@ -223,9 +248,12 @@ async def get_user(user_id: str):
         users[user_id] = u
     return UserResponse(**u)
 
-@app.get("/v1/users/{user_id}/trusted-contacts",
-         response_model=TrustedContactsListResponse,
-         tags=["User Management"])
+
+@app.get(
+    "/v1/users/{user_id}/trusted-contacts",
+    response_model=TrustedContactsListResponse,
+    tags=["User Management"],
+)
 async def list_trusted_contacts(
     user_id: str,
     include_inactive: bool = Query(False, description="Mock flag; no effect in stub"),

@@ -1,9 +1,11 @@
 ##pytest services/notification/tests/test_main.py -q
 
 from fastapi.testclient import TestClient
+
 from services.notification.main import app
 
 client = TestClient(app)
+
 
 def test_create_and_get_notification_status():
     req = {

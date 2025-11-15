@@ -1,0 +1,37 @@
+[tool.black]
+line-length = 88            # max length in a line（default 88）
+skip-string-normalization = false  # Use double quotes
+exclude = '''
+/(
+    \.git
+  | venv
+  | build
+  | dist
+  | migrations
+)/
+'''
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "B", "I"]     # activate rules (E=PEP8, F=flake8, B=bugbear, I=isort)
+ignore = [
+  "E501",    # ignore max length in a line（controlled by black）
+  "B008",    # FastAPI dependency injection pattern
+]
+fix = true
+show-fixes = true
+exclude = [
+  "venv",
+  "build",
+  "dist",
+  "migrations",
+]
+
+# Make Ruff import the same as isort
+[tool.ruff.isort]
+combine-as-imports = true
+force-single-line = false
+known-first-party = ["services", "common", "backend"]
+known-third-party = ["fastapi", "pydantic", "uvicorn"]
+
+
