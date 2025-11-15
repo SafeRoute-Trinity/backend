@@ -1,0 +1,39 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [ main, feature/* ]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Prefer dev requirements if they exist
+          if [ -f "requirements_dev.txt" ]; then
+            pip install -r requirements_dev.txt
+          elif [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          else
+            echo "No requirements file found"
+          fi
+
+      - name: Run pytest
+        run: |
+          if [ -f "pytest.ini" ] || [ -d "tests" ]; then
+            pytest
+          else
+            echo "No tests configured yet, skipping"
+          fi
