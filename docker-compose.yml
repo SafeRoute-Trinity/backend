@@ -1,7 +1,5 @@
-version: "3.9"
-
 services:
-  user_management:
+  user-management-service:
     build:
       context: .
       dockerfile: services/user_management/dockerfile
@@ -9,12 +7,13 @@ services:
     container_name: saferoute-user-management
     platform: linux/amd64
     ports:
-      - "20000:20000"
+      - "20000:80"
     environment:
       - PYTHONUNBUFFERED=1
+      - PORT=80
     restart: unless-stopped
 
-  notification:
+  notification-service:
     build:
       context: .
       dockerfile: services/notification/dockerfile
@@ -22,12 +21,13 @@ services:
     container_name: saferoute-notification
     platform: linux/amd64
     ports:
-      - "20001:20001"
+      - "20001:80"
     environment:
       - PYTHONUNBUFFERED=1
+      - PORT=80
     restart: unless-stopped
 
-  routing_service:
+  routing-service:
     build:
       context: .
       dockerfile: services/routing_service/dockerfile
@@ -35,12 +35,13 @@ services:
     container_name: saferoute-routing-service
     platform: linux/amd64
     ports:
-      - "20002:20002"
+      - "20002:80"
     environment:
       - PYTHONUNBUFFERED=1
+      - PORT=80
     restart: unless-stopped
 
-  safety_scoring:
+  safety-scoring-service:
     build:
       context: .
       dockerfile: services/safety_scoring/dockerfile
@@ -48,12 +49,13 @@ services:
     container_name: saferoute-safety-scoring
     platform: linux/amd64
     ports:
-      - "20003:20003"
+      - "20003:80"
     environment:
       - PYTHONUNBUFFERED=1
+      - PORT=80
     restart: unless-stopped
 
-  feedback:
+  feedback-service:
     build:
       context: .
       dockerfile: services/feedback/dockerfile
@@ -61,12 +63,13 @@ services:
     container_name: saferoute-feedback
     platform: linux/amd64
     ports:
-      - "20004:20004"
+      - "20004:80"
     environment:
       - PYTHONUNBUFFERED=1
+      - PORT=80
     restart: unless-stopped
 
-  sos:
+  sos-service:
     build:
       context: .
       dockerfile: services/sos/dockerfile
@@ -74,7 +77,8 @@ services:
     container_name: saferoute-sos
     platform: linux/amd64
     ports:
-      - "20006:20006"
+      - "20006:80"
     environment:
       - PYTHONUNBUFFERED=1
+      - PORT=80
     restart: unless-stopped
