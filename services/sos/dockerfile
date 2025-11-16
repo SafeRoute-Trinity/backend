@@ -25,8 +25,8 @@ RUN pip install --upgrade pip && \
 # 复制服务代码
 COPY services/sos/ .
 
-# 暴露端口（FastAPI 默认12345）
-EXPOSE 12345
+# 暴露端口（SOS Service 使用 20006）
+EXPOSE 20006
 
 # 启动命令（生产环境建议用 --workers 4）
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "12345"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "20006"]
