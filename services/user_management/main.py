@@ -281,3 +281,14 @@ async def list_trusted_contacts(
         user_id=user_id,
         contacts=[TrustedContact(**c) for c in contacts],
     )
+
+
+@app.get("/auth0/callback", tags=["Auth"])
+@app.post("/auth0/callback", tags=["Auth"])
+async def auth0_callback(code: Optional[str] = None, state: Optional[str] = None):
+    """
+    Placeholder Auth0 OAuth2 callback endpoint.
+
+    Currently just echoes code/state so the URL can be configured in Auth0.
+    """
+    return {"message": "Auth0 callback received", "code": code, "state": state}
