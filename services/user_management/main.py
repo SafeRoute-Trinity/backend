@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
 from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -12,6 +13,13 @@ app = FastAPI(
         "Endpoints return example / in-memory stub data for interactive testing via /docs."
     ),
     version="1.0.0",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # ========= In-memory mock storage =========
@@ -127,6 +135,16 @@ class TrustedContactsListResponse(BaseModel):
 
 
 # ========= User Management =========
+
+
+@app.get("/")
+async def root():
+    return {"service": "user_management", "status": "running"}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "user_management"}
 
 
 @app.post(
