@@ -68,7 +68,7 @@ jobs:
       - name: Build and push user_management image
         uses: docker/build-push-action@v6
         with:
-          context: ./services/user_management
-          file: ./services/user_management/Dockerfile
+          context:  ./backend/services/user_management
+          file:  ./backend/services/user_management/Dockerfile
           push: true
           tags: saferoute/user-management:latest
