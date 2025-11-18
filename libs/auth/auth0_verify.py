@@ -28,6 +28,7 @@ ISSUER = f"https://{AUTH0_DOMAIN}/"
 JWKS_URL = f"{ISSUER}.well-known/jwks.json"
 ALGORITHMS = ["RS256"]
 
+
 # ---------- Security scheme ----------
 security = HTTPBearer()
 
