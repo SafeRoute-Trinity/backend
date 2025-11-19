@@ -12,8 +12,10 @@ services:
       - "12345:12345"
     depends_on:
       - db
+      - postgis  # 添加依赖
     environment:
       - DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/appdb
+      - GEO_DATABASE_URL=postgresql+psycopg2://saferoute:Owen1SL8te@postgis:5432/saferoute_geo  # 新增地理数据库连接
     volumes:
       - ../:/app
 
@@ -30,5 +32,20 @@ services:
     ports:
       - "5432:5432"
 
+  # 新增 PostGIS 服务
+  postgis:
+    image: postgis/postgis:15-3.3
+    container_name: postgis-db
+    restart: always
+    environment:
+      - POSTGRES_USER=saferoute
+      - POSTGRES_PASSWORD=Owen1SL8te
+      - POSTGRES_DB=saferoute_geo
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"  #
+
 volumes:
   postgres_data:
+  postgis_data:  # 新增 PostGIS 数据卷
