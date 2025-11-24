@@ -60,16 +60,16 @@ def test_login_user():
 # 3. Test save preferences API (post)
 # ------------------------------------------------------
 def test_save_preferences():
-    # Login first to get user_id
-    login = client.post(
-        "/v1/auth/login",
+    # Register user first
+    reg = client.post(
+        "/v1/users/register",
         json={
             "email": "pref@example.com",
             "password_hash": "hashx",
             "device_id": "dev_002",
         },
     ).json()
-    user_id = login["user_id"]
+    user_id = reg["user_id"]
 
     payload = {"voice_guidance": "on", "safety_bias": "safest", "units": "metric"}
 
@@ -87,16 +87,16 @@ def test_save_preferences():
 # 4. Test upsert trusted contact API (post)
 # ------------------------------------------------------
 def test_upsert_trusted_contact():
-    # Login first to get user_id
-    login = client.post(
-        "/v1/auth/login",
+    # Register user first
+    reg = client.post(
+        "/v1/users/register",
         json={
             "email": "trusted@example.com",
             "password_hash": "hashz",
             "device_id": "dev_003",
         },
     ).json()
-    user_id = login["user_id"]
+    user_id = reg["user_id"]
 
     payload = {
         "name": "Alice",
@@ -144,15 +144,16 @@ def test_get_user_info():
 # 6. Test list trusted API (post)
 # ------------------------------------------------------
 def test_list_trusted_contacts():
-    login = client.post(
-        "/v1/auth/login",
+    # Register user first
+    reg = client.post(
+        "/v1/users/register",
         json={
             "email": "contactlist@example.com",
             "password_hash": "pw999",
             "device_id": "dev_005",
         },
     ).json()
-    user_id = login["user_id"]
+    user_id = reg["user_id"]
 
     # Add a contact first
     client.post(
