@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -239,12 +239,14 @@ async def register_user(payload: RegisterRequest):
 async def login(payload: LoginRequest):
     existing_id = None
     user_data = None
+    user_found = False  # Track if user exists (regardless of password)
 
     # Try to get user from Redis cache first
     if redis_client.is_connected():
         # Look up user_id by email
         cached_user_id = redis_client.get(_user_email_cache_key(payload.email))
         if cached_user_id:
+            user_found = True  # User exists
             # Get user data from cache
             cached_user = redis_client.get_json(_user_cache_key(cached_user_id))
             if cached_user:
@@ -257,27 +259,26 @@ async def login(payload: LoginRequest):
     if not existing_id:
         for uid, u in users.items():
             if u["email"] == payload.email:
+                user_found = True  # User exists
                 # Verify password hash if stored
                 if u.get("password_hash") == payload.password_hash:
                     existing_id = uid
                     user_data = u
                     break
 
-    # If user not found or password doesn't match, register new user
-    if not existing_id:
-        reg = await register_user(
-            RegisterRequest(
-                email=payload.email,
-                password_hash=payload.password_hash,
-                device_id=payload.device_id,
-            )
+    # If user found but password doesn't match, return error
+    if user_found and not existing_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",
         )
-        existing_id = reg.user_id
-        # Get user data from cache or memory
-        if redis_client.is_connected():
-            user_data = redis_client.get_json(_user_cache_key(existing_id))
-        if not user_data:
-            user_data = users.get(existing_id)
+
+    # If user not found, return error (don't auto-register for security)
+    if not user_found:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password",  # Same message to prevent user enumeration
+        )
 
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"
