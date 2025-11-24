@@ -4,12 +4,15 @@ Automatically detects environment (local dev, Docker, K8s) and configures connec
 """
 
 import json
+import logging
 import os
 from typing import Any, Optional
 
 import redis
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import RedisError
+
+logger = logging.getLogger(__name__)
 
 
 class RedisClient:
@@ -27,7 +30,8 @@ class RedisClient:
             or os.getenv("KUBERNETES_SERVICE_HOST") is not None
         )
 
-        if not IS_IN_CONTAINER and not os.getenv("LOCAL_DEV") == "false":
+        # If not in container and LOCAL_DEV is not explicitly "false", assume local dev
+        if not IS_IN_CONTAINER and os.getenv("LOCAL_DEV", "").lower() != "false":
             IS_LOCAL_DEV = True
 
         # Get Redis configuration from environment variables
@@ -59,9 +63,14 @@ class RedisClient:
 
             # Test connection
             self._client.ping()
+            logger.info(
+                f"Redis connected: host={redis_host}, port={redis_port}, db={redis_db}"
+            )
         except (RedisConnectionError, RedisError) as e:
-            print(f"Warning: Redis connection failed: {e}")
-            print(f"Redis config: host={redis_host}, port={redis_port}, db={redis_db}")
+            logger.warning(f"Redis connection failed: {e}")
+            logger.warning(
+                f"Redis config: host={redis_host}, port={redis_port}, db={redis_db}"
+            )
             # In development, allow service to start without Redis
             # In production, this should fail
             if not IS_LOCAL_DEV:
@@ -96,7 +105,7 @@ class RedisClient:
         try:
             return self._client.get(key)
         except (RedisConnectionError, RedisError) as e:
-            print(f"Redis GET error for key {key}: {e}")
+            logger.error(f"Redis GET error for key {key}: {e}")
             return None
 
     def set(self, key: str, value: str, ttl: Optional[int] = None) -> bool:
@@ -109,7 +118,7 @@ class RedisClient:
             else:
                 return self._client.set(key, value)
         except (RedisConnectionError, RedisError) as e:
-            print(f"Redis SET error for key {key}: {e}")
+            logger.error(f"Redis SET error for key {key}: {e}")
             return False
 
     def delete(self, key: str) -> bool:
@@ -119,7 +128,7 @@ class RedisClient:
         try:
             return bool(self._client.delete(key))
         except (RedisConnectionError, RedisError) as e:
-            print(f"Redis DELETE error for key {key}: {e}")
+            logger.error(f"Redis DELETE error for key {key}: {e}")
             return False
 
     def exists(self, key: str) -> bool:
@@ -129,7 +138,7 @@ class RedisClient:
         try:
             return bool(self._client.exists(key))
         except (RedisConnectionError, RedisError) as e:
-            print(f"Redis EXISTS error for key {key}: {e}")
+            logger.error(f"Redis EXISTS error for key {key}: {e}")
             return False
 
     def set_json(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
@@ -138,7 +147,7 @@ class RedisClient:
             json_str = json.dumps(value, default=str)
             return self.set(key, json_str, ttl)
         except (TypeError, ValueError) as e:
-            print(f"JSON serialization error for key {key}: {e}")
+            logger.error(f"JSON serialization error for key {key}: {e}")
             return False
 
     def get_json(self, key: str) -> Optional[Any]:
@@ -149,7 +158,7 @@ class RedisClient:
         try:
             return json.loads(json_str)
         except (TypeError, ValueError) as e:
-            print(f"JSON deserialization error for key {key}: {e}")
+            logger.error(f"JSON deserialization error for key {key}: {e}")
             return None
 
     def get_ttl(self, key: str) -> Optional[int]:
@@ -160,7 +169,7 @@ class RedisClient:
             ttl = self._client.ttl(key)
             return ttl if ttl >= 0 else None
         except (RedisConnectionError, RedisError) as e:
-            print(f"Redis TTL error for key {key}: {e}")
+            logger.error(f"Redis TTL error for key {key}: {e}")
             return None
 
 
