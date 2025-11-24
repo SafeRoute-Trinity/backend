@@ -60,7 +60,7 @@ def test_login_user():
 # 3. Test save preferences API (post)
 # ------------------------------------------------------
 def test_save_preferences():
-    # 先登入拿 user_id
+    # Login first to get user_id
     login = client.post(
         "/v1/auth/login",
         json={
@@ -87,7 +87,7 @@ def test_save_preferences():
 # 4. Test upsert trusted contact API (post)
 # ------------------------------------------------------
 def test_upsert_trusted_contact():
-    # 先登入拿 user_id
+    # Login first to get user_id
     login = client.post(
         "/v1/auth/login",
         json={
@@ -119,7 +119,7 @@ def test_upsert_trusted_contact():
 # 5. Test get user API (post)
 # ------------------------------------------------------
 def test_get_user_info():
-    # 先建立 user
+    # Create user first
     reg = client.post(
         "/v1/users/register",
         json={
@@ -130,7 +130,7 @@ def test_get_user_info():
     ).json()
     user_id = reg["user_id"]
 
-    # 查詢 user
+    # Query user
     response = client.get(f"/v1/users/{user_id}")
     assert response.status_code == 200
 
@@ -154,7 +154,7 @@ def test_list_trusted_contacts():
     ).json()
     user_id = login["user_id"]
 
-    # 先加一個聯絡人
+    # Add a contact first
     client.post(
         f"/v1/users/{user_id}/trusted-contacts",
         json={"name": "Bob", "phone": "+353800000222"},
