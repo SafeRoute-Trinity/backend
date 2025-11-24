@@ -235,6 +235,18 @@ def test_register_user():
 # 2. Test login API (post)
 # ------------------------------------------------------
 def test_login_user():
+    # Register user first to ensure user exists
+    reg = client.post(
+        "/v1/users/register",
+        json={
+            "email": "testuser@example.com",
+            "password_hash": "hash123",
+            "device_id": "dev_001",
+        },
+    )
+    assert reg.status_code == 200
+
+    # Now login with correct credentials
     payload = {
         "email": "testuser@example.com",
         "password_hash": "hash123",
@@ -250,6 +262,51 @@ def test_login_user():
     assert "user_id" in data
     assert "auth" in data
     assert data["auth"]["token"].startswith("atk_")
+
+
+# ------------------------------------------------------
+# 2b. Test login with wrong password
+# ------------------------------------------------------
+def test_login_wrong_password():
+    # Register user first
+    reg = client.post(
+        "/v1/users/register",
+        json={
+            "email": "wrongpass@example.com",
+            "password_hash": "correct_hash",
+            "device_id": "dev_001",
+        },
+    )
+    assert reg.status_code == 200
+
+    # Try to login with wrong password
+    response = client.post(
+        "/v1/auth/login",
+        json={
+            "email": "wrongpass@example.com",
+            "password_hash": "wrong_hash",
+            "device_id": "dev_001",
+        },
+    )
+    assert response.status_code == 401
+    assert "Invalid email or password" in response.json()["detail"]
+
+
+# ------------------------------------------------------
+# 2c. Test login with non-existent user
+# ------------------------------------------------------
+def test_login_nonexistent_user():
+    # Try to login with non-existent user
+    response = client.post(
+        "/v1/auth/login",
+        json={
+            "email": "nonexistent@example.com",
+            "password_hash": "any_hash",
+            "device_id": "dev_001",
+        },
+    )
+    assert response.status_code == 401
+    assert "Invalid email or password" in response.json()["detail"]
 
 
 # ------------------------------------------------------
