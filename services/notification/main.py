@@ -2,12 +2,15 @@
 # uvicorn services.notification.main:app --host 0.0.0.0 --port 20001 --reload
 # Docs: http://127.0.0.1:20001/docs
 
+import time
 import uuid
 from datetime import datetime
 from typing import Dict, Literal, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import (CONTENT_TYPE_LATEST, Counter, Histogram,
+                               generate_latest)
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -24,6 +27,67 @@ app.add_middleware(
 )
 
 NOTIFICATIONS = {}
+
+# ========= Metrics =========
+
+SERVICE_NAME = "notification"
+
+# Generic per-request counter
+REQUEST_COUNT = Counter(
+    "service_requests_total",
+    "Total HTTP requests handled by the service",
+    ["service", "method", "path", "http_status"],
+)
+
+# Latency histogram
+REQUEST_LATENCY = Histogram(
+    "service_request_duration_seconds",
+    "Request latency in seconds",
+    ["service", "path"],
+)
+
+# Business metrics
+NOTIFICATION_SOS_CREATED_TOTAL = Counter(
+    "notification_sos_created_total",
+    "Total number of SOS notifications created",
+)
+
+NOTIFICATION_STATUS_CHECKS_TOTAL = Counter(
+    "notification_status_checks_total",
+    "Total number of notification status lookups",
+)
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    """
+    Track:
+    - request count
+    - latency per path
+    """
+    start = time.time()
+    response = await call_next(request)
+
+    path = request.url.path
+
+    # Count requests
+    REQUEST_COUNT.labels(
+        service=SERVICE_NAME,
+        method=request.method,
+        path=path,
+        http_status=response.status_code,
+    ).inc()
+
+    # Request time
+    REQUEST_LATENCY.labels(
+        service=SERVICE_NAME,
+        path=path,
+    ).observe(time.time() - start)
+
+    return response
+
+
+# ========= Models =========
 
 
 class Location(BaseModel):
@@ -66,6 +130,9 @@ class StatusResp(BaseModel):
     updated_at: datetime
 
 
+# ========= Routes =========
+
+
 @app.get("/")
 async def root():
     return {"service": "notification", "status": "running"}
@@ -78,6 +145,9 @@ async def health():
 
 @app.post("/v1/notifications/sos", response_model=CreateResp)
 async def create_sos(body: SOSNotificationRequest):
+    # Business metric: count new SOS notifications
+    NOTIFICATION_SOS_CREATED_TOTAL.inc()
+
     nid = f"ntf_{uuid.uuid4().hex[:6]}"
     now = datetime.utcnow()
     NOTIFICATIONS[nid] = {
@@ -93,6 +163,9 @@ async def create_sos(body: SOSNotificationRequest):
 
 @app.get("/v1/notifications/{notification_id}", response_model=StatusResp)
 async def get_status(notification_id: str):
+    # Business metric: count status lookups
+    NOTIFICATION_STATUS_CHECKS_TOTAL.inc()
+
     ntf = NOTIFICATIONS.get(notification_id)
     now = datetime.utcnow()
     if not ntf:
@@ -105,3 +178,8 @@ async def get_status(notification_id: str):
             "updated_at": now,
         }
     return StatusResp(**ntf)
+
+
+@app.get("/metrics")
+async def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
