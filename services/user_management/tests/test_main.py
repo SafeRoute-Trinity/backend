@@ -39,6 +39,18 @@ def test_register_user():
 # 2. Test login API (post)
 # ------------------------------------------------------
 def test_login_user():
+    # Register user first to ensure user exists
+    reg = client.post(
+        "/v1/users/register",
+        json={
+            "email": "testuser@example.com",
+            "password_hash": "hash123",
+            "device_id": "dev_001",
+        },
+    )
+    assert reg.status_code == 200
+
+    # Now login with correct credentials
     payload = {
         "email": "testuser@example.com",
         "password_hash": "hash123",
@@ -57,19 +69,64 @@ def test_login_user():
 
 
 # ------------------------------------------------------
+# 2b. Test login with wrong password
+# ------------------------------------------------------
+def test_login_wrong_password():
+    # Register user first
+    reg = client.post(
+        "/v1/users/register",
+        json={
+            "email": "wrongpass@example.com",
+            "password_hash": "correct_hash",
+            "device_id": "dev_001",
+        },
+    )
+    assert reg.status_code == 200
+
+    # Try to login with wrong password
+    response = client.post(
+        "/v1/auth/login",
+        json={
+            "email": "wrongpass@example.com",
+            "password_hash": "wrong_hash",
+            "device_id": "dev_001",
+        },
+    )
+    assert response.status_code == 401
+    assert "Invalid email or password" in response.json()["detail"]
+
+
+# ------------------------------------------------------
+# 2c. Test login with non-existent user
+# ------------------------------------------------------
+def test_login_nonexistent_user():
+    # Try to login with non-existent user
+    response = client.post(
+        "/v1/auth/login",
+        json={
+            "email": "nonexistent@example.com",
+            "password_hash": "any_hash",
+            "device_id": "dev_001",
+        },
+    )
+    assert response.status_code == 401
+    assert "Invalid email or password" in response.json()["detail"]
+
+
+# ------------------------------------------------------
 # 3. Test save preferences API (post)
 # ------------------------------------------------------
 def test_save_preferences():
-    # 先登入拿 user_id
-    login = client.post(
-        "/v1/auth/login",
+    # Register user first
+    reg = client.post(
+        "/v1/users/register",
         json={
             "email": "pref@example.com",
             "password_hash": "hashx",
             "device_id": "dev_002",
         },
     ).json()
-    user_id = login["user_id"]
+    user_id = reg["user_id"]
 
     payload = {"voice_guidance": "on", "safety_bias": "safest", "units": "metric"}
 
@@ -87,16 +144,16 @@ def test_save_preferences():
 # 4. Test upsert trusted contact API (post)
 # ------------------------------------------------------
 def test_upsert_trusted_contact():
-    # 先登入拿 user_id
-    login = client.post(
-        "/v1/auth/login",
+    # Register user first
+    reg = client.post(
+        "/v1/users/register",
         json={
             "email": "trusted@example.com",
             "password_hash": "hashz",
             "device_id": "dev_003",
         },
     ).json()
-    user_id = login["user_id"]
+    user_id = reg["user_id"]
 
     payload = {
         "name": "Alice",
@@ -119,7 +176,7 @@ def test_upsert_trusted_contact():
 # 5. Test get user API (post)
 # ------------------------------------------------------
 def test_get_user_info():
-    # 先建立 user
+    # Create user first
     reg = client.post(
         "/v1/users/register",
         json={
@@ -130,7 +187,7 @@ def test_get_user_info():
     ).json()
     user_id = reg["user_id"]
 
-    # 查詢 user
+    # Query user
     response = client.get(f"/v1/users/{user_id}")
     assert response.status_code == 200
 
@@ -144,17 +201,18 @@ def test_get_user_info():
 # 6. Test list trusted API (post)
 # ------------------------------------------------------
 def test_list_trusted_contacts():
-    login = client.post(
-        "/v1/auth/login",
+    # Register user first
+    reg = client.post(
+        "/v1/users/register",
         json={
             "email": "contactlist@example.com",
             "password_hash": "pw999",
             "device_id": "dev_005",
         },
     ).json()
-    user_id = login["user_id"]
+    user_id = reg["user_id"]
 
-    # 先加一個聯絡人
+    # Add a contact first
     client.post(
         f"/v1/users/{user_id}/trusted-contacts",
         json={"name": "Bob", "phone": "+353800000222"},
