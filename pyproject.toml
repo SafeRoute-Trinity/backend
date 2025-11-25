@@ -29,9 +29,9 @@ exclude = [
 
 # Make Ruff import the same as isort
 [tool.ruff.isort]
-combine-as-imports = true
+combine-as-imports = false
 force-single-line = false
 known-first-party = ["services", "common", "backend"]
-known-third-party = ["fastapi", "pydantic", "uvicorn"]
+known-third-party = ["fastapi", "pydantic", "uvicorn", "redis"]
 
 

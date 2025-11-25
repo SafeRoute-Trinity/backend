@@ -85,6 +85,11 @@ async def health():
     return {"status": "ok", "service": "feedback"}
 
 
+@app.get("/v1/feedback/metrics")
+async def metrics():
+    return {"service": "feedback", "status": "running"}
+
+
 @app.post("/v1/feedback/submit", response_model=FeedbackSubmitResponse)
 async def submit(body: FeedbackSubmitRequest):
     now = datetime.utcnow()
