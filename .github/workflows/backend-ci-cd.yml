@@ -37,25 +37,22 @@ jobs:
             echo "No requirements file found" && exit 1
           fi
 
-      - name: Run linting tools (in correct order)
+      - name: Run linting checks (in correct order)
         run: |
           set -e
-          echo "Running ruff (linting and import sorting)..."
-          ruff check . --fix || true
-          ruff format . || true
+          echo "Running ruff (linting check)..."
+          ruff check .
           
-          echo "Running isort (import sorting)..."
-          isort . || true
+          echo "Running ruff format check..."
+          ruff format --check .
           
-          echo "Running black (code formatting)..."
-          black . || true
+          echo "Running isort check..."
+          isort . --check-only
           
-          echo "Linting complete"
-
-      - name: Run pre-commit hooks
-        run: |
-          set -e
-          pre-commit run --all-files || true
+          echo "Running black check..."
+          black . --check
+          
+          echo "All linting checks passed"
 
       - name: Run pytest (unit tests)
         run: |
