@@ -8,8 +8,13 @@ from typing import Dict, List, Literal, Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (CONTENT_TYPE_LATEST, Counter, Histogram,
-                               generate_latest)
+from prometheus_client import(
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -28,12 +33,14 @@ app.add_middleware(
 # ========= Metrics =========
 
 SERVICE_NAME = "safety_scoring"
+registry = CollectorRegistry()
 
 # Generic per-request counter (shared schema across services)
 REQUEST_COUNT = Counter(
     "service_requests_total",
     "Total HTTP requests handled by the service",
     ["service", "method", "path", "http_status"],
+    registry=registry,
 )
 
 # Latency histogram per path
@@ -41,24 +48,27 @@ REQUEST_LATENCY = Histogram(
     "service_request_duration_seconds",
     "Request latency in seconds",
     ["service", "path"],
+    registry=registry,
 )
 
 # Business metrics for this service
 SAFETY_SCORE_ROUTE_REQUESTS_TOTAL = Counter(
     "safety_score_route_requests_total",
     "Total number of safety route scoring requests",
+    registry=registry,
 )
 
 SAFETY_FACTORS_QUERIES_TOTAL = Counter(
     "safety_factors_queries_total",
     "Total number of safety factors queries",
+    registry=registry,
 )
 
 SAFETY_WEIGHTS_UPDATES_TOTAL = Counter(
     "safety_weights_updates_total",
     "Total number of safety weights update requests",
+    registry=registry,
 )
-
 
 @app.middleware("http")
 async def prometheus_middleware(request: Request, call_next):
@@ -253,4 +263,4 @@ async def metrics():
     """
     Expose Prometheus metrics for this Safety Scoring service.
     """
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

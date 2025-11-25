@@ -9,8 +9,13 @@ from typing import Dict, Literal, Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (CONTENT_TYPE_LATEST, Counter, Histogram,
-                               generate_latest)
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -31,12 +36,14 @@ NOTIFICATIONS = {}
 # ========= Metrics =========
 
 SERVICE_NAME = "notification"
+registry = CollectorRegistry()
 
 # Generic per-request counter
 REQUEST_COUNT = Counter(
     "service_requests_total",
     "Total HTTP requests handled by the service",
     ["service", "method", "path", "http_status"],
+    registry=registry,
 )
 
 # Latency histogram
@@ -44,18 +51,22 @@ REQUEST_LATENCY = Histogram(
     "service_request_duration_seconds",
     "Request latency in seconds",
     ["service", "path"],
+    registry=registry,
 )
 
 # Business metrics
 NOTIFICATION_SOS_CREATED_TOTAL = Counter(
     "notification_sos_created_total",
     "Total number of SOS notifications created",
+    registry=registry,
 )
 
 NOTIFICATION_STATUS_CHECKS_TOTAL = Counter(
     "notification_status_checks_total",
     "Total number of notification status lookups",
+    registry=registry,
 )
+
 
 
 @app.middleware("http")
@@ -182,4 +193,4 @@ async def get_status(notification_id: str):
 
 @app.get("/metrics")
 async def metrics():
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

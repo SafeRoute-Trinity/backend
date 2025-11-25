@@ -9,8 +9,13 @@ from typing import List, Literal, Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (CONTENT_TYPE_LATEST, Counter, Histogram,
-                               generate_latest)
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -32,12 +37,14 @@ NAV = {}
 # ========= Metrics =========
 
 SERVICE_NAME = "routing_service"
+registry = CollectorRegistry()
 
 # Generic per-request counter (shared schema across services)
 REQUEST_COUNT = Counter(
     "service_requests_total",
     "Total HTTP requests handled by the service",
     ["service", "method", "path", "http_status"],
+    registry=registry,
 )
 
 # Latency histogram per path
@@ -45,22 +52,27 @@ REQUEST_LATENCY = Histogram(
     "service_request_duration_seconds",
     "Request latency in seconds",
     ["service", "path"],
+    registry=registry,
 )
 
 # Business metrics for routing service
 ROUTING_ROUTE_CALCULATIONS_TOTAL = Counter(
     "routing_route_calculations_total",
     "Total number of initial route calculation requests",
+    registry=registry,
 )
 
 ROUTING_ROUTE_RECALCULATIONS_TOTAL = Counter(
     "routing_route_recalculations_total",
     "Total number of route recalculation requests",
+    registry=registry,
 )
+
 
 ROUTING_NAVIGATION_STARTS_TOTAL = Counter(
     "routing_navigation_starts_total",
     "Total number of navigation sessions started",
+    registry=registry,
 )
 
 
@@ -226,4 +238,4 @@ async def metrics():
     """
     Expose Prometheus metrics for this Routing service.
     """
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

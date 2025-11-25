@@ -9,8 +9,14 @@ from typing import Literal
 
 from fastapi import FastAPI, Path, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (CONTENT_TYPE_LATEST, Counter, Histogram,
-                               generate_latest)
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
+
 from pydantic import BaseModel, HttpUrl
 
 app = FastAPI(
@@ -29,12 +35,14 @@ STATUS = {}
 # ========= Metrics =========
 
 SERVICE_NAME = "sos"
+registry = CollectorRegistry()
 
 # Generic per-request counter (shared schema with other services)
 REQUEST_COUNT = Counter(
     "service_requests_total",
     "Total HTTP requests handled by the service",
     ["service", "method", "path", "http_status"],
+    registry=registry,
 )
 
 # Latency histogram per path
@@ -42,18 +50,22 @@ REQUEST_LATENCY = Histogram(
     "service_request_duration_seconds",
     "Request latency in seconds",
     ["service", "path"],
+    registry=registry,
 )
 
 # Business metrics: SOS call & SMS usage
 SOS_CALLS_TOTAL = Counter(
     "sos_calls_total",
     "Total SOS emergency calls initiated",
+    registry=registry,
 )
 
 SOS_SMS_TOTAL = Counter(
     "sos_sms_total",
     "Total SOS emergency SMS sent",
+    registry=registry,
 )
+
 
 
 @app.middleware("http")
@@ -193,4 +205,4 @@ async def metrics():
     """
     Expose Prometheus metrics for this SOS service.
     """
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

@@ -5,8 +5,14 @@ from typing import Dict, List, Literal, Optional
 
 from fastapi import FastAPI, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (CONTENT_TYPE_LATEST, Counter, Histogram,
-                               generate_latest)
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
+
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -39,12 +45,14 @@ emergency_status: Dict[str, dict] = {}
 # ========= Metrics =========
 
 SERVICE_NAME = "user_management"
+registry = CollectorRegistry()
 
 # Generic per-request counter: can be shared across all services
 REQUEST_COUNT = Counter(
     "service_requests_total",
     "Total HTTP requests handled by the service",
     ["service", "method", "path", "http_status"],
+    registry=registry,
 )
 
 # Request latency histogram per path
@@ -52,12 +60,14 @@ REQUEST_LATENCY = Histogram(
     "service_request_duration_seconds",
     "Request latency in seconds",
     ["service", "path"],
+    registry=registry,
 )
 
 # Business metric: total user registrations
 USER_REGISTRATION_TOTAL = Counter(
     "user_registrations_total",
     "Total user registrations",
+    registry=registry,
 )
 
 
@@ -365,4 +375,4 @@ async def metrics_endpoint():
     Expose Prometheus metrics for this service.
     Prometheus will scrape this endpoint inside the cluster.
     """
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

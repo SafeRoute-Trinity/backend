@@ -9,8 +9,13 @@ from typing import List, Literal, Optional
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (CONTENT_TYPE_LATEST, Counter, Histogram,
-                               generate_latest)
+from prometheus_client import (
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
 from pydantic import BaseModel, HttpUrl
 
 app = FastAPI(
@@ -31,12 +36,14 @@ FEEDBACK = {}
 # ========= PROMETHEUS METRICS =========
 
 SERVICE_NAME = "feedback"
+registry = CollectorRegistry()
 
 # Generic request counter
 REQUEST_COUNT = Counter(
     "service_requests_total",
     "Total HTTP requests handled by the service",
     ["service", "method", "path", "http_status"],
+    registry=registry,
 )
 
 # Request latency
@@ -44,22 +51,27 @@ REQUEST_LATENCY = Histogram(
     "service_request_duration_seconds",
     "Request latency in seconds",
     ["service", "path"],
+    registry=registry,
 )
 
 # Business-specific metrics
 FEEDBACK_SUBMISSIONS_TOTAL = Counter(
     "feedback_submissions_total",
     "Total feedback submissions received",
+    registry=registry,
 )
 
 FEEDBACK_VALIDATIONS_TOTAL = Counter(
     "feedback_validations_total",
     "Total feedback validation attempts",
+    registry=registry,
 )
+
 
 FEEDBACK_STATUS_CHECKS_TOTAL = Counter(
     "feedback_status_checks_total",
     "Total feedback status lookups",
+    registry=registry,  
 )
 
 
@@ -219,4 +231,4 @@ async def status(feedback_id: str):
 
 @app.get("/metrics")
 async def metrics():
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
