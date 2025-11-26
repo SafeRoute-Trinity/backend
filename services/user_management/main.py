@@ -1,11 +1,19 @@
 import os
 import sys
+import time
 import uuid
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 from pydantic import BaseModel
 
 # for postgresql
@@ -72,6 +80,66 @@ feedback_store: Dict[str, dict] = {}
 audit_logs: List[dict] = []
 data_batches: Dict[str, dict] = {}
 emergency_status: Dict[str, dict] = {}
+
+# ========= Shared Models =========
+# ========= Metrics =========
+
+SERVICE_NAME = "user_management"
+registry = CollectorRegistry()
+
+# Generic per-request counter: can be shared across all services
+REQUEST_COUNT = Counter(
+    "service_requests_total",
+    "Total HTTP requests handled by the service",
+    ["service", "method", "path", "http_status"],
+    registry=registry,
+)
+
+# Request latency histogram per path
+REQUEST_LATENCY = Histogram(
+    "service_request_duration_seconds",
+    "Request latency in seconds",
+    ["service", "path"],
+    registry=registry,
+)
+
+# Business metric: total user registrations
+USER_REGISTRATION_TOTAL = Counter(
+    "user_registrations_total",
+    "Total user registrations",
+    registry=registry,
+)
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    """
+    Middleware to measure:
+    - request count
+    - latency per path
+    for every HTTP request handled by this service.
+    """
+    start = time.time()
+    response = await call_next(request)
+
+    path = request.url.path
+
+    # Increment per-request counter
+    REQUEST_COUNT.labels(
+        service=SERVICE_NAME,
+        method=request.method,
+        path=path,
+        http_status=response.status_code,
+    ).inc()
+
+    # Record latency
+    REQUEST_LATENCY.labels(
+        service=SERVICE_NAME,
+        path=path,
+    ).observe(time.time() - start)
+
+    return response
+
 
 # ========= Shared Models =========
 
@@ -266,6 +334,9 @@ async def register_user(
         redis_client.set_json(
             _auth_token_cache_key(token), auth_data, ttl=AUTH_TOKEN_TTL
         )
+
+    # Business metric: bump registrations counter
+    USER_REGISTRATION_TOTAL.inc()
 
     return RegisterResponse(
         user_id=user_id,
@@ -633,3 +704,15 @@ async def auth0_callback(code: Optional[str] = None, state: Optional[str] = None
     Currently just echoes code/state so the URL can be configured in Auth0.
     """
     return {"message": "Auth0 callback received", "code": code, "state": state}
+
+
+# ========= Metrics endpoint for Prometheus =========
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """
+    Expose Prometheus metrics for this service.
+    Prometheus will scrape this endpoint inside the cluster.
+    """
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

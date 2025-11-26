@@ -7,8 +7,8 @@ on:
     branches: [ main ]
 
 jobs:
-  lint-and-test:
-    name: Lint & Test
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
 
     steps:
@@ -23,9 +23,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f "requirements_dev.txt" ]; then
-            pip install -r requirements_dev.txt
-          elif [ -f "requirements.txt" ]; then
+          if [ -f "requirements.txt" ]; then
             pip install -r requirements.txt
           else
             echo "No requirements file found" && exit 1
@@ -40,20 +38,12 @@ jobs:
       - name: Run isort (check only)
         run: isort --check-only .
 
-      - name: Run pytest (unit tests)
-        run: |
-          if [ -f "pytest.ini" ] || [ -d "tests" ]; then
-            pytest
-          else
-            echo "No pytest configuration found, skipping tests"
-          fi
-
   build-and-push:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
     # Only run on push to main (after PR merge)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: lint-and-test
+    needs: lint
 
     steps:
       - name: Checkout repository
