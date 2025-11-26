@@ -303,7 +303,7 @@ async def get_route(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid coordinate format. Expected 'lat,lon'. Error: {e}",
-            )
+            ) from e
 
         # Validate coordinates
         if not (-90 <= start_coords[0] <= 90 and -180 <= start_coords[1] <= 180):
@@ -362,7 +362,7 @@ async def get_route(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
-        )
+        ) from e
 
 
 @app.get("/isochrone")
@@ -398,7 +398,7 @@ async def get_isochrone(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid coordinate format. Expected 'lat,lon'. Error: {e}",
-            )
+            ) from e
 
         # Validate coordinates
         if not (-90 <= location_coords[0] <= 90 and -180 <= location_coords[1] <= 180):
@@ -416,7 +416,7 @@ async def get_isochrone(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid range format. Expected comma-separated integers. Error: {e}",
-            )
+            ) from e
 
         # Validate range_type
         if range_type not in ["time", "distance"]:
@@ -473,4 +473,4 @@ async def get_isochrone(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}",
-        )
+        ) from e

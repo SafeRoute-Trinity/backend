@@ -112,7 +112,7 @@ class OpenRouteServiceClient:
         self,
         location: tuple[float, float],
         profile: str = "driving-car",
-        range: List[int] = [600, 1200, 1800],  # seconds
+        range: Optional[List[int]] = None,  # seconds
         range_type: str = "time",
     ) -> Optional[Dict[str, Any]]:
         """
@@ -130,6 +130,10 @@ class OpenRouteServiceClient:
         if not self._is_enabled():
             logger.error("OpenRouteService is not enabled (missing API key)")
             return None
+
+        # Initialize range if not provided
+        if range is None:
+            range = [600, 1200, 1800]
 
         try:
             # OpenRouteService expects coordinates as [lon, lat]
