@@ -37,10 +37,17 @@ ignore = [
 ]
 
 # Make Ruff import the same as isort
+<<<<<<< HEAD
 [tool.ruff.lint.isort]
 combine-as-imports = false
 force-single-line = false
 known-first-party = ["services", "common", "backend", "libs", "models"]
+=======
+[tool.ruff.isort]
+combine-as-imports = false
+force-single-line = false
+known-first-party = ["services", "common", "backend"]
+>>>>>>> 05386e8 (fix: Align ruff and isort import formatting configuration)
 known-third-party = ["fastapi", "pydantic", "uvicorn", "redis"]
 
 
