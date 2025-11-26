@@ -8,6 +8,16 @@ from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+#for postgresql
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Depends
+
+from libs.db import get_db
+from models.user_models import User
+
+
 # Add parent directory to path to import libs
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from libs.redis_client import get_redis_client
@@ -180,39 +190,74 @@ async def health():
     redis_status = "connected" if redis_client.is_connected() else "disconnected"
     return {"status": "ok", "service": "user_management", "redis": redis_status}
 
-
+#
 @app.post(
     "/v1/users/register", response_model=RegisterResponse, tags=["User Management"]
 )
-async def register_user(payload: RegisterRequest):
+##add db session dependency
+async def register_user(
+    payload: RegisterRequest,
+    db: AsyncSession = Depends(get_db),
+):
     user_id = f"usr_{uuid.uuid4().hex[:8]}"
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
-    # Prepare user data
+    # 1) 先检查 email 是否已存在（防止重复注册）
+    result = await db.execute(select(User).where(User.email == payload.email))
+    existing = result.scalar_one_or_none()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered",
+        )
+
+    # 2) 写入 PostgreSQL
+    user = User(
+        user_id=user_id,
+        email=payload.email,
+        password_hash=payload.password_hash,
+        device_id=payload.device_id,
+        phone=payload.phone,
+        name=payload.name,
+        created_at=now,
+        last_login=None,
+    )
+
+    db.add(user)
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not create user",
+        )
+
+    # 3) 准备一份 dict 给 Redis / 内存
     user_data = {
         "user_id": user_id,
         "email": payload.email,
         "phone": payload.phone,
         "name": payload.name,
         "device_id": payload.device_id,
-        "password_hash": payload.password_hash,  # Store password hash for authentication
+        "password_hash": payload.password_hash,
         "created_at": now.isoformat(),
         "last_login": None,
     }
 
-    # Store in memory (fallback)
-    users[user_id] = user_data.copy()
-    users[user_id]["created_at"] = now
-    users[user_id]["last_login"] = None
+    # 内存里存一份（兼容你原来的结构，可以以后慢慢删）
+    users[user_id] = {
+        **user_data,
+        "created_at": now,
+        "last_login": None,
+    }
 
-    # Cache in Redis
+    # 4) 写 Redis 缓存（和你原来一样）
     if redis_client.is_connected():
-        # Cache user data by user_id
         redis_client.set_json(_user_cache_key(user_id), user_data, ttl=CACHE_TTL)
-        # Cache user_id lookup by email
         redis_client.set(_user_email_cache_key(payload.email), user_id, ttl=CACHE_TTL)
-        # Cache auth token
+
         auth_data = {
             "user_id": user_id,
             "email": payload.email,
@@ -234,85 +279,211 @@ async def register_user(payload: RegisterRequest):
         created_at=now,
     )
 
+# async def register_user(payload: RegisterRequest):
+#     user_id = f"usr_{uuid.uuid4().hex[:8]}"
+#     now = datetime.utcnow()
+#     token = f"atk_{uuid.uuid4().hex[:6]}"
+
+#     # Prepare user data
+#     user_data = {
+#         "user_id": user_id,
+#         "email": payload.email,
+#         "phone": payload.phone,
+#         "name": payload.name,
+#         "device_id": payload.device_id,
+#         "password_hash": payload.password_hash,  # Store password hash for authentication
+#         "created_at": now.isoformat(),
+#         "last_login": None,
+#     }
+
+#     # Store in memory (fallback)
+#     users[user_id] = user_data.copy()
+#     users[user_id]["created_at"] = now
+#     users[user_id]["last_login"] = None
+
+#     # Cache in Redis
+#     if redis_client.is_connected():
+#         # Cache user data by user_id
+#         redis_client.set_json(_user_cache_key(user_id), user_data, ttl=CACHE_TTL)
+#         # Cache user_id lookup by email
+#         redis_client.set(_user_email_cache_key(payload.email), user_id, ttl=CACHE_TTL)
+#         # Cache auth token
+#         auth_data = {
+#             "user_id": user_id,
+#             "email": payload.email,
+#             "expires_in": AUTH_TOKEN_TTL,
+#             "created_at": now.isoformat(),
+#         }
+#         redis_client.set_json(
+#             _auth_token_cache_key(token), auth_data, ttl=AUTH_TOKEN_TTL
+#         )
+
+#     return RegisterResponse(
+#         user_id=user_id,
+#         status="created",
+#         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
+#         email=payload.email,
+#         phone=payload.phone,
+#         name=payload.name,
+#         device_id=payload.device_id,
+#         created_at=now,
+#     )
+
+
 
 @app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
-async def login(payload: LoginRequest):
-    existing_id = None
-    user_data = None
-    user_found = False  # Track if user exists (regardless of password)
+@app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
+async def login(
+    payload: LoginRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    now = datetime.utcnow()
+    token = f"atk_{uuid.uuid4().hex[:6]}"
 
-    # Try to get user from Redis cache first
-    if redis_client.is_connected():
-        # Look up user_id by email
-        cached_user_id = redis_client.get(_user_email_cache_key(payload.email))
-        if cached_user_id:
-            user_found = True  # User exists
-            # Get user data from cache
-            cached_user = redis_client.get_json(_user_cache_key(cached_user_id))
-            if cached_user:
-                # Verify password hash
-                if cached_user.get("password_hash") == payload.password_hash:
-                    existing_id = cached_user_id
-                    user_data = cached_user
+    # 先从 PostgreSQL 查用户
+    result = await db.execute(select(User).where(User.email == payload.email))
+    user = result.scalar_one_or_none()
 
-    # Fallback to in-memory storage
-    if not existing_id:
-        for uid, u in users.items():
-            if u["email"] == payload.email:
-                user_found = True  # User exists
-                # Verify password hash if stored
-                if u.get("password_hash") == payload.password_hash:
-                    existing_id = uid
-                    user_data = u
-                    break
-
-    # If user found but password doesn't match, return error
-    if user_found and not existing_id:
+    if not user or user.password_hash != payload.password_hash:
+        # 不区分“用户不存在”和“密码错误”，防止枚举
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
-    # If user not found, return error (don't auto-register for security)
-    if not user_found:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",  # Same message to prevent user enumeration
+    # 2) 更新 last_login
+    user.last_login = now
+    await db.commit()
+
+    # 3) 准备缓存数据
+    user_data = {
+        "user_id": user.user_id,
+        "email": user.email,
+        "phone": user.phone,
+        "name": user.name,
+        "device_id": user.device_id,
+        "password_hash": user.password_hash,
+        "created_at": user.created_at.isoformat(),
+        "last_login": now.isoformat(),
+    }
+
+    # 更新内存（可选，将来可以删）
+    users[user.user_id] = {
+        **user_data,
+        "created_at": user.created_at,
+        "last_login": now,
+    }
+
+    # 4) 更新 Redis 缓存（用户数据 + email->user_id + auth token）
+    if redis_client.is_connected():
+        redis_client.set_json(
+            _user_cache_key(user.user_id),
+            user_data,
+            ttl=CACHE_TTL,
+        )
+        redis_client.set(
+            _user_email_cache_key(user.email),
+            user.user_id,
+            ttl=CACHE_TTL,
+        )
+        auth_data = {
+            "user_id": user.user_id,
+            "email": user.email,
+            "expires_in": AUTH_TOKEN_TTL,
+            "created_at": now.isoformat(),
+        }
+        redis_client.set_json(
+            _auth_token_cache_key(token),
+            auth_data,
+            ttl=AUTH_TOKEN_TTL,
         )
 
-    now = datetime.utcnow()
-    token = f"atk_{uuid.uuid4().hex[:6]}"
-
-    # Update last_login
-    if user_data:
-        user_data["last_login"] = now.isoformat()
-        # Update in memory
-        if existing_id in users:
-            users[existing_id]["last_login"] = now
-        # Update in Redis cache
-        if redis_client.is_connected():
-            redis_client.set_json(
-                _user_cache_key(existing_id), user_data, ttl=CACHE_TTL
-            )
-            # Cache auth token
-            auth_data = {
-                "user_id": existing_id,
-                "email": payload.email,
-                "expires_in": AUTH_TOKEN_TTL,
-                "created_at": now.isoformat(),
-            }
-            redis_client.set_json(
-                _auth_token_cache_key(token), auth_data, ttl=AUTH_TOKEN_TTL
-            )
-
     return LoginResponse(
-        user_id=existing_id,
+        user_id=user.user_id,
         status="authenticated",
         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-        email=payload.email,
+        email=user.email,
         device_id=payload.device_id,
         last_login=now,
     )
+
+# async def login(payload: LoginRequest):
+#     existing_id = None
+#     user_data = None
+#     user_found = False  # Track if user exists (regardless of password)
+
+#     # Try to get user from Redis cache first
+#     if redis_client.is_connected():
+#         # Look up user_id by email
+#         cached_user_id = redis_client.get(_user_email_cache_key(payload.email))
+#         if cached_user_id:
+#             user_found = True  # User exists
+#             # Get user data from cache
+#             cached_user = redis_client.get_json(_user_cache_key(cached_user_id))
+#             if cached_user:
+#                 # Verify password hash
+#                 if cached_user.get("password_hash") == payload.password_hash:
+#                     existing_id = cached_user_id
+#                     user_data = cached_user
+
+#     # Fallback to in-memory storage
+#     if not existing_id:
+#         for uid, u in users.items():
+#             if u["email"] == payload.email:
+#                 user_found = True  # User exists
+#                 # Verify password hash if stored
+#                 if u.get("password_hash") == payload.password_hash:
+#                     existing_id = uid
+#                     user_data = u
+#                     break
+
+#     # If user found but password doesn't match, return error
+#     if user_found and not existing_id:
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Invalid email or password",
+#         )
+
+#     # If user not found, return error (don't auto-register for security)
+#     if not user_found:
+#         raise HTTPException(
+#             status_code=status.HTTP_401_UNAUTHORIZED,
+#             detail="Invalid email or password",  # Same message to prevent user enumeration
+#         )
+
+#     now = datetime.utcnow()
+#     token = f"atk_{uuid.uuid4().hex[:6]}"
+
+#     # Update last_login
+#     if user_data:
+#         user_data["last_login"] = now.isoformat()
+#         # Update in memory
+#         if existing_id in users:
+#             users[existing_id]["last_login"] = now
+#         # Update in Redis cache
+#         if redis_client.is_connected():
+#             redis_client.set_json(
+#                 _user_cache_key(existing_id), user_data, ttl=CACHE_TTL
+#             )
+#             # Cache auth token
+#             auth_data = {
+#                 "user_id": existing_id,
+#                 "email": payload.email,
+#                 "expires_in": AUTH_TOKEN_TTL,
+#                 "created_at": now.isoformat(),
+#             }
+#             redis_client.set_json(
+#                 _auth_token_cache_key(token), auth_data, ttl=AUTH_TOKEN_TTL
+#             )
+
+#     return LoginResponse(
+#         user_id=existing_id,
+#         status="authenticated",
+#         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
+#         email=payload.email,
+#         device_id=payload.device_id,
+#         last_login=now,
+#     )
 
 
 @app.post(
