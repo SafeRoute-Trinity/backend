@@ -23,6 +23,9 @@ exclude = [
   "migrations",
 ]
 
+[tool.isort]
+profile = "black"
+
 # Linting rules
 [tool.ruff.lint]
 select = ["E", "F", "B", "I"]     # activate rules (E=PEP8, F=flake8, B=bugbear, I=isort)
