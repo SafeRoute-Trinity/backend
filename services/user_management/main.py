@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
