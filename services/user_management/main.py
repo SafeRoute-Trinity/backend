@@ -4,19 +4,17 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-#for postgresql
+# for postgresql
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import Depends
 
 from libs.db import get_db
 from models.user_models import User
-
 
 # Add parent directory to path to import libs
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -190,6 +188,7 @@ async def health():
     redis_status = "connected" if redis_client.is_connected() else "disconnected"
     return {"status": "ok", "service": "user_management", "redis": redis_status}
 
+
 #
 @app.post(
     "/v1/users/register", response_model=RegisterResponse, tags=["User Management"]
@@ -279,6 +278,7 @@ async def register_user(
         created_at=now,
     )
 
+
 # async def register_user(payload: RegisterRequest):
 #     user_id = f"usr_{uuid.uuid4().hex[:8]}"
 #     now = datetime.utcnow()
@@ -328,7 +328,6 @@ async def register_user(
 #         device_id=payload.device_id,
 #         created_at=now,
 #     )
-
 
 
 @app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
@@ -406,6 +405,7 @@ async def login(
         device_id=payload.device_id,
         last_login=now,
     )
+
 
 # async def login(payload: LoginRequest):
 #     existing_id = None

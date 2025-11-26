@@ -1,5 +1,6 @@
 # backend/libs/db.py
 import os
+
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -21,6 +22,7 @@ AsyncSessionLocal = sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False,
 )
+
 
 async def get_db() -> AsyncSession:
     """FastAPI 依赖注入用的异步 Session。"""
