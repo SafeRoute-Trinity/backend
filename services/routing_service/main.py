@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, Request, Response
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -17,6 +17,10 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from libs.postgis_db import get_postgis_db
 
 app = FastAPI(
     title="Routing Service",
@@ -174,34 +178,126 @@ async def health():
     return {"status": "ok", "service": "routing_service"}
 
 
-@app.post("/v1/routes/calculate", response_model=RouteCalculateResponse)
-async def calc(body: RouteCalculateRequest):
-    # Business metric: initial route calculation
-    ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
+# @app.post("/v1/routes/calculate", response_model=RouteCalculateResponse)
+# async def calc(body: RouteCalculateRequest):
+#     # Business metric: initial route calculation
+#     ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
 
+
+#     rid = f"rt_{uuid.uuid4().hex[:6]}"
+#     now = datetime.utcnow()
+#     opt = RouteOption(
+#         route_index=0,
+#         is_primary=True,
+#         geometry="encoded_polyline_demo",
+#         distance_m=2450,
+#         duration_s=1800,
+#         safety_score=87.5,
+#         waypoints=[
+#             Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
+#             Waypoint(
+#                 lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"
+#             ),
+#         ],
+#     )
+#     ROUTES[rid] = {
+#         "route_id": rid,
+#         "routes": [opt],
+#         "alternatives_count": 1,
+#         "calculated_at": now,
+#     }
+#     return RouteCalculateResponse(**ROUTES[rid])
+@app.post("/v1/routes/calculate", response_model=RouteCalculateResponse)
+async def calc(
+    body: RouteCalculateRequest,
+    db: AsyncSession = Depends(get_postgis_db),
+):
+    """
+    简化版：用起点和终点生成一条直线 LINESTRING，
+    存到 PostGIS 的 routes 表，再从数据库读回来组装响应。
+    """
     rid = f"rt_{uuid.uuid4().hex[:6]}"
-    now = datetime.utcnow()
+    # now = datetime.utcnow()
+
+    # 注意：PostGIS 通常使用 (lon, lat) 顺序
+    origin_lon, origin_lat = body.origin.lon, body.origin.lat
+    dest_lon, dest_lat = body.destination.lon, body.destination.lat
+
+    # 构造 WKT：LINESTRING(lon lat, lon lat)
+    wkt = f"LINESTRING({origin_lon} {origin_lat}, {dest_lon} {dest_lat})"
+
+    # 简单估一个时长（这里还是用你之前的固定值 / 或者以后自己算）
+    duration_s = 1800
+    safety_score = 87.5
+
+    # 用 PostGIS 插入一条记录，顺便算一下大圆距离（单位：米）
+    insert_sql = text(
+        """
+        INSERT INTO routes (route_id, user_id, geom, distance_m, duration_s, safety_score)
+        VALUES (
+            :route_id,
+            NULL,
+            ST_GeomFromText(:wkt, 4326),
+            ST_DistanceSphere(
+                ST_MakePoint(:origin_lon, :origin_lat),
+                ST_MakePoint(:dest_lon, :dest_lat)
+            ),
+            :duration_s,
+            :safety_score
+        )
+        RETURNING
+            route_id,
+            ST_AsText(geom) AS wkt_geom,
+            distance_m,
+            duration_s,
+            safety_score,
+            created_at;
+        """
+    )
+
+    result = await db.execute(
+        insert_sql,
+        {
+            "route_id": rid,
+            "wkt": wkt,
+            "origin_lon": origin_lon,
+            "origin_lat": origin_lat,
+            "dest_lon": dest_lon,
+            "dest_lat": dest_lat,
+            "duration_s": duration_s,
+            "safety_score": safety_score,
+        },
+    )
+    await db.commit()
+
+    row = result.mappings().one()
+
+    # 用数据库里的结果构造 RouteOption / RouteCalculateResponse
     opt = RouteOption(
         route_index=0,
         is_primary=True,
-        geometry="encoded_polyline_demo",
-        distance_m=2450,
-        duration_s=1800,
-        safety_score=87.5,
+        geometry=row[
+            "wkt_geom"
+        ],  # 这里我们直接返回 WKT，你以后可以换成 polyline/GeoJSON
+        distance_m=int(row["distance_m"]) if row["distance_m"] is not None else 0,
+        duration_s=row["duration_s"],
+        safety_score=row["safety_score"],
         waypoints=[
             Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
             Waypoint(
-                lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"
+                lat=body.destination.lat,
+                lon=body.destination.lon,
+                instruction="Arrive",
             ),
         ],
     )
-    ROUTES[rid] = {
-        "route_id": rid,
-        "routes": [opt],
-        "alternatives_count": 1,
-        "calculated_at": now,
-    }
-    return RouteCalculateResponse(**ROUTES[rid])
+
+    return RouteCalculateResponse(
+        route_id=row["route_id"],
+        routes=[opt],
+        alternatives_count=1,
+        calculated_at=row["created_at"],
+    )
 
 
 @app.post("/v1/routes/{route_id}/recalculate", response_model=RouteCalculateResponse)
