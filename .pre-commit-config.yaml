@@ -17,11 +17,7 @@ repos:
     hooks:
       - id: isort
         stages: [pre-commit]
-<<<<<<< HEAD
         args: ["--profile", "black"] 
-=======
-        args: ["--profile", "black"]
->>>>>>> b3223b7 (update)
   - repo: local
     hooks:
       - id: notify-reformat
