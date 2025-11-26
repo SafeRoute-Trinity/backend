@@ -11,6 +11,7 @@ redis>=5.0.0
 twilio>=8.10.0
 httpx>=0.25.0
 prometheus-client>=0.23.1
+prometheus_client>=0.16.0
 
 
 # --- Dev Tools ---
