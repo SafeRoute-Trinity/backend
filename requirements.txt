@@ -13,3 +13,24 @@ geopy>=2.4.0
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.0
 redis>=5.0.0
+twilio>=8.10.0
+httpx>=0.25.0
+
+# --- Testing ---
+pytest>=8.0.0
+pytest-asyncio>=0.23.2
+pytest-cov>=5.0.0
+
+
+# --- Dev Tools ---
+black>=24.4.2 # Linter
+flake8>=7.1.0 # Linter
+isort>=5.13.2 # Sort import
+mypy>=1.10.0 # Check types
+ruff>=0.14.5 # Formatter
+
+# --- Lint & Formatting Helper ---
+pre-commit>=3.8.0
+
+# --- 环境管理（可选）---
+python-dotenv>=1.0.1
