@@ -9,7 +9,36 @@ repos:
     rev: v0.6.3
     hooks:
       - id: ruff
-        args: [--fix]
+        stages: [pre-commit] 
+
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        stages: [pre-commit]
+        args: ["--profile", "black"] 
+  - repo: local
+    hooks:
+      - id: notify-reformat
+        name: Notify developer to re-add and commit
+        entry: |
+          bash -c '
+          CHANGED=$(git diff --name-only --diff-filter=M | grep -E "\.py$")
+          if [ -n "$CHANGED" ]; then
+            echo ""
+            echo -e "⚙️  \033[33mThe following files were automatically reformatted:\033[0m"
+            echo ""
+            while IFS= read -r file; do
+              echo -e "   \033[34m$file\033[0m"
+            done <<< "$CHANGED"
+            echo ""
+            echo -e "👉  \033[32mPlease review them, run: git add <files>  and commit again.\033[0m"
+            echo ""
+            exit 1
+          fi
+          '
+        language: system
+        pass_filenames: false
         stages: [pre-commit]
 
   # - repo: https://github.com/PyCQA/isort

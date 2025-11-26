@@ -8,6 +8,7 @@ exclude = '''
   | build
   | dist
   | migrations
+  | /\..*
 )/
 '''
 
@@ -21,6 +22,9 @@ exclude = [
   "dist",
   "migrations",
 ]
+
+[tool.isort]
+profile = "black"
 
 # Linting rules
 [tool.ruff.lint]
