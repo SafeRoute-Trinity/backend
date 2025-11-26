@@ -9,9 +9,9 @@ from datetime import datetime
 from typing import Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Path, HTTPException
+from fastapi import FastAPI, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel
 
 # Load environment variables from .env file
 load_dotenv()
@@ -131,27 +131,24 @@ async def sms(body: EmergencySMSRequest):
     This is the production SMS sender using Twilio.
     """
     now = datetime.utcnow()
-    
+
     # Format the message with variables
     message = body.message_template
     for key, value in body.variables.items():
         message = message.replace(f"{{{key}}}", value)
-    
+
     # Add location if provided
     if body.location:
         location_text = f"\n\nLocation: https://maps.google.com/?q={body.location.lat},{body.location.lon}"
         if body.location.accuracy_m:
             location_text += f" (±{body.location.accuracy_m}m)"
         message += location_text
-    
+
     # Send SMS via Twilio
     try:
         twilio = get_twilio_client()
-        result = twilio.send_sms(
-            to_phone=body.emergency_contact.phone,
-            message=message
-        )
-        
+        result = twilio.send_sms(to_phone=body.emergency_contact.phone, message=message)
+
         if result["status"] == "sent":
             sid = result["sid"]
             sms_status = "sent"
@@ -161,13 +158,13 @@ async def sms(body: EmergencySMSRequest):
             sms_status = "failed"
             status = "failed"
             print(f"SMS send failed: {result.get('error')}")
-            
+
     except Exception as e:
         print(f"Error sending SMS: {e}")
         sid = f"SMS-{uuid.uuid4().hex[:6]}"
         sms_status = "failed"
         status = "failed"
-    
+
     # Update status
     s = STATUS.setdefault(
         body.sos_id,
@@ -180,13 +177,13 @@ async def sms(body: EmergencySMSRequest):
     )
     s["sms_status"] = sms_status
     s["last_update"] = now
-    
+
     return EmergencySMSResponse(
-        status=status, 
-        sms_id=sid, 
+        status=status,
+        sms_id=sid,
         timestamp=now,
         message_sent=message,
-        recipient=body.emergency_contact.phone
+        recipient=body.emergency_contact.phone,
     )
 
 
@@ -209,31 +206,24 @@ async def get_status(sos_id: str = Path(..., description="SOS event to check")):
 async def test_sms(body: TestSMSRequest):
     """
     Test endpoint to send an SMS to a phone number using Twilio.
-    
+
     Phone number must be in E.164 format (e.g., +1234567890)
     """
     try:
         twilio = get_twilio_client()
-        result = twilio.send_sms(
-            to_phone=body.to_phone,
-            message=body.message
-        )
-        
+        result = twilio.send_sms(to_phone=body.to_phone, message=body.message)
+
         return TestSMSResponse(
             status=result["status"],
             sid=result["sid"],
             to=result["to"],
             message=body.message,
-            error=result.get("error")
+            error=result.get("error"),
         )
     except ValueError as e:
         # Twilio not configured
         raise HTTPException(
-            status_code=500,
-            detail=f"Twilio configuration error: {str(e)}"
+            status_code=500, detail=f"Twilio configuration error: {str(e)}"
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to send SMS: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")

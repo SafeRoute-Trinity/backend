@@ -20,8 +20,8 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from libs.twilio_client import get_twilio_client
 from libs.service_urls import SOS_SERVICE_URL
+from libs.twilio_client import get_twilio_client
 
 app = FastAPI(
     title="Notification Service",
@@ -66,7 +66,9 @@ class CreateResp(BaseModel):
 
 
 class StatusResult(BaseModel):
-    sms_status: Literal["queued", "sending", "sent", "delivered", "failed", "not_triggered"]
+    sms_status: Literal[
+        "queued", "sending", "sent", "delivered", "failed", "not_triggered"
+    ]
     push_status: Literal["sent", "failed", "not_triggered"]
     call_status: Literal["queued", "calling", "answered", "failed", "not_triggered"]
 
@@ -103,23 +105,25 @@ async def health():
     return {"status": "ok", "service": "notification"}
 
 
-async def send_push_notification(user_id: str, message: str, location: Optional[Location]) -> dict:
+async def send_push_notification(
+    user_id: str, message: str, location: Optional[Location]
+) -> dict:
     """
     Dummy implementation for push notification.
     In production, this would integrate with FCM/APNs.
     """
-    print(f"[PUSH NOTIFICATION - DUMMY]")
+    print("[PUSH NOTIFICATION - DUMMY]")
     print(f"  To User: {user_id}")
     print(f"  Message: {message}")
     if location:
         print(f"  Location: {location.lat}, {location.lon}")
-    print(f"  Status: Would be sent in production")
-    
+    print("  Status: Would be sent in production")
+
     # Simulate success
     return {
         "status": "sent",
         "push_id": f"push_{uuid.uuid4().hex[:8]}",
-        "platform": "dummy"
+        "platform": "dummy",
     }
 
 
@@ -133,22 +137,20 @@ async def send_sms_via_sos_service(body: SOSNotificationRequest) -> dict:
         "location": body.location.dict() if body.location else None,
         "emergency_contact": body.emergency_contact.dict(),
         "message_template": body.message_template,
-        "variables": body.variables
+        "variables": body.variables,
     }
-    
+
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
-                f"{SOS_SERVICE_URL}/v1/emergency/sms",
-                json=payload
+                f"{SOS_SERVICE_URL}/v1/emergency/sms", json=payload
             )
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
         print(f"Error calling SOS service: {e}")
         raise HTTPException(
-            status_code=503,
-            detail=f"Failed to send SMS via SOS service: {str(e)}"
+            status_code=503, detail=f"Failed to send SMS via SOS service: {str(e)}"
         )
 
 
@@ -161,30 +163,30 @@ async def create_sos(body: SOSNotificationRequest):
     """
     nid = f"ntf_{uuid.uuid4().hex[:6]}"
     now = datetime.utcnow()
-    
+
     sms_status = "not_triggered"
     push_status = "not_triggered"
     notification_status = "queued"
-    
+
     # 1. Send push notification (dummy implementation)
     try:
         push_result = await send_push_notification(
-            user_id=body.user_id,
-            message=body.message_template,
-            location=body.location
+            user_id=body.user_id, message=body.message_template, location=body.location
         )
         push_status = "sent" if push_result["status"] == "sent" else "failed"
         print(f"✓ Push notification: {push_status}")
     except Exception as e:
         print(f"✗ Push notification failed: {e}")
         push_status = "failed"
-    
+
     # 2. Send SMS via SOS service
     try:
         sms_result = await send_sms_via_sos_service(body)
         sms_status = sms_result.get("status", "failed")
-        print(f"✓ SMS via SOS service: {sms_status} (SID: {sms_result.get('sms_id', 'N/A')})")
-        
+        print(
+            f"✓ SMS via SOS service: {sms_status} (SID: {sms_result.get('sms_id', 'N/A')})"
+        )
+
         if sms_status == "sent":
             notification_status = "delivered"
         else:
@@ -193,7 +195,7 @@ async def create_sos(body: SOSNotificationRequest):
         print(f"✗ SMS failed: {e}")
         sms_status = "failed"
         notification_status = "partial" if push_status == "sent" else "failed"
-    
+
     NOTIFICATIONS[nid] = {
         "notification_id": nid,
         "sos_id": body.sos_id,
@@ -201,7 +203,7 @@ async def create_sos(body: SOSNotificationRequest):
         "results": {
             "sms_status": sms_status,
             "push_status": push_status,
-            "call_status": "not_triggered"
+            "call_status": "not_triggered",
         },
         "created_at": now,
         "updated_at": now,
@@ -221,7 +223,7 @@ async def get_status(notification_id: str):
             "results": {
                 "sms_status": "delivered",
                 "push_status": "sent",
-                "call_status": "not_triggered"
+                "call_status": "not_triggered",
             },
             "created_at": now,
             "updated_at": now,
@@ -233,31 +235,24 @@ async def get_status(notification_id: str):
 async def test_sms(body: TestSMSRequest):
     """
     Test endpoint to send an SMS to a phone number using Twilio.
-    
+
     Phone number must be in E.164 format (e.g., +1234567890)
     """
     try:
         twilio = get_twilio_client()
-        result = twilio.send_sms(
-            to_phone=body.to_phone,
-            message=body.message
-        )
-        
+        result = twilio.send_sms(to_phone=body.to_phone, message=body.message)
+
         return TestSMSResponse(
             status=result["status"],
             sid=result["sid"],
             to=result["to"],
             message=body.message,
-            error=result.get("error")
+            error=result.get("error"),
         )
     except ValueError as e:
         # Twilio not configured
         raise HTTPException(
-            status_code=500,
-            detail=f"Twilio configuration error: {str(e)}"
+            status_code=500, detail=f"Twilio configuration error: {str(e)}"
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to send SMS: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
