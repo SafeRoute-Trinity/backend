@@ -5,10 +5,38 @@ Handles communication with OpenRouteService API and converts responses to Mapbox
 
 import logging
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 from httpx import AsyncClient, Timeout
+
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+
+    # Try to find .env file in current directory or parent directories
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+        logging.getLogger(__name__).debug(f"Loaded .env from {env_path}")
+    else:
+        # Try parent directory
+        env_path = Path(__file__).parent.parent.parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+            logging.getLogger(__name__).debug(f"Loaded .env from {env_path}")
+        else:
+            load_dotenv()  # Load from default location
+            logging.getLogger(__name__).debug(
+                "Attempted to load .env from default location"
+            )
+except ImportError:
+    logging.getLogger(__name__).warning(
+        "python-dotenv not installed, .env file will not be loaded"
+    )
+except Exception as e:
+    logging.getLogger(__name__).warning(f"Failed to load .env file: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +54,33 @@ class OpenRouteServiceClient:
         Args:
             api_key: OpenRouteService API key. If None, reads from ORS_API_KEY env var.
         """
+        # Read from parameter first, then environment variable
         self.api_key = api_key or os.getenv("ORS_API_KEY")
-        if not self.api_key:
-            logger.warning(
-                "ORS_API_KEY not set. OpenRouteService features will be disabled."
+
+        # Debug logging
+        if self.api_key:
+            # Log partial key for debugging (first 4 and last 4 chars)
+            masked_key = (
+                f"{self.api_key[:4]}...{self.api_key[-4:]}"
+                if len(self.api_key) > 8
+                else "***"
+            )
+            logger.info(f"OpenRouteService API key loaded: {masked_key}")
+        else:
+            # Check if environment variable exists but is empty
+            env_value = os.getenv("ORS_API_KEY")
+            if env_value == "":
+                logger.warning(
+                    "ORS_API_KEY environment variable is set but empty. "
+                    "OpenRouteService features will be disabled."
+                )
+            else:
+                logger.warning(
+                    "ORS_API_KEY environment variable not found. "
+                    "OpenRouteService features will be disabled."
+                )
+            logger.debug(
+                f"Environment variables check: ORS_API_KEY={'set' if env_value is not None else 'not set'}"
             )
 
         # Create HTTP client with timeout
@@ -184,8 +235,17 @@ _ors_client: Optional[OpenRouteServiceClient] = None
 
 
 def get_ors_client() -> OpenRouteServiceClient:
-    """Get OpenRouteService client instance (singleton)."""
+    """
+    Get OpenRouteService client instance (singleton).
+
+    Note: If ORS_API_KEY environment variable changes after first initialization,
+    you may need to recreate the client instance.
+    """
     global _ors_client
     if _ors_client is None:
+        # Check environment variable before creating client
+        api_key = os.getenv("ORS_API_KEY")
+        if api_key:
+            logger.debug("Creating new OpenRouteService client instance")
         _ors_client = OpenRouteServiceClient()
     return _ors_client

@@ -6,6 +6,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
@@ -18,6 +19,29 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel
+
+# Load .env file at startup (before other imports that need env vars)
+try:
+    from dotenv import load_dotenv
+
+    # Try to find .env file
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"✅ Loaded .env from {env_path}")
+    else:
+        # Try backend root directory
+        env_path = Path(__file__).parent.parent.parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+            print(f"✅ Loaded .env from {env_path}")
+        else:
+            load_dotenv()  # Load from default location
+            print("⚠️  Attempted to load .env from default location")
+except ImportError:
+    print("⚠️  python-dotenv not installed, .env file will not be loaded")
+except Exception as e:
+    print(f"⚠️  Failed to load .env file: {e}")
 
 try:
     # Try relative imports first (when run as module)
@@ -195,12 +219,23 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint with OpenRouteService status."""
+    import os
+
     ors_client = get_ors_client()
     ors_enabled = ors_client._is_enabled()
+
+    # Check environment variable for debugging
+    env_key_exists = os.getenv("ORS_API_KEY") is not None
+    env_key_set = bool(os.getenv("ORS_API_KEY"))
+
     return {
         "status": "ok",
         "service": "routing_service",
         "openrouteservice": "enabled" if ors_enabled else "disabled",
+        "openrouteservice_env_check": {
+            "ORS_API_KEY_exists": env_key_exists,
+            "ORS_API_KEY_set": env_key_set,
+        },
     }
 
 
