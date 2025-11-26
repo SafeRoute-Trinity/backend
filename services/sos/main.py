@@ -4,13 +4,21 @@
 
 import os
 import sys
+import time
 import uuid
 from datetime import datetime
 from typing import Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Path
+from fastapi import FastAPI, HTTPException, Path, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 from pydantic import BaseModel
 
 # Load environment variables from .env file
@@ -33,6 +41,70 @@ app.add_middleware(
 )
 
 STATUS = {}
+
+# ========= Metrics =========
+
+SERVICE_NAME = "sos"
+registry = CollectorRegistry()
+
+# Generic per-request counter (shared schema with other services)
+REQUEST_COUNT = Counter(
+    "service_requests_total",
+    "Total HTTP requests handled by the service",
+    ["service", "method", "path", "http_status"],
+    registry=registry,
+)
+
+# Latency histogram per path
+REQUEST_LATENCY = Histogram(
+    "service_request_duration_seconds",
+    "Request latency in seconds",
+    ["service", "path"],
+    registry=registry,
+)
+
+# Business metrics: SOS call & SMS usage
+SOS_CALLS_TOTAL = Counter(
+    "sos_calls_total",
+    "Total SOS emergency calls initiated",
+    registry=registry,
+)
+
+SOS_SMS_TOTAL = Counter(
+    "sos_sms_total",
+    "Total SOS emergency SMS sent",
+    registry=registry,
+)
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    """
+    Middleware to track:
+    - request count
+    - latency per path
+    for every HTTP request handled by this service.
+    """
+    start = time.time()
+    response = await call_next(request)
+
+    path = request.url.path
+
+    # Increment per-request counter
+    REQUEST_COUNT.labels(
+        service=SERVICE_NAME,
+        method=request.method,
+        path=path,
+        http_status=response.status_code,
+    ).inc()
+
+    # Record latency
+    REQUEST_LATENCY.labels(
+        service=SERVICE_NAME,
+        path=path,
+    ).observe(time.time() - start)
+
+    return response
 
 
 class Point(BaseModel):
@@ -121,6 +193,10 @@ async def call(body: EmergencyCallRequest):
         "sms_status": "not_sent",
         "last_update": now,
     }
+
+    # Business metric: count SOS calls
+    SOS_CALLS_TOTAL.inc()
+
     return EmergencyCallResponse(status="initiated", call_id=cid, timestamp=now)
 
 
@@ -178,6 +254,10 @@ async def sms(body: EmergencySMSRequest):
     s["sms_status"] = sms_status
     s["last_update"] = now
 
+    # Business metric: count SOS SMS
+    SOS_SMS_TOTAL.inc()
+
+    return EmergencySMSResponse(status="sent", sms_id=sid, timestamp=now)
     return EmergencySMSResponse(
         status=status,
         sms_id=sid,
@@ -200,6 +280,14 @@ async def get_status(sos_id: str = Path(..., description="SOS event to check")):
         },
     )
     return EmergencyStatusResponse(**s)
+
+
+@app.get("/metrics")
+async def metrics():
+    """
+    Expose Prometheus metrics for this SOS service.
+    """
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/v1/test/sms", response_model=TestSMSResponse)

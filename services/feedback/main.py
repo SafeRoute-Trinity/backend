@@ -2,12 +2,20 @@
 # uvicorn services.feedback.main:app --host 0.0.0.0 --port 20004 --reload
 # Docs: http://127.0.0.1:20004/docs
 
+import time
 import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 from pydantic import BaseModel, HttpUrl
 
 app = FastAPI(
@@ -24,6 +32,79 @@ app.add_middleware(
 )
 
 FEEDBACK = {}
+
+# ========= PROMETHEUS METRICS =========
+
+SERVICE_NAME = "feedback"
+registry = CollectorRegistry()
+
+# Generic request counter
+REQUEST_COUNT = Counter(
+    "service_requests_total",
+    "Total HTTP requests handled by the service",
+    ["service", "method", "path", "http_status"],
+    registry=registry,
+)
+
+# Request latency
+REQUEST_LATENCY = Histogram(
+    "service_request_duration_seconds",
+    "Request latency in seconds",
+    ["service", "path"],
+    registry=registry,
+)
+
+# Business-specific metrics
+FEEDBACK_SUBMISSIONS_TOTAL = Counter(
+    "feedback_submissions_total",
+    "Total feedback submissions received",
+    registry=registry,
+)
+
+FEEDBACK_VALIDATIONS_TOTAL = Counter(
+    "feedback_validations_total",
+    "Total feedback validation attempts",
+    registry=registry,
+)
+
+
+FEEDBACK_STATUS_CHECKS_TOTAL = Counter(
+    "feedback_status_checks_total",
+    "Total feedback status lookups",
+    registry=registry,
+)
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    """
+    Global metrics middleware to capture:
+    - total requests
+    - latency per endpoint
+    """
+    start = time.time()
+    response = await call_next(request)
+
+    path = request.url.path
+
+    # Count request
+    REQUEST_COUNT.labels(
+        service=SERVICE_NAME,
+        method=request.method,
+        path=path,
+        http_status=response.status_code,
+    ).inc()
+
+    # Measure latency
+    REQUEST_LATENCY.labels(
+        service=SERVICE_NAME,
+        path=path,
+    ).observe(time.time() - start)
+
+    return response
+
+
+# ========= MODELS =========
 
 
 class FeedbackLocation(BaseModel):
@@ -75,6 +156,9 @@ class FeedbackStatusResponse(BaseModel):
     updated_at: datetime
 
 
+# ========= ROUTES =========
+
+
 @app.get("/")
 async def root():
     return {"service": "feedback", "status": "running"}
@@ -85,13 +169,11 @@ async def health():
     return {"status": "ok", "service": "feedback"}
 
 
-@app.get("/v1/feedback/metrics")
-async def metrics():
-    return {"service": "feedback", "status": "running"}
-
-
 @app.post("/v1/feedback/submit", response_model=FeedbackSubmitResponse)
 async def submit(body: FeedbackSubmitRequest):
+    # Business metric
+    FEEDBACK_SUBMISSIONS_TOTAL.inc()
+
     now = datetime.utcnow()
     ticket = f"TKT-{now.year}-{uuid.uuid4().hex[:6]}"
     FEEDBACK[body.feedback_id] = {
@@ -112,6 +194,9 @@ async def submit(body: FeedbackSubmitRequest):
 
 @app.post("/v1/feedback/validate", response_model=FeedbackValidateResponse)
 async def validate(body: FeedbackValidateRequest):
+    # Business metric
+    FEEDBACK_VALIDATIONS_TOTAL.inc()
+
     is_spam = body.recent_submissions_count > 10
     return FeedbackValidateResponse(
         is_spam=is_spam,
@@ -124,6 +209,9 @@ async def validate(body: FeedbackValidateRequest):
 
 @app.get("/v1/feedback/{feedback_id}/status", response_model=FeedbackStatusResponse)
 async def status(feedback_id: str):
+    # Business metric
+    FEEDBACK_STATUS_CHECKS_TOTAL.inc()
+
     fb = FEEDBACK.get(feedback_id)
     now = datetime.utcnow()
     if not fb:
@@ -136,3 +224,11 @@ async def status(feedback_id: str):
             "updated_at": now,
         }
     return FeedbackStatusResponse(feedback_id=feedback_id, **fb)
+
+
+# ========= PROMETHEUS METRICS ENDPOINT =========
+
+
+@app.get("/metrics")
+async def metrics():
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
