@@ -2,12 +2,13 @@
 # uvicorn services.routing_service.main:app --host 0.0.0.0 --port 20002 --reload
 # Docs: http://127.0.0.1:20002/docs
 
+import logging
 import time
 import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -17,6 +18,28 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel
+
+try:
+    # Try relative imports first (when run as module)
+    from .mapbox_converter import (
+        convert_ors_isochrone_to_mapbox,
+        convert_ors_route_to_mapbox,
+    )
+    from .openrouteservice_client import get_ors_client
+except ImportError:
+    # Fall back to absolute imports (when run directly)
+    from mapbox_converter import (
+        convert_ors_isochrone_to_mapbox,
+        convert_ors_route_to_mapbox,
+    )
+    from openrouteservice_client import get_ors_client
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Routing Service",
@@ -171,7 +194,14 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "routing_service"}
+    """Health check endpoint with OpenRouteService status."""
+    ors_client = get_ors_client()
+    ors_enabled = ors_client._is_enabled()
+    return {
+        "status": "ok",
+        "service": "routing_service",
+        "openrouteservice": "enabled" if ors_enabled else "disabled",
+    }
 
 
 @app.post("/v1/routes/calculate", response_model=RouteCalculateResponse)
@@ -239,3 +269,208 @@ async def metrics():
     Expose Prometheus metrics for this Routing service.
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
+
+# ========= OpenRouteService Integration =========
+
+
+@app.get("/route")
+async def get_route(
+    start: str = Query(..., description="Start coordinates as 'lat,lon'"),
+    end: str = Query(..., description="End coordinates as 'lat,lon'"),
+    profile: str = Query(
+        "driving-car",
+        description="Routing profile: driving-car, foot-walking, cycling-regular, etc.",
+    ),
+):
+    """
+    Get route from OpenRouteService and convert to Mapbox-compatible format.
+
+    Args:
+        start: Start coordinates as "lat,lon"
+        end: End coordinates as "lat,lon"
+        profile: Routing profile (default: driving-car)
+
+    Returns:
+        Mapbox-compatible GeoJSON FeatureCollection with route LineString
+    """
+    try:
+        # Parse coordinates
+        try:
+            start_coords = tuple(map(float, start.split(",")))
+            end_coords = tuple(map(float, end.split(",")))
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid coordinate format. Expected 'lat,lon'. Error: {e}",
+            )
+
+        # Validate coordinates
+        if not (-90 <= start_coords[0] <= 90 and -180 <= start_coords[1] <= 180):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid start coordinates. Latitude must be -90 to 90, longitude -180 to 180.",
+            )
+        if not (-90 <= end_coords[0] <= 90 and -180 <= end_coords[1] <= 180):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid end coordinates. Latitude must be -90 to 90, longitude -180 to 180.",
+            )
+
+        # Get OpenRouteService client
+        ors_client = get_ors_client()
+        if not ors_client._is_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="OpenRouteService is not configured. Please set ORS_API_KEY environment variable.",
+            )
+
+        # Call OpenRouteService
+        logger.info(
+            f"Requesting route: start=({start_coords[0]}, {start_coords[1]}), "
+            f"end=({end_coords[0]}, {end_coords[1]}), profile={profile}"
+        )
+
+        ors_response = await ors_client.get_directions(
+            start=start_coords, end=end_coords, profile=profile
+        )
+
+        if not ors_response:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to get route from OpenRouteService. Please check logs for details.",
+            )
+
+        # Convert to Mapbox format
+        mapbox_response = convert_ors_route_to_mapbox(ors_response)
+
+        if not mapbox_response:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to convert route to Mapbox format.",
+            )
+
+        logger.info(
+            f"Successfully returned route with {len(mapbox_response.get('features', []))} features"
+        )
+        return mapbox_response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in /route endpoint: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
+
+
+@app.get("/isochrone")
+async def get_isochrone(
+    location: str = Query(..., description="Location coordinates as 'lat,lon'"),
+    profile: str = Query(
+        "driving-car",
+        description="Routing profile: driving-car, foot-walking, cycling-regular, etc.",
+    ),
+    range: str = Query(
+        "600,1200,1800",
+        description="Comma-separated list of ranges in seconds (for time) or meters (for distance)",
+    ),
+    range_type: str = Query("time", description="Range type: 'time' or 'distance'"),
+):
+    """
+    Get isochrones from OpenRouteService and convert to Mapbox-compatible format.
+
+    Args:
+        location: Location coordinates as "lat,lon"
+        profile: Routing profile (default: driving-car)
+        range: Comma-separated list of ranges (default: "600,1200,1800" seconds)
+        range_type: "time" or "distance" (default: "time")
+
+    Returns:
+        Mapbox-compatible GeoJSON FeatureCollection with isochrone Polygons
+    """
+    try:
+        # Parse coordinates
+        try:
+            location_coords = tuple(map(float, location.split(",")))
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid coordinate format. Expected 'lat,lon'. Error: {e}",
+            )
+
+        # Validate coordinates
+        if not (-90 <= location_coords[0] <= 90 and -180 <= location_coords[1] <= 180):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid location coordinates. Latitude must be -90 to 90, longitude -180 to 180.",
+            )
+
+        # Parse ranges
+        try:
+            range_list = [int(r.strip()) for r in range.split(",")]
+            if not range_list:
+                raise ValueError("Range list cannot be empty")
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid range format. Expected comma-separated integers. Error: {e}",
+            )
+
+        # Validate range_type
+        if range_type not in ["time", "distance"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid range_type. Must be 'time' or 'distance'.",
+            )
+
+        # Get OpenRouteService client
+        ors_client = get_ors_client()
+        if not ors_client._is_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="OpenRouteService is not configured. Please set ORS_API_KEY environment variable.",
+            )
+
+        # Call OpenRouteService
+        logger.info(
+            f"Requesting isochrone: location=({location_coords[0]}, {location_coords[1]}), "
+            f"profile={profile}, range={range_list}, range_type={range_type}"
+        )
+
+        ors_response = await ors_client.get_isochrones(
+            location=location_coords,
+            profile=profile,
+            range=range_list,
+            range_type=range_type,
+        )
+
+        if not ors_response:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Failed to get isochrone from OpenRouteService. Please check logs for details.",
+            )
+
+        # Convert to Mapbox format
+        mapbox_response = convert_ors_isochrone_to_mapbox(ors_response)
+
+        if not mapbox_response:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to convert isochrone to Mapbox format.",
+            )
+
+        logger.info(
+            f"Successfully returned isochrone with {len(mapbox_response.get('features', []))} features"
+        )
+        return mapbox_response
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error in /isochrone endpoint: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Internal server error: {str(e)}",
+        )
