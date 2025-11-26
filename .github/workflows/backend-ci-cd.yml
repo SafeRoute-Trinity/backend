@@ -2,12 +2,13 @@ name: Backend CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, feature/* ]
+    branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 jobs:
-  backend-ci:
-    name: Run Lint & Tests
+  lint-and-test:
+    name: Lint & Test
     runs-on: ubuntu-latest
 
     steps:
@@ -30,8 +31,14 @@ jobs:
             echo "No requirements file found" && exit 1
           fi
 
-      - name: Run pre-commit hooks
-        run: pre-commit run --all-files
+      - name: Run Black (check only)
+        run: black --check .
+
+      - name: Run Ruff (check only)
+        run: ruff check .
+
+      - name: Run isort (check only)
+        run: isort --check-only .
 
       - name: Run pytest (unit tests)
         run: |
@@ -42,9 +49,11 @@ jobs:
           fi
 
   build-and-push:
-    name: Build & Push Changed Docker Images
+    name: Build & Push Docker Images
     runs-on: ubuntu-latest
-    needs: backend-ci
+    # Only run on push to main (after PR merge)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: lint-and-test
 
     steps:
       - name: Checkout repository
