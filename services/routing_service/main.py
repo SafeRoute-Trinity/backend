@@ -10,10 +10,10 @@ from typing import List, Literal, Optional
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
+    CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
     Histogram,
-    CONTENT_TYPE_LATEST,
     generate_latest,
 )
 from pydantic import BaseModel

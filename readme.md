@@ -1,21 +1,16 @@
-## Create a virtual environment for Python
+## Create a virtual environment for Python3
 ```python3 -m venv venv```
 
 ```source venv/bin/activate```
 
 ## Install necessary packages
 
-```pip install -r requirements_dev.txt```
+```pip install -r requirements.txt```
 
 ## Turn on the development hooks
 
-```pre-commit install --hook-type pre-commit```
-```pre-commit install --hook-type pre-push```
+```pre-commit install```
 
 ## Run the backend
 
 ```uvicorn main:app --reload```
-
-## Unit Test
-
-```pytest```

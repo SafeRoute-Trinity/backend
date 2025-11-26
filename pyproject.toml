@@ -13,11 +13,6 @@ exclude = '''
 
 [tool.ruff]
 line-length = 88
-select = ["E", "F", "B", "I"]     # activate rules (E=PEP8, F=flake8, B=bugbear, I=isort)
-ignore = [
-  "E501",    # ignore max length in a line（controlled by black）
-  "B008",    # FastAPI dependency injection pattern
-]
 fix = true
 show-fixes = true
 exclude = [
@@ -27,11 +22,21 @@ exclude = [
   "migrations",
 ]
 
+# Linting rules
+[tool.ruff.lint]
+select = ["E", "F", "B", "I"]     # activate rules (E=PEP8, F=flake8, B=bugbear, I=isort)
+ignore = [
+  "E501",    # ignore max length in a line（controlled by black）
+  "B008",    # FastAPI dependency injection pattern
+  "E402",    # module level import not at top of file (needed for sys.path manipulation)
+  "B904",    # raise exceptions without from err (simplify error handling for APIs)
+]
+
 # Make Ruff import the same as isort
-[tool.ruff.isort]
-combine-as-imports = true
+[tool.ruff.lint.isort]
+combine-as-imports = false
 force-single-line = false
-known-first-party = ["services", "common", "backend"]
-known-third-party = ["fastapi", "pydantic", "uvicorn"]
+known-first-party = ["services", "common", "backend", "libs", "models"]
+known-third-party = ["fastapi", "pydantic", "uvicorn", "redis"]
 
 

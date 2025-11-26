@@ -10,10 +10,10 @@ from typing import List, Literal, Optional
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
+    CONTENT_TYPE_LATEST,
     CollectorRegistry,
     Counter,
     Histogram,
-    CONTENT_TYPE_LATEST,
     generate_latest,
 )
 from pydantic import BaseModel, HttpUrl
@@ -71,7 +71,7 @@ FEEDBACK_VALIDATIONS_TOTAL = Counter(
 FEEDBACK_STATUS_CHECKS_TOTAL = Counter(
     "feedback_status_checks_total",
     "Total feedback status lookups",
-    registry=registry,  
+    registry=registry,
 )
 
 
