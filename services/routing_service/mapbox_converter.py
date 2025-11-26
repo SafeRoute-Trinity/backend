@@ -32,14 +32,11 @@ def convert_ors_route_to_mapbox(
 
             # Extract route properties
             properties = feature.get("properties", {})
-<<<<<<< HEAD
             segments = (
                 properties.get("segments", [{}])[0]
                 if properties.get("segments")
                 else {}
             )
-=======
->>>>>>> b94b60d (updata)
             summary = properties.get("summary", {})
 
             # Create Mapbox-compatible feature
