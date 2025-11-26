@@ -5,7 +5,11 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
+<<<<<<< HEAD
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
+=======
+from fastapi import Depends, FastAPI, HTTPException, Query, status
+>>>>>>> 55f7be5 (fix:lint)
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -16,6 +20,7 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
+<<<<<<< HEAD
 <<<<<<< HEAD
 # for postgresql
 from sqlalchemy import select
@@ -28,14 +33,23 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Depends
 >>>>>>> eb80a24 (feat: update user database implementation)
+=======
+# for postgresql
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+>>>>>>> 55f7be5 (fix:lint)
 
 from libs.db import get_db
 from models.user_models import User
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 =======
 
 >>>>>>> eb80a24 (feat: update user database implementation)
+=======
+>>>>>>> 55f7be5 (fix:lint)
 # Add parent directory to path to import libs
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from libs.redis_client import get_redis_client
@@ -361,57 +375,6 @@ async def register_user(
         created_at=now,
     )
 
-# async def register_user(payload: RegisterRequest):
-#     user_id = f"usr_{uuid.uuid4().hex[:8]}"
-#     now = datetime.utcnow()
-#     token = f"atk_{uuid.uuid4().hex[:6]}"
-
-#     # Prepare user data
-#     user_data = {
-#         "user_id": user_id,
-#         "email": payload.email,
-#         "phone": payload.phone,
-#         "name": payload.name,
-#         "device_id": payload.device_id,
-#         "password_hash": payload.password_hash,  # Store password hash for authentication
-#         "created_at": now.isoformat(),
-#         "last_login": None,
-#     }
-
-#     # Store in memory (fallback)
-#     users[user_id] = user_data.copy()
-#     users[user_id]["created_at"] = now
-#     users[user_id]["last_login"] = None
-
-#     # Cache in Redis
-#     if redis_client.is_connected():
-#         # Cache user data by user_id
-#         redis_client.set_json(_user_cache_key(user_id), user_data, ttl=CACHE_TTL)
-#         # Cache user_id lookup by email
-#         redis_client.set(_user_email_cache_key(payload.email), user_id, ttl=CACHE_TTL)
-#         # Cache auth token
-#         auth_data = {
-#             "user_id": user_id,
-#             "email": payload.email,
-#             "expires_in": AUTH_TOKEN_TTL,
-#             "created_at": now.isoformat(),
-#         }
-#         redis_client.set_json(
-#             _auth_token_cache_key(token), auth_data, ttl=AUTH_TOKEN_TTL
-#         )
-
-#     return RegisterResponse(
-#         user_id=user_id,
-#         status="created",
-#         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-#         email=payload.email,
-#         phone=payload.phone,
-#         name=payload.name,
-#         device_id=payload.device_id,
-#         created_at=now,
-#     )
-
-
 
 # async def register_user(payload: RegisterRequest):
 #     user_id = f"usr_{uuid.uuid4().hex[:8]}"
@@ -464,6 +427,61 @@ async def register_user(
 #     )
 
 
+<<<<<<< HEAD
+
+# async def register_user(payload: RegisterRequest):
+#     user_id = f"usr_{uuid.uuid4().hex[:8]}"
+#     now = datetime.utcnow()
+#     token = f"atk_{uuid.uuid4().hex[:6]}"
+
+#     # Prepare user data
+#     user_data = {
+#         "user_id": user_id,
+#         "email": payload.email,
+#         "phone": payload.phone,
+#         "name": payload.name,
+#         "device_id": payload.device_id,
+#         "password_hash": payload.password_hash,  # Store password hash for authentication
+#         "created_at": now.isoformat(),
+#         "last_login": None,
+#     }
+
+#     # Store in memory (fallback)
+#     users[user_id] = user_data.copy()
+#     users[user_id]["created_at"] = now
+#     users[user_id]["last_login"] = None
+
+#     # Cache in Redis
+#     if redis_client.is_connected():
+#         # Cache user data by user_id
+#         redis_client.set_json(_user_cache_key(user_id), user_data, ttl=CACHE_TTL)
+#         # Cache user_id lookup by email
+#         redis_client.set(_user_email_cache_key(payload.email), user_id, ttl=CACHE_TTL)
+#         # Cache auth token
+#         auth_data = {
+#             "user_id": user_id,
+#             "email": payload.email,
+#             "expires_in": AUTH_TOKEN_TTL,
+#             "created_at": now.isoformat(),
+#         }
+#         redis_client.set_json(
+#             _auth_token_cache_key(token), auth_data, ttl=AUTH_TOKEN_TTL
+#         )
+
+#     return RegisterResponse(
+#         user_id=user_id,
+#         status="created",
+#         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
+#         email=payload.email,
+#         phone=payload.phone,
+#         name=payload.name,
+#         device_id=payload.device_id,
+#         created_at=now,
+#     )
+
+
+=======
+>>>>>>> 55f7be5 (fix:lint)
 @app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
 @app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
 async def login(
@@ -539,6 +557,7 @@ async def login(
         device_id=payload.device_id,
         last_login=now,
     )
+
 
 # async def login(payload: LoginRequest):
 #     existing_id = None

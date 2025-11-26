@@ -2,7 +2,10 @@ from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+<<<<<<< HEAD
 from sqlalchemy import String, Text, Boolean, ForeignKey, DateTime
+=======
+>>>>>>> 55f7be5 (fix:lint)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -22,12 +25,18 @@ class User(Base):
     name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
 <<<<<<< HEAD
+<<<<<<< HEAD
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
 =======
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 >>>>>>> eb80a24 (feat: update user database implementation)
+=======
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+>>>>>>> 55f7be5 (fix:lint)
     last_login: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -79,9 +88,11 @@ class TrustedContact(Base):
 
     # 这里 Python 属性名改成 relation，但数据库列名仍然叫 "relationship"
     relation: Mapped[Optional[str]] = mapped_column("relationship", Text, nullable=True)
+
     relation: Mapped[Optional[str]] = mapped_column(
         "relationship", Text, nullable=True
     )
+
 
     is_primary: Mapped[Optional[bool]] = mapped_column(Boolean, default=False)
 
