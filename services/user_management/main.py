@@ -1,3 +1,5 @@
+# uvicorn services.user_management.main:app --host 0.0.0.0 --port 8000 --reload
+
 import os
 import sys
 import time
