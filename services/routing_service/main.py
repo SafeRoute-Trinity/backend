@@ -236,7 +236,7 @@ async def calc(
         INSERT INTO routes (route_id, user_id, geom, distance_m, duration_s, safety_score)
         VALUES (
             :route_id,
-            NULL,
+            :user_id,
             ST_GeomFromText(:wkt, 4326),
             ST_DistanceSphere(
                 ST_MakePoint(:origin_lon, :origin_lat),
@@ -247,6 +247,7 @@ async def calc(
         )
         RETURNING
             route_id,
+            user_id,
             ST_AsText(geom) AS wkt_geom,
             distance_m,
             duration_s,
@@ -259,6 +260,7 @@ async def calc(
         insert_sql,
         {
             "route_id": rid,
+            "user_id": body.user_id,  ###connect postgre and postgis
             "wkt": wkt,
             "origin_lon": origin_lon,
             "origin_lat": origin_lat,
