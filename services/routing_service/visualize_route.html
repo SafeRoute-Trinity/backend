@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Route Visualisation - Mapbox</title>
+  <script src="https://api.mapbox.com/mapbox-gl-js/v3.0.0/mapbox-gl.js"></script>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.0.0/mapbox-gl.css" rel="stylesheet" />
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: Arial, sans-serif;
+    }
+
+    #map {
+      width: 100%;
+      height: 100vh;
+    }
+
+    .map-overlay {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+      z-index: 1;
+      max-width: 300px;
+    }
+
+    .route-info {
+      margin: 5px 0;
+    }
+
+    .route-info strong {
+      display: inline-block;
+      min-width: 120px;
+    }
+
+    .error-overlay {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: white;
+      padding: 30px;
+      border-radius: 8px;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      z-index: 1000;
+      max-width: 500px;
+      text-align: center;
+      display: none;
+    }
+
+    .error-overlay.show {
+      display: block;
+    }
+
+    .error-overlay h2 {
+      color: #f44336;
+      margin-top: 0;
+    }
+
+    .error-overlay input {
+      width: 100%;
+      padding: 10px;
+      margin: 10px 0;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+
+    .error-overlay button {
+      background: #3887be;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-top: 10px;
+    }
+
+    .error-overlay button:hover {
+      background: #2e6fa3;
+    }
+
+    .error-overlay a {
+      color: #3887be;
+      text-decoration: none;
+    }
+
+    .error-overlay a:hover {
+      text-decoration: underline;
+    }
+
+    .error-message {
+      background: #ffebee;
+      border-left: 4px solid #f44336;
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 4px;
+      display: none;
+    }
+
+    .error-message.show {
+      display: block;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="map"></div>
+  <div class="map-overlay">
+    <h3 style="margin-top: 0;">Route Information</h3>
+    <div class="route-info">
+      <strong>Distance:</strong> <span id="distance">-</span>
+    </div>
+    <div class="route-info">
+      <strong>Duration:</strong> <span id="duration">-</span>
+    </div>
+    <div class="route-info">
+      <strong>Points:</strong> <span id="points">-</span>
+    </div>
+  </div>
+
+  <!-- Error overlay for token input -->
+  <div id="error-overlay" class="error-overlay">
+    <h2>Mapbox Access Token Required</h2>
+    <p>To visualise the route, you need a Mapbox access token.</p>
+    <div class="error-message" id="error-message"></div>
+    <label for="token-input">Enter your Mapbox access token:</label>
+    <input type="text" id="token-input" placeholder="pk.eyJ1Ijoi..."
+      onkeypress="if(event.key === 'Enter') window.setToken();" />
+    <button onclick="setToken()">Load Map</button>
+    <p style="margin-top: 20px; font-size: 12px; color: #666;">
+      Don't have a token? Get one at <a href="https://account.mapbox.com/access-tokens/"
+        target="_blank">mapbox.com/access-tokens</a>
+    </p>
+    <p style="margin-top: 10px; font-size: 12px; color: #666;">
+      Or add it to the URL: <code>?token=YOUR_TOKEN</code>
+    </p>
+  </div>
+
+  <script>
+    // Your route GeoJSON data (defined globally so it's accessible everywhere)
+    const routeData = {
+      "type": "FeatureCollection",
+      "features": [{
+        "type": "Feature",
+        "geometry": {
+          "type": "LineString",
+          "coordinates": [
+            [-6.25602, 53.34199],
+            [-6.25609, 53.34199],
+            [-6.25617, 53.34195],
+            [-6.25625, 53.34181],
+            [-6.25627, 53.34176],
+            [-6.25638, 53.34178],
+            [-6.2567, 53.34184],
+            [-6.25631, 53.34255],
+            [-6.25738, 53.34278],
+            [-6.25743, 53.34278],
+            [-6.25759, 53.34285],
+            [-6.2577, 53.34286],
+            [-6.2577, 53.34289],
+            [-6.25768, 53.34293],
+            [-6.25767, 53.34295],
+            [-6.25766, 53.34296],
+            [-6.25907, 53.34325],
+            [-6.25912, 53.34327],
+            [-6.25919, 53.34333],
+            [-6.2592, 53.34336],
+            [-6.25929, 53.34336],
+            [-6.25936, 53.34335],
+            [-6.25936, 53.34348],
+            [-6.25935, 53.34349],
+            [-6.25934, 53.34357],
+            [-6.25932, 53.3437],
+            [-6.25928, 53.34384],
+            [-6.25925, 53.34393],
+            [-6.25926, 53.344],
+            [-6.25932, 53.34411],
+            [-6.25936, 53.3441],
+            [-6.25954, 53.34422],
+            [-6.25962, 53.34431],
+            [-6.25963, 53.34436],
+            [-6.25964, 53.34439],
+            [-6.25965, 53.34441],
+            [-6.25966, 53.34447],
+            [-6.25968, 53.34453],
+            [-6.25968, 53.34454],
+            [-6.25972, 53.34458],
+            [-6.25975, 53.34461],
+            [-6.25984, 53.34458],
+            [-6.25998, 53.34454],
+            [-6.26023, 53.34453],
+            [-6.26093, 53.34449],
+            [-6.2611, 53.34447],
+            [-6.26181, 53.34437],
+            [-6.26182, 53.34491],
+            [-6.262, 53.34491]
+          ]
+        },
+        "properties": {
+          "route_index": 0,
+          "is_primary": true,
+          "distance_m": 746,
+          "duration_s": 537,
+          "distance": 0.7467,
+          "duration": 8.96
+        }
+      }]
+    };
+
+    // Calculate bounds from coordinates
+    function calculateBounds(coordinates) {
+      let minLon = Infinity, maxLon = -Infinity;
+      let minLat = Infinity, maxLat = -Infinity;
+
+      coordinates.forEach(coord => {
+        const [lon, lat] = coord;
+        minLon = Math.min(minLon, lon);
+        maxLon = Math.max(maxLon, lon);
+        minLat = Math.min(minLat, lat);
+        maxLat = Math.max(maxLat, lat);
+      });
+
+      return [[minLon, minLat], [maxLon, maxLat]];
+    }
+
+    // Make setToken available globally for the button onclick
+    window.setToken = function () {
+      const tokenInput = document.getElementById('token-input');
+      const errorMessage = document.getElementById('error-message');
+      const token = tokenInput.value.trim();
+
+      errorMessage.classList.remove('show');
+
+      if (!token) {
+        errorMessage.textContent = 'Please enter a token';
+        errorMessage.classList.add('show');
+        return;
+      }
+
+      if (!token.startsWith('pk.')) {
+        errorMessage.textContent = 'Invalid token format. Mapbox tokens usually start with "pk."';
+        errorMessage.classList.add('show');
+        return;
+      }
+
+      localStorage.setItem('mapbox_token', token);
+      window.location.reload();
+    };
+
+    // Get token from URL parameter, localStorage, or prompt user
+    function getToken() {
+      // Check URL parameter first
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlToken = urlParams.get('token');
+      if (urlToken) {
+        localStorage.setItem('mapbox_token', urlToken);
+        return urlToken;
+      }
+
+      // Check localStorage
+      const storedToken = localStorage.getItem('mapbox_token');
+      if (storedToken && storedToken !== 'YOUR_MAPBOX_ACCESS_TOKEN_HERE') {
+        return storedToken;
+      }
+
+      return null;
+    }
+
+    function initializeMap(token) {
+      // Initialise map (centred on Dublin, Ireland)
+      const map = new mapboxgl.Map({
+        container: 'map',
+        style: 'mapbox://styles/mapbox/streets-v12',
+        center: [-6.259, 53.343], // Approximate centre of the route
+        zoom: 14
+      });
+
+      // Handle map errors
+      map.on('error', (e) => {
+        console.error('Mapbox error:', e);
+        const errorOverlay = document.getElementById('error-overlay');
+        const errorMessage = document.getElementById('error-message');
+
+        if (errorOverlay && errorMessage) {
+          if (e.error && e.error.message) {
+            errorMessage.textContent = `Error: ${e.error.message}`;
+          } else {
+            errorMessage.textContent = 'Failed to load map. Please check your access token.';
+          }
+          errorMessage.classList.add('show');
+          errorOverlay.classList.add('show');
+        }
+      });
+
+      map.on('load', () => {
+        // Hide error overlay once map loads successfully
+        const errorOverlay = document.getElementById('error-overlay');
+        if (errorOverlay) {
+          errorOverlay.classList.remove('show');
+        }
+
+        // Add route as a source
+        map.addSource('route', {
+          'type': 'geojson',
+          'data': routeData
+        });
+
+        // Add route line layer
+        map.addLayer({
+          'id': 'route-line',
+          'type': 'line',
+          'source': 'route',
+          'layout': {
+            'line-join': 'round',
+            'line-cap': 'round'
+          },
+          'paint': {
+            'line-color': '#3887be',
+            'line-width': 5,
+            'line-opacity': 0.75
+          }
+        });
+
+        // Add start point marker
+        const startCoord = routeData.features[0].geometry.coordinates[0];
+        new mapboxgl.Marker({ color: '#4CAF50' })
+          .setLngLat(startCoord)
+          .setPopup(new mapboxgl.Popup().setText('Start'))
+          .addTo(map);
+
+        // Add end point marker
+        const coords = routeData.features[0].geometry.coordinates;
+        const endCoord = coords[coords.length - 1];
+        new mapboxgl.Marker({ color: '#f44336' })
+          .setLngLat(endCoord)
+          .setPopup(new mapboxgl.Popup().setText('End'))
+          .addTo(map);
+
+        // Fit map to route bounds
+        const bounds = calculateBounds(routeData.features[0].geometry.coordinates);
+        map.fitBounds(bounds, {
+          padding: { top: 50, bottom: 50, left: 50, right: 50 },
+          maxZoom: 16
+        });
+
+        // Update route information display
+        const props = routeData.features[0].properties;
+        const distanceEl = document.getElementById('distance');
+        const durationEl = document.getElementById('duration');
+        const pointsEl = document.getElementById('points');
+
+        if (distanceEl) {
+          distanceEl.textContent = `${props.distance.toFixed(2)} km (${props.distance_m} m)`;
+        }
+        if (durationEl) {
+          durationEl.textContent = `${props.duration.toFixed(1)} min (${props.duration_s} s)`;
+        }
+        if (pointsEl) {
+          pointsEl.textContent = coords.length;
+        }
+      });
+    }
+
+    // Wait for DOM to be ready
+    document.addEventListener('DOMContentLoaded', function () {
+      let mapboxToken = getToken();
+
+      // Show error overlay if no token
+      if (!mapboxToken || mapboxToken === 'YOUR_MAPBOX_ACCESS_TOKEN_HERE') {
+        const errorOverlay = document.getElementById('error-overlay');
+        if (errorOverlay) {
+          errorOverlay.classList.add('show');
+        }
+      }
+
+      // Set the token for Mapbox GL
+      if (mapboxToken && mapboxToken !== 'YOUR_MAPBOX_ACCESS_TOKEN_HERE') {
+        mapboxgl.accessToken = mapboxToken;
+        initializeMap(mapboxToken);
+      } else {
+        // Map won't be initialised, error overlay is already shown
+        console.warn('Mapbox access token is required. Please enter it in the overlay.');
+      }
+    });
+  </script>
+</body>
+
+</html>
