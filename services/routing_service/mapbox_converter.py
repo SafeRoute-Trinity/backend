@@ -61,7 +61,7 @@ def _decode_polyline(encoded: str, precision: int = 5) -> List[List[float]]:
 
 
 def convert_ors_route_to_mapbox(
-    ors_response: Dict[str, Any]
+    ors_response: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     """
     Convert OpenRouteService directions response to Mapbox-compatible GeoJSON.
@@ -147,7 +147,8 @@ def convert_ors_route_to_mapbox(
                 features.append(mapbox_feature)
         else:
             logger.error(
-                "Invalid OpenRouteService response: missing both 'features' and 'routes'"
+                "Invalid OpenRouteService response: missing both "
+                "'features' and 'routes'"
             )
             return None
 
@@ -171,7 +172,7 @@ def convert_ors_route_to_mapbox(
 
 
 def convert_ors_isochrone_to_mapbox(
-    ors_response: Dict[str, Any]
+    ors_response: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     """
     Convert OpenRouteService isochrones response to Mapbox-compatible GeoJSON.
