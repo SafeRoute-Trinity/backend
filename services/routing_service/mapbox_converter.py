@@ -108,7 +108,8 @@ def convert_ors_route_to_mapbox(
         # Fallback: routes-style JSON (no "features" key)
         elif "routes" in ors_response:
             logger.debug(
-                "Converting OpenRouteService 'routes' response (non-GeoJSON) to GeoJSON"
+                "Converting OpenRouteService 'routes' response "
+                "(non-GeoJSON) to GeoJSON"
             )
             for idx, route in enumerate(ors_response.get("routes", [])):
                 geometry = route.get("geometry")
