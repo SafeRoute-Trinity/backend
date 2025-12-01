@@ -1,0 +1,237 @@
+{
+  "bbox": [
+    -6.261997,
+    53.34176,
+    -6.256023,
+    53.34491
+  ],
+  "routes": [
+    {
+      "summary": {
+        "distance": 746.7,
+        "duration": 537.6
+      },
+      "segments": [
+        {
+          "distance": 746.7,
+          "duration": 537.6,
+          "steps": [
+            {
+              "distance": 33.5,
+              "duration": 24.1,
+              "type": 11,
+              "instruction": "Head west",
+              "name": "-",
+              "way_points": [
+                0,
+                4
+              ]
+            },
+            {
+              "distance": 29.9,
+              "duration": 21.5,
+              "type": 1,
+              "instruction": "Turn right onto Setanta Place",
+              "name": "Setanta Place",
+              "way_points": [
+                4,
+                6
+              ]
+            },
+            {
+              "distance": 82.7,
+              "duration": 59.5,
+              "type": 1,
+              "instruction": "Turn right onto South Frederick Street",
+              "name": "South Frederick Street",
+              "way_points": [
+                6,
+                7
+              ]
+            },
+            {
+              "distance": 75.8,
+              "duration": 54.6,
+              "type": 0,
+              "instruction": "Turn left onto Nassau Street",
+              "name": "Nassau Street",
+              "way_points": [
+                7,
+                8
+              ]
+            },
+            {
+              "distance": 23.1,
+              "duration": 16.6,
+              "type": 12,
+              "instruction": "Keep left",
+              "name": "-",
+              "way_points": [
+                8,
+                11
+              ]
+            },
+            {
+              "distance": 11.8,
+              "duration": 8.5,
+              "type": 1,
+              "instruction": "Turn right",
+              "name": "-",
+              "way_points": [
+                11,
+                15
+              ]
+            },
+            {
+              "distance": 115.1,
+              "duration": 82.8,
+              "type": 0,
+              "instruction": "Turn left",
+              "name": "-",
+              "way_points": [
+                15,
+                19
+              ]
+            },
+            {
+              "distance": 10.6,
+              "duration": 7.6,
+              "type": 0,
+              "instruction": "Turn left",
+              "name": "-",
+              "way_points": [
+                19,
+                21
+              ]
+            },
+            {
+              "distance": 14.1,
+              "duration": 10.1,
+              "type": 1,
+              "instruction": "Turn right",
+              "name": "-",
+              "way_points": [
+                21,
+                22
+              ]
+            },
+            {
+              "distance": 71.1,
+              "duration": 51.2,
+              "type": 12,
+              "instruction": "Keep left",
+              "name": "-",
+              "way_points": [
+                22,
+                29
+              ]
+            },
+            {
+              "distance": 2.8,
+              "duration": 2.0,
+              "type": 0,
+              "instruction": "Turn left",
+              "name": "-",
+              "way_points": [
+                29,
+                30
+              ]
+            },
+            {
+              "distance": 64.2,
+              "duration": 46.2,
+              "type": 1,
+              "instruction": "Turn right",
+              "name": "-",
+              "way_points": [
+                30,
+                40
+              ]
+            },
+            {
+              "distance": 140.2,
+              "duration": 101.0,
+              "type": 0,
+              "instruction": "Turn left",
+              "name": "-",
+              "way_points": [
+                40,
+                46
+              ]
+            },
+            {
+              "distance": 60.0,
+              "duration": 43.2,
+              "type": 1,
+              "instruction": "Turn right onto Anglesea Street",
+              "name": "Anglesea Street",
+              "way_points": [
+                46,
+                47
+              ]
+            },
+            {
+              "distance": 11.8,
+              "duration": 8.5,
+              "type": 0,
+              "instruction": "Turn left onto Cope Street",
+              "name": "Cope Street",
+              "way_points": [
+                47,
+                48
+              ]
+            },
+            {
+              "distance": 0.0,
+              "duration": 0.0,
+              "type": 10,
+              "instruction": "Arrive at Cope Street, on the right",
+              "name": "-",
+              "way_points": [
+                48,
+                48
+              ]
+            }
+          ]
+        }
+      ],
+      "bbox": [
+        -6.261997,
+        53.34176,
+        -6.256023,
+        53.34491
+      ],
+      "geometry": "mjqdIb{de@?LFNZNHBCTK~@mCmAm@tE?HM^ATE?GCCAAAy@xGCHKLE@?P@LY?AAOAYC[GQEM@UJ@FWb@QNI@E@C@K@KBA?GFEDDPFZ@p@FjCB`@RlCkB@?b@",
+      "way_points": [
+        0,
+        48
+      ]
+    }
+  ],
+  "metadata": {
+    "attribution": "openrouteservice.org | OpenStreetMap contributors",
+    "service": "routing",
+    "timestamp": 1764604553409,
+    "query": {
+      "coordinates": [
+        [
+          -6.256,
+          53.342
+        ],
+        [
+          -6.262,
+          53.345
+        ]
+      ],
+      "profile": "foot-walking",
+      "profileName": "foot-walking",
+      "format": "json"
+    },
+    "engine": {
+      "version": "9.5.0",
+      "build_date": "2025-10-31T12:33:09Z",
+      "graph_date": "2025-11-24T15:01:57Z",
+      "osm_date": "2025-11-17T01:00:01Z"
+    }
+  }
+}
