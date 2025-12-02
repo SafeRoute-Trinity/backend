@@ -20,6 +20,10 @@ if [ -z "$SERVICE" ]; then
     exit 1
 fi
 
+# Convert hyphens to underscores for Python module names
+# This allows both "user-management" and "user_management" to work
+SERVICE_MODULE=$(echo "$SERVICE" | tr '-' '_')
+
 # Set LOCAL_DEV environment variable
 export LOCAL_DEV=true
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
@@ -28,6 +32,6 @@ echo "Starting $SERVICE service locally on port $PORT..."
 echo "Service URLs will use localhost (automatic detection)"
 echo ""
 
-# Run the service
-python3 -m uvicorn services.${SERVICE}.main:app --host 0.0.0.0 --port $PORT --reload
+# Run the service using the normalized module name
+python3 -m uvicorn services.${SERVICE_MODULE}.main:app --host 0.0.0.0 --port $PORT --reload
 
