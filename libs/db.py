@@ -4,12 +4,24 @@ import os
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-# 本地开发时可以用 127.0.0.1（配合 kubectl port-forward）
-# 部署到 K8s 时，把 host 改成 postgresql 服务名即可
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://saferoute:YOUR_PASSWORD_HERE@127.0.0.1:5432/saferoute",
-)
+# Construct DATABASE_URL from individual environment variables if DATABASE_URL is not set
+# This allows Kubernetes deployments to use separate env vars
+if "DATABASE_URL" in os.environ:
+    DATABASE_URL = os.getenv("DATABASE_URL")
+else:
+    # Build from individual components
+    db_host = os.getenv("DATABASE_HOST", "127.0.0.1")
+    db_port = os.getenv("DATABASE_PORT", "5432")
+    db_user = os.getenv("DATABASE_USER", "saferoute")
+    db_password = os.getenv("DATABASE_PASSWORD", "")
+    db_name = os.getenv("DATABASE_NAME", "saferoute")
+
+    # URL encode password if it contains special characters
+    from urllib.parse import quote_plus
+
+    db_password_encoded = quote_plus(db_password) if db_password else ""
+
+    DATABASE_URL = f"postgresql+asyncpg://{db_user}:{db_password_encoded}@{db_host}:{db_port}/{db_name}"
 
 engine = create_async_engine(
     DATABASE_URL,

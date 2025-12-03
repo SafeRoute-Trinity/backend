@@ -16,17 +16,18 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
+# Add current directory to path to import libs and models
+# In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 # for postgresql
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.db import get_db
-from models.user_models import User
-
-# Add parent directory to path to import libs
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 from libs.redis_client import get_redis_client
+from models.user_models import User
 
 app = FastAPI(
     title="SafeRoute API (Mock)",
@@ -257,15 +258,24 @@ async def health():
     return {"status": "ok", "service": "user_management", "redis": redis_status}
 
 
-#
 @app.post(
-    "/v1/users/register", response_model=RegisterResponse, tags=["User Management"]
+    "/v1/users/register",
+    response_model=RegisterResponse,
+    tags=["User Management"],
+    summary="Register a new user",
 )
-##add db session dependency
 async def register_user(
     payload: RegisterRequest,
     db: AsyncSession = Depends(get_db),
 ):
+    # Debug: Log the incoming payload
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        f"Register endpoint called with email: {payload.email}, device_id: {payload.device_id}"
+    )
+
     user_id = f"usr_{uuid.uuid4().hex[:8]}"
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"
@@ -401,7 +411,6 @@ async def register_user(
 #     )
 
 
-@app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
 @app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
 async def login(
     payload: LoginRequest,
@@ -633,10 +642,10 @@ async def upsert_trusted_contact(user_id: str, payload: TrustedContactUpsertRequ
 
 
 @app.get("/v1/users/{user_id}", response_model=UserResponse, tags=["User Management"])
-async def get_user(user_id: str):
+async def get_user(user_id: str, db: AsyncSession = Depends(get_db)):
     u = None
 
-    # Try to get from Redis cache first
+    # 1) Try to get from Redis cache first (fastest)
     if redis_client.is_connected():
         cached_user = redis_client.get_json(_user_cache_key(user_id))
         if cached_user:
@@ -644,39 +653,61 @@ async def get_user(user_id: str):
             # Convert ISO strings back to datetime objects
             if isinstance(u.get("created_at"), str):
                 u["created_at"] = datetime.fromisoformat(u["created_at"])
-            if isinstance(u.get("last_login"), str):
+            if isinstance(u.get("last_login"), str) and u.get("last_login"):
                 u["last_login"] = datetime.fromisoformat(u["last_login"])
             # Remove password_hash from response
             u.pop("password_hash", None)
+            return UserResponse(**u)
 
-    # Fallback to in-memory storage
+    # 2) Query PostgreSQL database (primary source of truth)
+    if not u:
+        result = await db.execute(select(User).where(User.user_id == user_id))
+        db_user = result.scalar_one_or_none()
+
+        if db_user:
+            # Convert database user to dict format
+            u = {
+                "user_id": db_user.user_id,
+                "email": db_user.email,
+                "name": db_user.name,
+                "phone": db_user.phone,
+                "device_id": db_user.device_id,
+                "created_at": db_user.created_at,
+                "last_login": db_user.last_login,
+            }
+
+            # Cache in Redis for future requests
+            if redis_client.is_connected():
+                user_data = u.copy()
+                user_data["created_at"] = (
+                    db_user.created_at.isoformat() if db_user.created_at else None
+                )
+                user_data["last_login"] = (
+                    db_user.last_login.isoformat() if db_user.last_login else None
+                )
+                redis_client.set_json(
+                    _user_cache_key(user_id), user_data, ttl=CACHE_TTL
+                )
+
+            # Also update in-memory cache (for backward compatibility)
+            users[user_id] = u.copy()
+
+            return UserResponse(**u)
+
+    # 3) Fallback to in-memory storage (legacy compatibility)
     if not u:
         u = users.get(user_id)
         if u:
             # Remove password_hash from response
             u = u.copy()
             u.pop("password_hash", None)
+            return UserResponse(**u)
 
-    # If still not found, create demo user
-    if not u:
-        now = datetime.utcnow()
-        u = {
-            "user_id": user_id,
-            "name": "Demo User",
-            "email": f"{user_id}@example.com",
-            "phone": "+353800000000",
-            "created_at": now,
-            "last_login": now,
-        }
-        users[user_id] = u
-        # Cache in Redis
-        if redis_client.is_connected():
-            user_data = u.copy()
-            user_data["created_at"] = now.isoformat()
-            user_data["last_login"] = now.isoformat()
-            redis_client.set_json(_user_cache_key(user_id), user_data, ttl=CACHE_TTL)
-
-    return UserResponse(**u)
+    # 4) User not found - return 404
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=f"User {user_id} not found",
+    )
 
 
 @app.get(

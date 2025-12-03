@@ -45,32 +45,75 @@ class RedisClient:
             redis_port = int(os.getenv("REDIS_PORT", "6379"))
 
         redis_password = os.getenv("REDIS_PASSWORD", None)
+        redis_username = os.getenv("REDIS_USERNAME", None)  # Optional: for Redis ACL
         redis_db = int(os.getenv("REDIS_DB", "0"))
 
         # Create Redis client
         try:
-            self._client = redis.Redis(
-                host=redis_host,
-                port=redis_port,
-                password=redis_password,
-                db=redis_db,
-                decode_responses=True,  # Automatically decode responses to strings
-                socket_connect_timeout=5,
-                socket_timeout=5,
-                retry_on_timeout=True,
-                health_check_interval=30,
+            # Build connection kwargs
+            connection_kwargs = {
+                "host": redis_host,
+                "port": redis_port,
+                "db": redis_db,
+                "decode_responses": True,  # Automatically decode responses to strings
+                "socket_connect_timeout": 5,
+                "socket_timeout": 5,
+                "retry_on_timeout": True,
+                "health_check_interval": 30,
+            }
+
+            # Add authentication (username for ACL, password for both legacy and ACL)
+            # Note: If Redis has ACL enabled, username is required (often "default")
+            # If Redis doesn't have ACL, only password is needed
+            # Note: Password with special characters (like @) should work fine with redis-py
+            # when passed as separate kwargs, not in URL format
+            if redis_username:
+                connection_kwargs["username"] = redis_username
+            if redis_password:
+                # Ensure password is a string and strip any whitespace
+                password = str(redis_password).strip()
+                connection_kwargs["password"] = password
+                # Log password details for debugging (INFO level to see in logs)
+                logger.info(
+                    f"Redis password length: {len(password)}, "
+                    f"starts with: '{password[:3] if len(password) >= 3 else password}', "
+                    f"ends with: '{password[-3:] if len(password) >= 3 else password}', "
+                    f"repr: {repr(password)}"
+                )
+
+            logger.info(
+                f"Redis connection kwargs: host={redis_host}, port={redis_port}, "
+                f"username={redis_username}, has_password={bool(redis_password)}"
             )
+
+            self._client = redis.Redis(**connection_kwargs)
 
             # Test connection
             self._client.ping()
+            auth_info = (
+                f"username={redis_username}" if redis_username else "password only"
+            )
             logger.info(
-                f"Redis connected: host={redis_host}, port={redis_port}, db={redis_db}"
+                f"Redis connected: host={redis_host}, port={redis_port}, db={redis_db}, auth={auth_info}"
             )
         except (RedisConnectionError, RedisError) as e:
-            logger.warning(f"Redis connection failed: {e}")
-            logger.warning(
-                f"Redis config: host={redis_host}, port={redis_port}, db={redis_db}"
+            logger.error(f"Redis connection failed: {e}")
+            logger.error(
+                f"Redis config: host={redis_host}, port={redis_port}, db={redis_db}, "
+                f"has_username={bool(redis_username)}, has_password={bool(redis_password)}"
             )
+            # Provide helpful error message for common issues
+            if "AuthenticationError" in str(type(e).__name__):
+                if not redis_username:
+                    logger.error(
+                        "💡 Hint: Redis might require a username (ACL enabled). "
+                        "Try setting REDIS_USERNAME=default"
+                    )
+                else:
+                    logger.error(
+                        "💡 Hint: Check if username/password pair is correct. "
+                        "Password contains special characters that might need escaping."
+                    )
             # In development, allow service to start without Redis
             # In production, this should fail
             if not IS_LOCAL_DEV:
