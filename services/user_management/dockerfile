@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y \
 # Copy dependency files and install (from root directory)
 COPY requirements.txt .
 COPY libs/ ./libs/
+COPY models/ ./models/
 
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
@@ -26,11 +27,12 @@ RUN pip install --upgrade pip && \
 COPY services/user_management/ .
 
 # Use PORT environment variable, default to 80 (matches K8s Service port)
-ARG PORT=80
-ENV PORT=${PORT}
+# PORT can be set at runtime via environment variable
+ENV PORT=80
 
 # Expose port
-EXPOSE ${PORT}
+EXPOSE 80
 
 # Start command (production recommends --workers 4)
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT}"]
+# Use $PORT environment variable at runtime
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-80}"]
