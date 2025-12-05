@@ -27,6 +27,7 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from libs.rabbitmq_client import get_rabbitmq_client
 from libs.twilio_client import get_twilio_client
 
 app = FastAPI(
@@ -200,11 +201,96 @@ async def call(body: EmergencyCallRequest):
     return EmergencyCallResponse(status="initiated", call_id=cid, timestamp=now)
 
 
+async def publish_sms_to_queue(body: EmergencySMSRequest) -> bool:
+    """
+    Publish SMS notification to RabbitMQ queue.
+
+    Returns:
+        True if message was published successfully, False otherwise
+    """
+    try:
+        rabbitmq = get_rabbitmq_client()
+
+        # Prepare message payload
+        message_payload = {
+            "type": "sms",
+            "sos_id": body.sos_id,
+            "user_id": body.user_id,
+            "location": body.location.dict() if body.location else None,
+            "emergency_contact": body.emergency_contact.dict(),
+            "message_template": body.message_template,
+            "variables": body.variables,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # Try to connect and publish
+        if not rabbitmq.connection or rabbitmq.connection.is_closed:
+            if not rabbitmq.connect():
+                return False
+
+        # Publish to notification queue
+        queue_name = os.getenv("RABBITMQ_NOTIFICATION_QUEUE", "notifications")
+        success = rabbitmq.publish(queue_name=queue_name, message=message_payload)
+
+        if success:
+            print(f"✓ Published SMS notification to RabbitMQ queue '{queue_name}'")
+        else:
+            print("✗ Failed to publish SMS notification to RabbitMQ")
+
+        return success
+    except Exception as e:
+        print(f"✗ Error publishing to RabbitMQ: {e}")
+        return False
+
+
+def send_sms_directly(body: EmergencySMSRequest, formatted_message: str) -> dict:
+    """
+    Send SMS directly via Twilio (fallback when RabbitMQ is unavailable).
+
+    Returns:
+        dict with status, sms_id, and error info
+    """
+    try:
+        twilio = get_twilio_client()
+        result = twilio.send_sms(
+            to_phone=body.emergency_contact.phone, message=formatted_message
+        )
+
+        if result["status"] == "sent":
+            return {
+                "status": "sent",
+                "sms_id": result["sid"],
+                "error": None,
+            }
+        else:
+            return {
+                "status": "failed",
+                "sms_id": f"SMS-{uuid.uuid4().hex[:6]}",
+                "error": result.get("error"),
+            }
+
+    except ValueError as e:
+        # Twilio not configured
+        print(f"Twilio configuration error: {e}")
+        return {
+            "status": "failed",
+            "sms_id": f"SMS-{uuid.uuid4().hex[:6]}",
+            "error": f"Twilio configuration error: {str(e)}",
+        }
+    except Exception as e:
+        print(f"Error sending SMS: {e}")
+        return {
+            "status": "failed",
+            "sms_id": f"SMS-{uuid.uuid4().hex[:6]}",
+            "error": str(e),
+        }
+
+
 @app.post("/v1/emergency/sms", response_model=EmergencySMSResponse)
 async def sms(body: EmergencySMSRequest):
     """
     Send emergency SMS with rich details (templates, variables, location).
-    This is the production SMS sender using Twilio.
+    First tries to publish to RabbitMQ queue, falls back to direct Twilio if queue unavailable.
     """
     now = datetime.utcnow()
 
@@ -220,26 +306,33 @@ async def sms(body: EmergencySMSRequest):
             location_text += f" (±{body.location.accuracy_m}m)"
         message += location_text
 
-    # Send SMS via Twilio
+    # Try RabbitMQ first, fallback to direct Twilio
     try:
-        twilio = get_twilio_client()
-        result = twilio.send_sms(to_phone=body.emergency_contact.phone, message=message)
+        queue_success = await publish_sms_to_queue(body)
 
-        if result["status"] == "sent":
-            sid = result["sid"]
-            sms_status = "sent"
-            status = "sent"
+        if queue_success:
+            # Message queued successfully - return queued status
+            sid = f"SMS-QUEUED-{uuid.uuid4().hex[:6]}"
+            sms_status = "queued"
+            status = "sent"  # Return "sent" to indicate request was accepted
+            print("✓ SMS notification queued in RabbitMQ")
         else:
-            sid = f"SMS-{uuid.uuid4().hex[:6]}"
-            sms_status = "failed"
-            status = "failed"
-            print(f"SMS send failed: {result.get('error')}")
+            # Fallback to direct Twilio send
+            print("⚠ RabbitMQ unavailable, falling back to direct Twilio send")
+            result = send_sms_directly(body, message)
+            sid = result["sms_id"]
+            sms_status = result["status"]
+            status = result["status"]
+            if result.get("error"):
+                print(f"SMS send failed: {result['error']}")
 
     except Exception as e:
-        print(f"Error sending SMS: {e}")
-        sid = f"SMS-{uuid.uuid4().hex[:6]}"
-        sms_status = "failed"
-        status = "failed"
+        print(f"Error in SMS handler: {e}")
+        # Fallback to direct send on any error
+        result = send_sms_directly(body, message)
+        sid = result["sms_id"]
+        sms_status = result["status"]
+        status = result["status"]
 
     # Update status
     s = STATUS.setdefault(
@@ -257,13 +350,16 @@ async def sms(body: EmergencySMSRequest):
     # Business metric: count SOS SMS
     SOS_SMS_TOTAL.inc()
 
-    return EmergencySMSResponse(status="sent", sms_id=sid, timestamp=now)
+    # Ensure all required fields are present (defensive checks)
+    recipient_phone = body.emergency_contact.phone if body.emergency_contact else ""
+    formatted_message = message if message else (body.message_template or "")
+
     return EmergencySMSResponse(
         status=status,
         sms_id=sid,
         timestamp=now,
-        message_sent=message,
-        recipient=body.emergency_contact.phone,
+        message_sent=formatted_message,
+        recipient=recipient_phone,
     )
 
 

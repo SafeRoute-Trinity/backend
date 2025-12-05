@@ -28,6 +28,7 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from libs.rabbitmq_client import get_rabbitmq_client
 from libs.service_urls import SOS_SERVICE_URL
 from libs.twilio_client import get_twilio_client
 
@@ -204,9 +205,52 @@ async def send_push_notification(
     }
 
 
+async def publish_sms_to_queue(body: SOSNotificationRequest) -> bool:
+    """
+    Publish SMS notification to RabbitMQ queue.
+
+    Returns:
+        True if message was published successfully, False otherwise
+    """
+    try:
+        rabbitmq = get_rabbitmq_client()
+
+        # Prepare message payload
+        message = {
+            "type": "sms",
+            "sos_id": body.sos_id,
+            "user_id": body.user_id,
+            "location": body.location.dict() if body.location else None,
+            "emergency_contact": body.emergency_contact.dict(),
+            "message_template": body.message_template,
+            "variables": body.variables,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+        # Try to connect and publish
+        if not rabbitmq.connection or rabbitmq.connection.is_closed:
+            if not rabbitmq.connect():
+                return False
+
+        # Publish to notification queue
+        queue_name = os.getenv("RABBITMQ_NOTIFICATION_QUEUE", "notifications")
+        success = rabbitmq.publish(queue_name=queue_name, message=message)
+
+        if success:
+            print(f"✓ Published SMS notification to RabbitMQ queue '{queue_name}'")
+        else:
+            print("✗ Failed to publish SMS notification to RabbitMQ")
+
+        return success
+    except Exception as e:
+        print(f"✗ Error publishing to RabbitMQ: {e}")
+        return False
+
+
 async def send_sms_via_sos_service(body: SOSNotificationRequest) -> dict:
     """
     Call the SOS service to send SMS via Twilio.
+    This is used as a fallback when RabbitMQ is not available.
     """
     payload = {
         "sos_id": body.sos_id,
@@ -259,18 +303,29 @@ async def create_sos(body: SOSNotificationRequest):
         print(f"✗ Push notification failed: {e}")
         push_status = "failed"
 
-    # 2. Send SMS via SOS service
+    # 2. Send SMS - try RabbitMQ first, fallback to direct SOS service call
     try:
-        sms_result = await send_sms_via_sos_service(body)
-        sms_status = sms_result.get("status", "failed")
-        print(
-            f"✓ SMS via SOS service: {sms_status} (SID: {sms_result.get('sms_id', 'N/A')})"
-        )
+        # Try to publish to RabbitMQ queue
+        queue_success = await publish_sms_to_queue(body)
 
-        if sms_status == "sent":
-            notification_status = "delivered"
+        if queue_success:
+            # Message queued successfully
+            sms_status = "queued"
+            notification_status = "queued"
+            print("✓ SMS notification queued in RabbitMQ")
         else:
-            notification_status = "partial"
+            # Fallback to direct SOS service call (backward compatibility)
+            print("⚠ RabbitMQ unavailable, falling back to direct SOS service call")
+            sms_result = await send_sms_via_sos_service(body)
+            sms_status = sms_result.get("status", "failed")
+            print(
+                f"✓ SMS via SOS service (fallback): {sms_status} (SID: {sms_result.get('sms_id', 'N/A')})"
+            )
+
+            if sms_status == "sent":
+                notification_status = "delivered"
+            else:
+                notification_status = "partial"
     except Exception as e:
         print(f"✗ SMS failed: {e}")
         sms_status = "failed"
