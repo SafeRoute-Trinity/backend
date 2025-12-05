@@ -350,12 +350,16 @@ async def sms(body: EmergencySMSRequest):
     # Business metric: count SOS SMS
     SOS_SMS_TOTAL.inc()
 
+    # Ensure all required fields are present (defensive checks)
+    recipient_phone = body.emergency_contact.phone if body.emergency_contact else ""
+    formatted_message = message if message else (body.message_template or "")
+
     return EmergencySMSResponse(
         status=status,
         sms_id=sid,
         timestamp=now,
-        message_sent=message,
-        recipient=body.emergency_contact.phone,
+        message_sent=formatted_message,
+        recipient=recipient_phone,
     )
 
 

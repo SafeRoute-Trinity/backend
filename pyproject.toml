@@ -41,6 +41,6 @@ ignore = [
 combine-as-imports = false
 force-single-line = false
 known-first-party = ["services", "common", "backend", "libs", "models"]
-known-third-party = ["fastapi", "pydantic", "uvicorn", "redis"]
+known-third-party = ["fastapi", "pydantic", "uvicorn"]
 
 
