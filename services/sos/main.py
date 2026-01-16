@@ -4,21 +4,12 @@
 
 import os
 import sys
-import time
 import uuid
 from datetime import datetime
 from typing import Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Path, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    CollectorRegistry,
-    Counter,
-    Histogram,
-    generate_latest,
-)
+from fastapi import HTTPException, Path
 from pydantic import BaseModel
 
 # Load environment variables from .env file
@@ -27,84 +18,37 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
+)
 from libs.twilio_client import get_twilio_client
 
-app = FastAPI(
-    title="SOS Service", version="1.0.0", description="Emergency call/SMS/status APIs."
+# Create service configuration
+service_config = ServiceAppConfig(
+    title="SOS Service",
+    description="Emergency call/SMS/status APIs.",
+    service_name="sos",
+    cors_config=CORSMiddlewareConfig(),
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
+
+# Add business-specific metrics
+SOS_CALLS_TOTAL = factory.add_business_metric(
+    "sos_calls_total",
+    "Total SOS emergency calls initiated",
+)
+
+SOS_SMS_TOTAL = factory.add_business_metric(
+    "sos_sms_total",
+    "Total SOS emergency SMS sent",
 )
 
 STATUS = {}
-
-# ========= Metrics =========
-
-SERVICE_NAME = "sos"
-registry = CollectorRegistry()
-
-# Generic per-request counter (shared schema with other services)
-REQUEST_COUNT = Counter(
-    "service_requests_total",
-    "Total HTTP requests handled by the service",
-    ["service", "method", "path", "http_status"],
-    registry=registry,
-)
-
-# Latency histogram per path
-REQUEST_LATENCY = Histogram(
-    "service_request_duration_seconds",
-    "Request latency in seconds",
-    ["service", "path"],
-    registry=registry,
-)
-
-# Business metrics: SOS call & SMS usage
-SOS_CALLS_TOTAL = Counter(
-    "sos_calls_total",
-    "Total SOS emergency calls initiated",
-    registry=registry,
-)
-
-SOS_SMS_TOTAL = Counter(
-    "sos_sms_total",
-    "Total SOS emergency SMS sent",
-    registry=registry,
-)
-
-
-@app.middleware("http")
-async def prometheus_middleware(request: Request, call_next):
-    """
-    Middleware to track:
-    - request count
-    - latency per path
-    for every HTTP request handled by this service.
-    """
-    start = time.time()
-    response = await call_next(request)
-
-    path = request.url.path
-
-    # Increment per-request counter
-    REQUEST_COUNT.labels(
-        service=SERVICE_NAME,
-        method=request.method,
-        path=path,
-        http_status=response.status_code,
-    ).inc()
-
-    # Record latency
-    REQUEST_LATENCY.labels(
-        service=SERVICE_NAME,
-        path=path,
-    ).observe(time.time() - start)
-
-    return response
 
 
 class Point(BaseModel):
@@ -280,14 +224,6 @@ async def get_status(sos_id: str = Path(..., description="SOS event to check")):
         },
     )
     return EmergencyStatusResponse(**s)
-
-
-@app.get("/metrics")
-async def metrics():
-    """
-    Expose Prometheus metrics for this SOS service.
-    """
-    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/v1/test/sms", response_model=TestSMSResponse)

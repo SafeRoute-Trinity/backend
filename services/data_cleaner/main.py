@@ -2,25 +2,34 @@
 # uvicorn services.data_cleaner.main:app --host 0.0.0.0 --port 20005 --reload
 # Docs: http://127.0.0.1:20005/docs
 
+import os
+import sys
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
+)
+
+# Create service configuration
+service_config = ServiceAppConfig(
     title="Data Cleaner & Audit Service",
-    version="1.0.0",
     description="Data collect/sanitize + audit log/query.",
+    service_name="data_cleaner",
+    cors_config=CORSMiddlewareConfig(),
+    enable_metrics=False,  # This service doesn't use metrics
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
 
 BATCHES = []
 AUDIT = []

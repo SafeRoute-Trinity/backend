@@ -2,50 +2,47 @@
 
 import os
 import sys
-import time
 import uuid
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    CollectorRegistry,
-    Counter,
-    Histogram,
-    generate_latest,
-)
+from fastapi import Depends, HTTPException, Query, status
 from pydantic import BaseModel
-
-# Add current directory to path to import libs and models
-# In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-# for postgresql
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-# for postgresql
-# for postgresql
+# Add parent directory to path to import libs and models
+# In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
 from libs.db import get_db
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
+)
 from models.user_models import User
 
-app = FastAPI(
+# Create service configuration
+service_config = ServiceAppConfig(
     title="SafeRoute API (Mock)",
     description=(
         "Mock implementation of SafeRoute backend APIs based on the architecture spec. "
         "Endpoints return example / in-memory stub data for interactive testing via /docs."
     ),
-    version="1.0.0",
+    service_name="user_management",
+    cors_config=CORSMiddlewareConfig(),
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
+
+# Add business-specific metrics
+USER_REGISTRATION_TOTAL = factory.add_business_metric(
+    "user_registrations_total",
+    "Total user registrations",
 )
 
 # ========= Auth Token TTL =========
@@ -61,65 +58,6 @@ feedback_store: Dict[str, dict] = {}
 audit_logs: List[dict] = []
 data_batches: Dict[str, dict] = {}
 emergency_status: Dict[str, dict] = {}
-
-# ========= Shared Models =========
-# ========= Metrics =========
-
-SERVICE_NAME = "user_management"
-registry = CollectorRegistry()
-
-# Generic per-request counter: can be shared across all services
-REQUEST_COUNT = Counter(
-    "service_requests_total",
-    "Total HTTP requests handled by the service",
-    ["service", "method", "path", "http_status"],
-    registry=registry,
-)
-
-# Request latency histogram per path
-REQUEST_LATENCY = Histogram(
-    "service_request_duration_seconds",
-    "Request latency in seconds",
-    ["service", "path"],
-    registry=registry,
-)
-
-# Business metric: total user registrations
-USER_REGISTRATION_TOTAL = Counter(
-    "user_registrations_total",
-    "Total user registrations",
-    registry=registry,
-)
-
-
-@app.middleware("http")
-async def prometheus_middleware(request: Request, call_next):
-    """
-    Middleware to measure:
-    - request count
-    - latency per path
-    for every HTTP request handled by this service.
-    """
-    start = time.time()
-    response = await call_next(request)
-
-    path = request.url.path
-
-    # Increment per-request counter
-    REQUEST_COUNT.labels(
-        service=SERVICE_NAME,
-        method=request.method,
-        path=path,
-        http_status=response.status_code,
-    ).inc()
-
-    # Record latency
-    REQUEST_LATENCY.labels(
-        service=SERVICE_NAME,
-        path=path,
-    ).observe(time.time() - start)
-
-    return response
 
 
 # ========= Shared Models =========
@@ -644,12 +582,3 @@ async def auth0_callback(code: Optional[str] = None, state: Optional[str] = None
 
 
 # ========= Metrics endpoint for Prometheus =========
-
-
-@app.get("/metrics")
-async def metrics_endpoint():
-    """
-    Expose Prometheus metrics for this service.
-    Prometheus will scrape this endpoint inside the cluster.
-    """
-    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

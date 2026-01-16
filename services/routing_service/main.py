@@ -3,22 +3,24 @@
 # Docs: http://127.0.0.1:20002/docs
 
 import logging
-import time
+import os
+import sys
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    CollectorRegistry,
-    Counter,
-    Histogram,
-    generate_latest,
-)
+from fastapi import HTTPException, Query, status
 from pydantic import BaseModel
+
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
+)
 
 # Load .env file at startup (before other imports that need env vars)
 try:
@@ -65,90 +67,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
+# Create service configuration
+service_config = ServiceAppConfig(
     title="Routing Service",
-    version="1.0.0",
     description="Route calculation & navigation session APIs.",
+    service_name="routing_service",
+    cors_config=CORSMiddlewareConfig(),
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
+
+# Add business-specific metrics
+ROUTING_ROUTE_CALCULATIONS_TOTAL = factory.add_business_metric(
+    "routing_route_calculations_total",
+    "Total number of initial route calculation requests",
+)
+
+ROUTING_ROUTE_RECALCULATIONS_TOTAL = factory.add_business_metric(
+    "routing_route_recalculations_total",
+    "Total number of route recalculation requests",
+)
+
+ROUTING_NAVIGATION_STARTS_TOTAL = factory.add_business_metric(
+    "routing_navigation_starts_total",
+    "Total number of navigation sessions started",
 )
 
 ROUTES = {}
 NAV = {}
-
-# ========= Metrics =========
-
-SERVICE_NAME = "routing_service"
-registry = CollectorRegistry()
-
-# Generic per-request counter (shared schema across services)
-REQUEST_COUNT = Counter(
-    "service_requests_total",
-    "Total HTTP requests handled by the service",
-    ["service", "method", "path", "http_status"],
-    registry=registry,
-)
-
-# Latency histogram per path
-REQUEST_LATENCY = Histogram(
-    "service_request_duration_seconds",
-    "Request latency in seconds",
-    ["service", "path"],
-    registry=registry,
-)
-
-# Business metrics for routing service
-ROUTING_ROUTE_CALCULATIONS_TOTAL = Counter(
-    "routing_route_calculations_total",
-    "Total number of initial route calculation requests",
-    registry=registry,
-)
-
-ROUTING_ROUTE_RECALCULATIONS_TOTAL = Counter(
-    "routing_route_recalculations_total",
-    "Total number of route recalculation requests",
-    registry=registry,
-)
-
-
-ROUTING_NAVIGATION_STARTS_TOTAL = Counter(
-    "routing_navigation_starts_total",
-    "Total number of navigation sessions started",
-    registry=registry,
-)
-
-
-@app.middleware("http")
-async def prometheus_middleware(request: Request, call_next):
-    """
-    Track:
-    - request count
-    - latency per path
-    for every HTTP request handled by this service.
-    """
-    start = time.time()
-    response = await call_next(request)
-
-    path = request.url.path
-
-    REQUEST_COUNT.labels(
-        service=SERVICE_NAME,
-        method=request.method,
-        path=path,
-        http_status=response.status_code,
-    ).inc()
-
-    REQUEST_LATENCY.labels(
-        service=SERVICE_NAME,
-        path=path,
-    ).observe(time.time() - start)
-
-    return response
 
 
 class Point(BaseModel):
@@ -296,14 +244,6 @@ async def nav_start(body: NavigationStartRequest):
     now = datetime.utcnow()
     NAV[sid] = {"route_id": body.route_id, "user_id": body.user_id, "started_at": now}
     return NavigationStartResponse(session_id=sid, status="active", started_at=now)
-
-
-@app.get("/metrics")
-async def metrics():
-    """
-    Expose Prometheus metrics for this Routing service.
-    """
-    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
 
 # ========= OpenRouteService Integration =========

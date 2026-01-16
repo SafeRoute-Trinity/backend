@@ -2,106 +2,52 @@
 # uvicorn services.feedback.main:app --host 0.0.0.0 --port 20004 --reload
 # Docs: http://127.0.0.1:20004/docs
 
-import time
+import os
+import sys
 import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    CollectorRegistry,
-    Counter,
-    Histogram,
-    generate_latest,
-)
 from pydantic import BaseModel, HttpUrl
 
-app = FastAPI(
-    title="Feedback Service",
-    version="1.0.0",
-    description="Submit/validate feedback and check status.",
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+# Create service configuration
+service_config = ServiceAppConfig(
+    title="Feedback Service",
+    description="Submit/validate feedback and check status.",
+    service_name="feedback",
+    cors_config=CORSMiddlewareConfig(),
+)
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
+
+# Add business-specific metrics
+FEEDBACK_SUBMISSIONS_TOTAL = factory.add_business_metric(
+    "feedback_submissions_total",
+    "Total feedback submissions received",
+)
+
+FEEDBACK_VALIDATIONS_TOTAL = factory.add_business_metric(
+    "feedback_validations_total",
+    "Total feedback validation attempts",
+)
+
+FEEDBACK_STATUS_CHECKS_TOTAL = factory.add_business_metric(
+    "feedback_status_checks_total",
+    "Total feedback status lookups",
 )
 
 FEEDBACK = {}
-
-# ========= PROMETHEUS METRICS =========
-
-SERVICE_NAME = "feedback"
-registry = CollectorRegistry()
-
-# Generic request counter
-REQUEST_COUNT = Counter(
-    "service_requests_total",
-    "Total HTTP requests handled by the service",
-    ["service", "method", "path", "http_status"],
-    registry=registry,
-)
-
-# Request latency
-REQUEST_LATENCY = Histogram(
-    "service_request_duration_seconds",
-    "Request latency in seconds",
-    ["service", "path"],
-    registry=registry,
-)
-
-# Business-specific metrics
-FEEDBACK_SUBMISSIONS_TOTAL = Counter(
-    "feedback_submissions_total",
-    "Total feedback submissions received",
-    registry=registry,
-)
-
-FEEDBACK_VALIDATIONS_TOTAL = Counter(
-    "feedback_validations_total",
-    "Total feedback validation attempts",
-    registry=registry,
-)
-
-
-FEEDBACK_STATUS_CHECKS_TOTAL = Counter(
-    "feedback_status_checks_total",
-    "Total feedback status lookups",
-    registry=registry,
-)
-
-
-@app.middleware("http")
-async def prometheus_middleware(request: Request, call_next):
-    """
-    Global metrics middleware to capture:
-    - total requests
-    - latency per endpoint
-    """
-    start = time.time()
-    response = await call_next(request)
-
-    path = request.url.path
-
-    # Count request
-    REQUEST_COUNT.labels(
-        service=SERVICE_NAME,
-        method=request.method,
-        path=path,
-        http_status=response.status_code,
-    ).inc()
-
-    # Measure latency
-    REQUEST_LATENCY.labels(
-        service=SERVICE_NAME,
-        path=path,
-    ).observe(time.time() - start)
-
-    return response
 
 
 # ========= MODELS =========
@@ -224,11 +170,3 @@ async def status(feedback_id: str):
             "updated_at": now,
         }
     return FeedbackStatusResponse(feedback_id=feedback_id, **fb)
-
-
-# ========= PROMETHEUS METRICS ENDPOINT =========
-
-
-@app.get("/metrics")
-async def metrics():
-    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

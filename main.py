@@ -1,20 +1,156 @@
-# 可选：backend/main.py
-# uvicorn main:app --host 0.0.0.0 --port 20009 --reload
-from fastapi import FastAPI
+#!/usr/bin/env python3
+"""
+SafeRoute Backend - Service Orchestrator
+Starts all microservices in the services folder.
+"""
+import argparse
+import multiprocessing
+import os
+import sys
+import time
 
-app = FastAPI(title="Service Index", version="1.0.0")
+# Service configuration: service_name -> (module_path, port)
+SERVICES = {
+    "user_management": ("services.user_management.main", 20000),
+    "notification": ("services.notification.main", 20001),
+    "routing_service": ("services.routing_service.main", 20002),
+    "safety_scoring": ("services.safety_scoring.main", 20003),
+    "feedback": ("services.feedback.main", 20004),
+    "data_cleaner": ("services.data_cleaner.main", 20005),  # Might remove this
+    "sos": ("services.sos.main", 20006),
+}
+
+# Docs service (service discovery)
+DOCS_SERVICE = ("docs.main", 8080)
 
 
-@app.get("/")
-async def index():
-    return {
-        "services": {
-            "user_management": "http://127.0.0.1:20000/docs",
-            "notification": "http://127.0.0.1:20001/docs",
-            "routing_service": "http://127.0.0.1:20002/docs",
-            "safety_scoring": "http://127.0.0.1:20003/docs",
-            "feedback": "http://127.0.0.1:20004/docs",
-            "data_cleaner": "http://127.0.0.1:20005/docs",
-            "sos": "http://127.0.0.1:20006/docs",
-        }
-    }
+def run_service(module_path: str, port: int, service_name: str):
+    """Run a single service using uvicorn."""
+    import uvicorn
+
+    print(f"Starting {service_name} on port {port}...")
+    try:
+        uvicorn.run(
+            f"{module_path}:app",
+            host="0.0.0.0",
+            port=port,
+            reload=False,  # Disable reload in multiprocess mode
+            log_level="info",
+        )
+    except Exception as e:
+        print(f"Error starting {service_name}: {e}")
+        sys.exit(1)
+
+
+def start_all_services():
+    """Start all services in separate processes."""
+    processes = []
+    service_names = []
+
+    print("=" * 60)
+    print("SafeRoute Backend - Starting All Services")
+    print("=" * 60)
+    print()
+
+    # Start all microservices
+    for service_name, (module_path, port) in SERVICES.items():
+        process = multiprocessing.Process(
+            target=run_service,
+            args=(module_path, port, service_name),
+            name=f"service-{service_name}",
+        )
+        process.start()
+        processes.append(process)
+        service_names.append(service_name)
+        time.sleep(0.5)  # Small delay between starts
+
+    # Start docs service (service discovery)
+    docs_module_path, docs_port = DOCS_SERVICE
+    docs_process = multiprocessing.Process(
+        target=run_service,
+        args=(docs_module_path, docs_port, "service_discovery"),
+        name="service-discovery",
+    )
+    docs_process.start()
+    processes.append(docs_process)
+    service_names.append("service_discovery")
+    time.sleep(0.5)  # This is mannual, yeah I know this sucks
+
+    print()
+    print("=" * 60)
+    print("All services started!")
+    print("=" * 60)
+    print("\nService URLs:")
+    for service_name, (_, port) in SERVICES.items():
+        print(f"  • {service_name:20s} → http://127.0.0.1:{port}/docs")
+    docs_module_path, docs_port = DOCS_SERVICE
+    print(f"  • {'service_discovery':20s} → http://127.0.0.1:{docs_port}/")
+    print("\nPress Ctrl+C to stop all services...\n")
+
+    # Wait for all processes or handle interrupt
+    try:
+        # Wait for all processes
+        for process in processes:
+            process.join()
+    except KeyboardInterrupt:
+        print("\n\nShutting down all services...")
+        for process, service_name in zip(processes, service_names):
+            if process.is_alive():
+                print(f"  Stopping {service_name}...")
+                process.terminate()
+                process.join(timeout=5)
+                if process.is_alive():
+                    print(f"  Force killing {service_name}...")
+                    process.kill()
+        print("All services stopped.")
+
+
+def start_single_service(service_name: str):
+    """Start a single service."""
+    if service_name not in SERVICES:
+        print(f"Unknown service: {service_name}")
+        print(f"\nAvailable services: {', '.join(SERVICES.keys())}")
+        sys.exit(1)
+
+    module_path, port = SERVICES[service_name]
+    print(f"Starting {service_name} on port {port}...")
+    print(f"Docs: http://127.0.0.1:{port}/docs")
+    print("\nPress Ctrl+C to stop...\n")
+
+    run_service(module_path, port, service_name)
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(add_help=False)
+
+    parser.add_argument(
+        "--service",
+        "-s",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--list",
+        "-l",
+        action="store_true",
+    )
+
+    args = parser.parse_args()
+
+    if args.list:
+        print("Available services:")
+        for service_name, (_, port) in SERVICES.items():
+            print(f"  • {service_name:20s} (port {port})")
+        return
+
+    if args.service:
+        start_single_service(args.service)
+    else:
+        start_all_services()
+
+
+if __name__ == "__main__":
+    # Set environment variable for local development
+    os.environ["LOCAL_DEV"] = "true"
+    main()
