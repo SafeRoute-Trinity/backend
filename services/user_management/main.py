@@ -20,6 +20,7 @@ from sqlalchemy.exc import IntegrityError
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from common.constants import AUTH_TOKEN_TTL
 from libs.db import get_db
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -49,9 +50,6 @@ USER_REGISTRATION_TOTAL = factory.add_business_metric(
     "user_registrations_total",
     "Total user registrations",
 )
-
-# Auth Token TTL (1 hour in seconds)
-AUTH_TOKEN_TTL = 3600
 
 # In-memory mock storage (for backward compatibility)
 users = {}

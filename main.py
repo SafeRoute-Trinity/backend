@@ -12,19 +12,7 @@ import time
 
 import uvicorn
 
-# Service configuration: service_name -> (module_path, port)
-SERVICES = {
-    "user_management": ("services.user_management.main", 20000),
-    "notification": ("services.notification.main", 20001),
-    "routing_service": ("services.routing_service.main", 20002),
-    "safety_scoring": ("services.safety_scoring.main", 20003),
-    "feedback": ("services.feedback.main", 20004),
-    "data_cleaner": ("services.data_cleaner.main", 20005),
-    "sos": ("services.sos.main", 20006),
-}
-
-# Docs service (service discovery)
-DOCS_SERVICE = ("docs.main", 8080)
+from common.constants import DOCS_SERVICE, SERVICES
 
 
 def run_service(module_path, port, service_name):

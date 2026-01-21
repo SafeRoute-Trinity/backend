@@ -19,12 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer
 from jwt.algorithms import RSAAlgorithm
 
-# Configuration constants
-AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "dev-ne8wedb5815zl4wf.us.auth0.com")
-API_AUDIENCE = os.getenv("API_AUDIENCE", "https://api.saferoute.dev")
-ISSUER = f"https://{AUTH0_DOMAIN}/"
-JWKS_URL = f"{ISSUER}.well-known/jwks.json"
-ALGORITHMS = ["RS256"]
+from common.constants import ALGORITHMS, API_AUDIENCE, ISSUER, JWKS_URL
 
 # Security scheme
 security = HTTPBearer()
