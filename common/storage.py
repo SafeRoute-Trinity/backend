@@ -1,12 +1,17 @@
-# 简单内存存储，便于各 router 共享（演示用）
-from typing import Dict, List
+"""
+In-memory storage for shared data across routers.
 
-users: Dict[str, dict] = {}
-trusted_contacts: Dict[str, List[dict]] = {}
-notifications: Dict[str, dict] = {}
-routes: Dict[str, dict] = {}
-nav_sessions: Dict[str, dict] = {}
-feedback_store: Dict[str, dict] = {}
-audit_logs: List[dict] = []
-data_batches: Dict[str, dict] = {}
-emergency_status: Dict[str, dict] = {}
+This module provides simple in-memory dictionaries for demonstration purposes.
+In production, these should be replaced with proper database storage.
+"""
+
+# In-memory storage dictionaries
+users = {}
+trusted_contacts = {}
+notifications = {}
+routes = {}
+nav_sessions = {}
+feedback_store = {}
+audit_logs = []
+data_batches = {}
+emergency_status = {}

@@ -1,5 +1,5 @@
 [tool.black]
-line-length = 88            # max length in a line（default 88）
+line-length = 100  # Maximum line length per PEP 8
 skip-string-normalization = false  # Use double quotes
 exclude = '''
 /(
@@ -13,7 +13,7 @@ exclude = '''
 '''
 
 [tool.ruff]
-line-length = 88
+line-length = 100
 fix = true
 show-fixes = true
 exclude = [
@@ -30,10 +30,10 @@ profile = "black"
 [tool.ruff.lint]
 select = ["E", "F", "B", "I"]     # activate rules (E=PEP8, F=flake8, B=bugbear, I=isort)
 ignore = [
-  "E501",    # ignore max length in a line（controlled by black）
-  "B008",    # FastAPI dependency injection pattern
-  "E402",    # module level import not at top of file (needed for sys.path manipulation)
-  "B904",    # raise exceptions without from err (simplify error handling for APIs)
+  "E501",  # ignore max length in a line (controlled by black)
+  "B008",  # FastAPI dependency injection pattern
+  "E402",  # module level import not at top of file (needed for sys.path manipulation)
+  "B904",  # raise exceptions without from err (simplify error handling for APIs)
 ]
 
 # Make Ruff import the same as isort

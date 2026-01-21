@@ -1,16 +1,20 @@
-# uvicorn services.user_management.main:app --host 0.0.0.0 --port 8000 --reload
+"""
+User Management Service for SafeRoute backend.
+
+Provides endpoints for user registration, authentication, preferences,
+and trusted contact management.
+"""
 
 import os
 import sys
 import uuid
 from datetime import datetime
-from typing import Dict, List, Literal, Optional
+from typing import List, Literal, Optional
 
 from fastapi import Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession
 
 # Add parent directory to path to import libs and models
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
@@ -28,8 +32,9 @@ from models.user_models import User
 service_config = ServiceAppConfig(
     title="SafeRoute API (Mock)",
     description=(
-        "Mock implementation of SafeRoute backend APIs based on the architecture spec. "
-        "Endpoints return example / in-memory stub data for interactive testing via /docs."
+        "Mock implementation of SafeRoute backend APIs based on the "
+        "architecture spec. Endpoints return example / in-memory stub data "
+        "for interactive testing via /docs."
     ),
     service_name="user_management",
     cors_config=CORSMiddlewareConfig(),
@@ -45,25 +50,27 @@ USER_REGISTRATION_TOTAL = factory.add_business_metric(
     "Total user registrations",
 )
 
-# ========= Auth Token TTL =========
-AUTH_TOKEN_TTL = 3600  # 1 hour in seconds
+# Auth Token TTL (1 hour in seconds)
+AUTH_TOKEN_TTL = 3600
 
-# ========= In-memory mock storage =========
-users: Dict[str, dict] = {}
-trusted_contacts: Dict[str, List[dict]] = {}
-notifications: Dict[str, dict] = {}
-routes: Dict[str, dict] = {}
-nav_sessions: Dict[str, dict] = {}
-feedback_store: Dict[str, dict] = {}
-audit_logs: List[dict] = []
-data_batches: Dict[str, dict] = {}
-emergency_status: Dict[str, dict] = {}
+# In-memory mock storage (for backward compatibility)
+users = {}
+trusted_contacts = {}
+notifications = {}
+routes = {}
+nav_sessions = {}
+feedback_store = {}
+audit_logs = []
+data_batches = {}
+emergency_status = {}
 
 
 # ========= Shared Models =========
 
 
 class Point(BaseModel):
+    """Geographic point with latitude and longitude."""
+
     lat: float
     lon: float
 
@@ -72,6 +79,8 @@ class Point(BaseModel):
 
 
 class RegisterRequest(BaseModel):
+    """Request model for user registration."""
+
     email: str
     password_hash: str
     device_id: str
@@ -80,11 +89,15 @@ class RegisterRequest(BaseModel):
 
 
 class AuthInfo(BaseModel):
+    """Authentication token information."""
+
     token: str
     expires_in: int = 3600
 
 
 class RegisterResponse(BaseModel):
+    """Response model for user registration."""
+
     user_id: str
     status: Literal["created"]
     auth: AuthInfo
@@ -96,12 +109,16 @@ class RegisterResponse(BaseModel):
 
 
 class LoginRequest(BaseModel):
+    """Request model for user login."""
+
     email: str
     password_hash: str
     device_id: str
 
 
 class LoginResponse(BaseModel):
+    """Response model for user login."""
+
     user_id: str
     status: Literal["authenticated"]
     auth: AuthInfo
@@ -111,12 +128,16 @@ class LoginResponse(BaseModel):
 
 
 class PreferencesRequest(BaseModel):
+    """Request model for user preferences."""
+
     voice_guidance: Literal["on", "off"]
     safety_bias: Optional[Literal["safest", "fastest"]] = None
     units: Optional[Literal["metric", "imperial"]] = None
 
 
 class PreferencesResponse(BaseModel):
+    """Response model for saved preferences."""
+
     user_id: str
     status: Literal["preferences_saved"]
     preferences: PreferencesRequest
@@ -124,6 +145,8 @@ class PreferencesResponse(BaseModel):
 
 
 class TrustedContactUpsertRequest(BaseModel):
+    """Request model for creating/updating trusted contacts."""
+
     contact_id: Optional[str] = None
     name: str
     phone: str
@@ -132,6 +155,8 @@ class TrustedContactUpsertRequest(BaseModel):
 
 
 class TrustedContact(BaseModel):
+    """Model representing a trusted contact."""
+
     contact_id: str
     name: str
     phone: str
@@ -140,6 +165,8 @@ class TrustedContact(BaseModel):
 
 
 class TrustedContactUpsertResponse(BaseModel):
+    """Response model for trusted contact upsert operation."""
+
     user_id: str
     contact_id: str
     status: Literal["contact_upserted"]
@@ -148,6 +175,8 @@ class TrustedContactUpsertResponse(BaseModel):
 
 
 class UserResponse(BaseModel):
+    """Response model for user information."""
+
     user_id: str
     name: Optional[str]
     email: str
@@ -157,21 +186,34 @@ class UserResponse(BaseModel):
 
 
 class TrustedContactsListResponse(BaseModel):
+    """Response model for listing trusted contacts."""
+
     user_id: str
     contacts: List[TrustedContact]
 
 
-# ========= User Management =========
+# ========= User Management Endpoints =========
 
 
 @app.get("/")
 async def root():
+    """
+    Root endpoint for service health check.
+
+    Returns:
+        Dict with service name and status
+    """
     return {"service": "user_management", "status": "running"}
 
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
+    """
+    Health check endpoint.
+
+    Returns:
+        Dict with status and service name
+    """
     return {"status": "ok", "service": "user_management"}
 
 
@@ -182,14 +224,27 @@ async def health():
     summary="Register a new user",
 )
 async def register_user(
-    payload: RegisterRequest,
-    db: AsyncSession = Depends(get_db),
+    payload,
+    db=Depends(get_db),
 ):
+    """
+    Register a new user account.
+
+    Args:
+        payload: Registration request containing user details
+        db: Database session dependency
+
+    Returns:
+        RegisterResponse with user ID, auth token, and user details
+
+    Raises:
+        HTTPException: 400 if email already registered or creation fails
+    """
     user_id = f"usr_{uuid.uuid4().hex[:8]}"
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
-    # 1) 先检查 email 是否已存在（防止重复注册）
+    # Check if email already exists (prevent duplicate registration)
     result = await db.execute(select(User).where(User.email == payload.email))
     existing = result.scalar_one_or_none()
     if existing:
@@ -198,7 +253,7 @@ async def register_user(
             detail="Email already registered",
         )
 
-    # 2) 写入 PostgreSQL
+    # Write to PostgreSQL database
     user = User(
         user_id=user_id,
         email=payload.email,
@@ -220,7 +275,7 @@ async def register_user(
             detail="Could not create user",
         )
 
-    # 3) 内存里存一份（兼容你原来的结构，可以以后慢慢删）
+    # Store in memory for backward compatibility (can be removed later)
     users[user_id] = {
         "user_id": user_id,
         "email": payload.email,
@@ -232,7 +287,7 @@ async def register_user(
         "last_login": None,
     }
 
-    # Business metric: bump registrations counter
+    # Business metric: increment registrations counter
     USER_REGISTRATION_TOTAL.inc()
 
     return RegisterResponse(
@@ -247,30 +302,48 @@ async def register_user(
     )
 
 
-@app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
+@app.post(
+    "/v1/auth/login",
+    response_model=LoginResponse,
+    tags=["User Management"],
+)
 async def login(
-    payload: LoginRequest,
-    db: AsyncSession = Depends(get_db),
+    payload,
+    db=Depends(get_db),
 ):
+    """
+    Authenticate a user and return auth token.
+
+    Args:
+        payload: Login request with email and password hash
+        db: Database session dependency
+
+    Returns:
+        LoginResponse with user ID, auth token, and user details
+
+    Raises:
+        HTTPException: 401 if email or password is invalid
+    """
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
-    # 先从 PostgreSQL 查用户
+    # Query PostgreSQL database for user
     result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
     if not user or user.password_hash != payload.password_hash:
-        # 不区分“用户不存在”和“密码错误”，防止枚举
+        # Don't distinguish between "user not found" and "wrong password"
+        # to prevent user enumeration
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
-    # 2) 更新 last_login
+    # Update last_login timestamp
     user.last_login = now
     await db.commit()
 
-    # 3) 更新内存（可选，将来可以删）
+    # Update in-memory cache (optional, can be removed later)
     users[user.user_id] = {
         "user_id": user.user_id,
         "email": user.email,
@@ -292,170 +365,22 @@ async def login(
     )
 
 
-# async def login(payload: LoginRequest):
-#     existing_id = None
-#     user_data = None
-#     user_found = False  # Track if user exists (regardless of password)
-
-#     # Try to get user from Redis cache first
-#     if redis_client.is_connected():
-#         # Look up user_id by email
-#         cached_user_id = redis_client.get(_user_email_cache_key(payload.email))
-#         if cached_user_id:
-#             user_found = True  # User exists
-#             # Get user data from cache
-#             cached_user = redis_client.get_json(_user_cache_key(cached_user_id))
-#             if cached_user:
-#                 # Verify password hash
-#                 if cached_user.get("password_hash") == payload.password_hash:
-#                     existing_id = cached_user_id
-#                     user_data = cached_user
-
-#     # Fallback to in-memory storage
-#     if not existing_id:
-#         for uid, u in users.items():
-#             if u["email"] == payload.email:
-#                 user_found = True  # User exists
-#                 # Verify password hash if stored
-#                 if u.get("password_hash") == payload.password_hash:
-#                     existing_id = uid
-#                     user_data = u
-#                     break
-
-#     # If user found but password doesn't match, return error
-#     if user_found and not existing_id:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Invalid email or password",
-#         )
-
-#     # If user not found, return error (don't auto-register for security)
-#     if not user_found:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Invalid email or password",  # Same message to prevent user enumeration
-#         )
-
-#     now = datetime.utcnow()
-#     token = f"atk_{uuid.uuid4().hex[:6]}"
-
-#     # Update last_login
-#     if user_data:
-#         user_data["last_login"] = now.isoformat()
-#         # Update in memory
-#         if existing_id in users:
-#             users[existing_id]["last_login"] = now
-#         # Update in Redis cache
-#         if redis_client.is_connected():
-#             redis_client.set_json(
-#                 _user_cache_key(existing_id), user_data, ttl=CACHE_TTL
-#             )
-#             # Cache auth token
-#             auth_data = {
-#                 "user_id": existing_id,
-#                 "email": payload.email,
-#                 "expires_in": AUTH_TOKEN_TTL,
-#                 "created_at": now.isoformat(),
-#             }
-#             redis_client.set_json(
-#                 _auth_token_cache_key(token), auth_data, ttl=AUTH_TOKEN_TTL
-#             )
-
-#     return LoginResponse(
-#         user_id=existing_id,
-#         status="authenticated",
-#         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-#         email=payload.email,
-#         device_id=payload.device_id,
-#         last_login=now,
-#     )
-
-
-# async def login(payload: LoginRequest):
-#     existing_id = None
-#     user_data = None
-#     user_found = False  # Track if user exists (regardless of password)
-
-#     # Try to get user from Redis cache first
-#     if redis_client.is_connected():
-#         # Look up user_id by email
-#         cached_user_id = redis_client.get(_user_email_cache_key(payload.email))
-#         if cached_user_id:
-#             user_found = True  # User exists
-#             # Get user data from cache
-#             cached_user = redis_client.get_json(_user_cache_key(cached_user_id))
-#             if cached_user:
-#                 # Verify password hash
-#                 if cached_user.get("password_hash") == payload.password_hash:
-#                     existing_id = cached_user_id
-#                     user_data = cached_user
-
-#     # Fallback to in-memory storage
-#     if not existing_id:
-#         for uid, u in users.items():
-#             if u["email"] == payload.email:
-#                 user_found = True  # User exists
-#                 # Verify password hash if stored
-#                 if u.get("password_hash") == payload.password_hash:
-#                     existing_id = uid
-#                     user_data = u
-#                     break
-
-#     # If user found but password doesn't match, return error
-#     if user_found and not existing_id:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Invalid email or password",
-#         )
-
-#     # If user not found, return error (don't auto-register for security)
-#     if not user_found:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Invalid email or password",  # Same message to prevent user enumeration
-#         )
-
-#     now = datetime.utcnow()
-#     token = f"atk_{uuid.uuid4().hex[:6]}"
-
-#     # Update last_login
-#     if user_data:
-#         user_data["last_login"] = now.isoformat()
-#         # Update in memory
-#         if existing_id in users:
-#             users[existing_id]["last_login"] = now
-#         # Update in Redis cache
-#         if redis_client.is_connected():
-#             redis_client.set_json(
-#                 _user_cache_key(existing_id), user_data, ttl=CACHE_TTL
-#             )
-#             # Cache auth token
-#             auth_data = {
-#                 "user_id": existing_id,
-#                 "email": payload.email,
-#                 "expires_in": AUTH_TOKEN_TTL,
-#                 "created_at": now.isoformat(),
-#             }
-#             redis_client.set_json(
-#                 _auth_token_cache_key(token), auth_data, ttl=AUTH_TOKEN_TTL
-#             )
-
-#     return LoginResponse(
-#         user_id=existing_id,
-#         status="authenticated",
-#         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-#         email=payload.email,
-#         device_id=payload.device_id,
-#         last_login=now,
-#     )
-
-
 @app.post(
     "/v1/users/{user_id}/preferences",
     response_model=PreferencesResponse,
     tags=["User Management"],
 )
-async def save_preferences(user_id: str, payload: PreferencesRequest):
+async def save_preferences(user_id, payload):
+    """
+    Save user preferences.
+
+    Args:
+        user_id: User identifier
+        payload: Preferences to save
+
+    Returns:
+        PreferencesResponse with saved preferences and timestamp
+    """
     now = datetime.utcnow()
 
     # Get user data from memory
@@ -472,9 +397,7 @@ async def save_preferences(user_id: str, payload: PreferencesRequest):
         users[user_id]["created_at"] = datetime.fromisoformat(user_data["created_at"])
     if isinstance(user_data.get("last_login"), str):
         users[user_id]["last_login"] = (
-            datetime.fromisoformat(user_data["last_login"])
-            if user_data.get("last_login")
-            else None
+            datetime.fromisoformat(user_data["last_login"]) if user_data.get("last_login") else None
         )
 
     return PreferencesResponse(
@@ -490,7 +413,17 @@ async def save_preferences(user_id: str, payload: PreferencesRequest):
     response_model=TrustedContactUpsertResponse,
     tags=["User Management"],
 )
-async def upsert_trusted_contact(user_id: str, payload: TrustedContactUpsertRequest):
+async def upsert_trusted_contact(user_id, payload):
+    """
+    Create or update a trusted contact for a user.
+
+    Args:
+        user_id: User identifier
+        payload: Contact information to create or update
+
+    Returns:
+        TrustedContactUpsertResponse with contact details and timestamp
+    """
     contacts = trusted_contacts.setdefault(user_id, [])
     if payload.contact_id:
         for c in contacts:
@@ -504,7 +437,7 @@ async def upsert_trusted_contact(user_id: str, payload: TrustedContactUpsertRequ
     else:
         contact_id = f"ctc_{uuid.uuid4().hex[:6]}"
         contacts.append({**payload.dict(), "contact_id": contact_id})
-    now = datetime.utcnow()
+    now: datetime = datetime.utcnow()
     stored = [c for c in contacts if c["contact_id"] == contact_id][0]
     contact_obj = TrustedContact(**stored)
     return TrustedContactUpsertResponse(
@@ -516,9 +449,26 @@ async def upsert_trusted_contact(user_id: str, payload: TrustedContactUpsertRequ
     )
 
 
-@app.get("/v1/users/{user_id}", response_model=UserResponse, tags=["User Management"])
-async def get_user(user_id: str, db: AsyncSession = Depends(get_db)):
-    # 1) Query PostgreSQL database (primary source of truth)
+@app.get(
+    "/v1/users/{user_id}",
+    response_model=UserResponse,
+    tags=["User Management"],
+)
+async def get_user(user_id, db=Depends(get_db)):
+    """
+    Get user information by user ID.
+
+    Args:
+        user_id: User identifier
+        db: Database session dependency
+
+    Returns:
+        UserResponse with user details
+
+    Raises:
+        HTTPException: 404 if user not found
+    """
+    # Query PostgreSQL database (primary source of truth)
     result = await db.execute(select(User).where(User.user_id == user_id))
     db_user = result.scalar_one_or_none()
 
@@ -539,7 +489,7 @@ async def get_user(user_id: str, db: AsyncSession = Depends(get_db)):
 
         return UserResponse(**u)
 
-    # 2) Fallback to in-memory storage (legacy compatibility)
+    # Fallback to in-memory storage (legacy compatibility)
     u = users.get(user_id)
     if u:
         # Remove password_hash from response
@@ -547,7 +497,7 @@ async def get_user(user_id: str, db: AsyncSession = Depends(get_db)):
         u.pop("password_hash", None)
         return UserResponse(**u)
 
-    # 3) User not found - return 404
+    # User not found - return 404
     raise HTTPException(
         status_code=status.HTTP_404_NOT_FOUND,
         detail=f"User {user_id} not found",
@@ -560,9 +510,19 @@ async def get_user(user_id: str, db: AsyncSession = Depends(get_db)):
     tags=["User Management"],
 )
 async def list_trusted_contacts(
-    user_id: str,
-    include_inactive: bool = Query(False, description="Mock flag; no effect in stub"),
+    user_id,
+    include_inactive=Query(False, description="Mock flag; no effect in stub"),
 ):
+    """
+    List all trusted contacts for a user.
+
+    Args:
+        user_id: User identifier
+        include_inactive: Flag to include inactive contacts (not implemented)
+
+    Returns:
+        TrustedContactsListResponse with list of contacts
+    """
     contacts = trusted_contacts.get(user_id, [])
     return TrustedContactsListResponse(
         user_id=user_id,
@@ -572,13 +532,21 @@ async def list_trusted_contacts(
 
 @app.get("/auth0/callback", tags=["Auth"])
 @app.post("/auth0/callback", tags=["Auth"])
-async def auth0_callback(code: Optional[str] = None, state: Optional[str] = None):
+async def auth0_callback(code=None, state=None):
     """
     Placeholder Auth0 OAuth2 callback endpoint.
 
     Currently just echoes code/state so the URL can be configured in Auth0.
+
+    Args:
+        code: OAuth authorization code
+        state: OAuth state parameter
+
+    Returns:
+        Dict with callback message and received parameters
     """
-    return {"message": "Auth0 callback received", "code": code, "state": state}
-
-
-# ========= Metrics endpoint for Prometheus =========
+    return {
+        "message": "Auth0 callback received",
+        "code": code,
+        "state": state,
+    }

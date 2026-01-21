@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-SafeRoute Backend - Service Orchestrator
+SafeRoute Backend - Service Orchestrator.
+
 Starts all microservices in the services folder.
 """
 import argparse
@@ -9,6 +10,8 @@ import os
 import sys
 import time
 
+import uvicorn
+
 # Service configuration: service_name -> (module_path, port)
 SERVICES = {
     "user_management": ("services.user_management.main", 20000),
@@ -16,7 +19,7 @@ SERVICES = {
     "routing_service": ("services.routing_service.main", 20002),
     "safety_scoring": ("services.safety_scoring.main", 20003),
     "feedback": ("services.feedback.main", 20004),
-    "data_cleaner": ("services.data_cleaner.main", 20005),  # Might remove this
+    "data_cleaner": ("services.data_cleaner.main", 20005),
     "sos": ("services.sos.main", 20006),
 }
 
@@ -24,10 +27,18 @@ SERVICES = {
 DOCS_SERVICE = ("docs.main", 8080)
 
 
-def run_service(module_path: str, port: int, service_name: str):
-    """Run a single service using uvicorn."""
-    import uvicorn
+def run_service(module_path, port, service_name):
+    """
+    Run a single service using uvicorn.
 
+    Args:
+        module_path: Python module path to the FastAPI app (e.g., 'services.user_management.main')
+        port: Port number to run the service on
+        service_name: Human-readable name of the service for logging
+
+    Raises:
+        SystemExit: If the service fails to start
+    """
     print(f"Starting {service_name} on port {port}...")
     try:
         uvicorn.run(
@@ -43,7 +54,12 @@ def run_service(module_path: str, port: int, service_name: str):
 
 
 def start_all_services():
-    """Start all services in separate processes."""
+    """
+    Start all services in separate processes.
+
+    Starts all microservices defined in SERVICES dictionary and the docs service.
+    Handles graceful shutdown on KeyboardInterrupt.
+    """
     processes = []
     service_names = []
 
@@ -74,7 +90,7 @@ def start_all_services():
     docs_process.start()
     processes.append(docs_process)
     service_names.append("service_discovery")
-    time.sleep(0.5)  # This is mannual, yeah I know this sucks
+    time.sleep(0.5)  # Delay to allow service initialization
 
     print()
     print("=" * 60)
@@ -105,8 +121,16 @@ def start_all_services():
         print("All services stopped.")
 
 
-def start_single_service(service_name: str):
-    """Start a single service."""
+def start_single_service(service_name):
+    """
+    Start a single service.
+
+    Args:
+        service_name: Name of the service to start (must be in SERVICES dict)
+
+    Raises:
+        SystemExit: If service_name is not found in SERVICES
+    """
     if service_name not in SERVICES:
         print(f"Unknown service: {service_name}")
         print(f"\nAvailable services: {', '.join(SERVICES.keys())}")
@@ -121,19 +145,28 @@ def start_single_service(service_name: str):
 
 
 def main():
-    """Main entry point."""
+    """
+    Main entry point for the service orchestrator.
+
+    Parses command-line arguments and either:
+    - Lists available services (--list)
+    - Starts a single service (--service <name>)
+    - Starts all services (default)
+    """
     parser = argparse.ArgumentParser(add_help=False)
 
     parser.add_argument(
         "--service",
         "-s",
         type=str,
+        help="Start a single service by name",
     )
 
     parser.add_argument(
         "--list",
         "-l",
         action="store_true",
+        help="List all available services",
     )
 
     args = parser.parse_args()
