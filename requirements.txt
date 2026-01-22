@@ -15,7 +15,7 @@ prometheus-client>=0.23.1
 greenlet>=3.0.0
 
 # --- Dev Tools ---
-black>=24.4.2 # Linter
+black>=24.10.0 # Linter
 flake8>=7.1.0 # Linter
 isort>=5.13.2 # Sort import
 mypy>=1.10.0 # Check types
