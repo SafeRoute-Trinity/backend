@@ -2,101 +2,49 @@
 # uvicorn services.safety_scoring.main:app --host 0.0.0.0 --port 20003 --reload
 # Docs: http://127.0.0.1:20003/docs
 
-import time
+import os
+import sys
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    CollectorRegistry,
-    Counter,
-    Histogram,
-    generate_latest,
-)
 from pydantic import BaseModel
 
-app = FastAPI(
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
+)
+
+# Create service configuration
+service_config = ServiceAppConfig(
     title="Safety Scoring Service",
-    version="1.0.0",
     description="Safety scoring, factors, and weights APIs.",
-)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    service_name="safety_scoring",
+    cors_config=CORSMiddlewareConfig(),
 )
 
-# ========= Metrics =========
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
 
-SERVICE_NAME = "safety_scoring"
-registry = CollectorRegistry()
-
-# Generic per-request counter (shared schema across services)
-REQUEST_COUNT = Counter(
-    "service_requests_total",
-    "Total HTTP requests handled by the service",
-    ["service", "method", "path", "http_status"],
-    registry=registry,
-)
-
-# Latency histogram per path
-REQUEST_LATENCY = Histogram(
-    "service_request_duration_seconds",
-    "Request latency in seconds",
-    ["service", "path"],
-    registry=registry,
-)
-
-# Business metrics for this service
-SAFETY_SCORE_ROUTE_REQUESTS_TOTAL = Counter(
+# Add business-specific metrics
+SAFETY_SCORE_ROUTE_REQUESTS_TOTAL = factory.add_business_metric(
     "safety_score_route_requests_total",
     "Total number of safety route scoring requests",
-    registry=registry,
 )
 
-SAFETY_FACTORS_QUERIES_TOTAL = Counter(
+SAFETY_FACTORS_QUERIES_TOTAL = factory.add_business_metric(
     "safety_factors_queries_total",
     "Total number of safety factors queries",
-    registry=registry,
 )
 
-SAFETY_WEIGHTS_UPDATES_TOTAL = Counter(
+SAFETY_WEIGHTS_UPDATES_TOTAL = factory.add_business_metric(
     "safety_weights_updates_total",
     "Total number of safety weights update requests",
-    registry=registry,
 )
-
-
-@app.middleware("http")
-async def prometheus_middleware(request: Request, call_next):
-    """
-    Track:
-    - request count
-    - latency per path
-    for every HTTP request handled by this service.
-    """
-    start = time.time()
-    response = await call_next(request)
-
-    path = request.url.path
-
-    REQUEST_COUNT.labels(
-        service=SERVICE_NAME,
-        method=request.method,
-        path=path,
-        http_status=response.status_code,
-    ).inc()
-
-    REQUEST_LATENCY.labels(
-        service=SERVICE_NAME,
-        path=path,
-    ).observe(time.time() - start)
-
-    return response
 
 
 class Point(BaseModel):
@@ -257,11 +205,3 @@ async def update_weights(body: SafetyWeightsRequest):
         weights_sum=total,
         updated_at=datetime.utcnow(),
     )
-
-
-@app.get("/metrics")
-async def metrics():
-    """
-    Expose Prometheus metrics for this Safety Scoring service.
-    """
-    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

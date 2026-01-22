@@ -1,14 +1,12 @@
-# libs/auth/auth0_verify.py
 """
 Auth0 verification module for FastAPI.
 
-- verify_token: FastAPI dependency to protect routes
-- router:      /auth0/verify endpoint for quick health check
-- (optional) app: minimal FastAPI app for standalone local testing
+Provides JWT token verification using Auth0's JWKS endpoint.
+Use verify_token as a FastAPI dependency to protect routes.
 
-Env vars (with safe defaults for local dev):
-- AUTH0_DOMAIN   e.g. dev-xxxxxx.us.auth0.com
-- API_AUDIENCE   e.g. https://api.saferoute.dev
+Environment variables (with safe defaults for local dev):
+    AUTH0_DOMAIN: Auth0 domain (e.g., dev-xxxxxx.us.auth0.com)
+    API_AUDIENCE: API audience identifier (e.g., https://api.saferoute.dev)
 """
 
 import json
@@ -18,34 +16,55 @@ import certifi
 import jwt
 import requests
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.security import HTTPBearer
 from jwt.algorithms import RSAAlgorithm
 
-# ---------- Config ----------
-AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "dev-ne8wedb5815zl4wf.us.auth0.com")
-API_AUDIENCE = os.getenv("API_AUDIENCE", "https://api.saferoute.dev")
-ISSUER = f"https://{AUTH0_DOMAIN}/"
-JWKS_URL = f"{ISSUER}.well-known/jwks.json"
-ALGORITHMS = ["RS256"]
+from common.constants import ALGORITHMS, API_AUDIENCE, ISSUER, JWKS_URL
 
-
-# ---------- Security scheme ----------
+# Security scheme
 security = HTTPBearer()
 
 
-def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+def verify_token(
+    credentials=Depends(security),
+):
     """
-    Verify JWT issued by Auth0 using JWKS (fetched via requests/certifi).
-    Use as a FastAPI dependency on protected routes.
+    Verify JWT token issued by Auth0 using JWKS.
+
+    Fetches the JSON Web Key Set (JWKS) from Auth0 and verifies the token
+    signature, expiration, audience, and issuer.
+
+    Args:
+        credentials: HTTP authorization credentials containing the JWT token
+
+    Returns:
+        Dict containing the decoded JWT payload
+
+    Raises:
+        HTTPException: If token verification fails for any reason
+            - 401: SSL error fetching JWKS
+            - 401: HTTP error fetching JWKS
+            - 401: Token expired
+            - 401: Invalid audience
+            - 401: Invalid issuer
+            - 401: Token verification failed
+
+    Example:
+        ```python
+        @app.get("/protected")
+        async def protected_route(payload: dict = Depends(verify_token)):
+            user_id = payload.get("sub")
+            return {"user_id": user_id}
+        ```
     """
     token = credentials.credentials
     try:
-        # 1) Fetch JWKS with trusted CA bundle
+        # Fetch JWKS with trusted CA bundle
         resp = requests.get(JWKS_URL, timeout=5, verify=certifi.where())
         resp.raise_for_status()
         jwks = resp.json()
 
-        # 2) Match JWK by kid from token header
+        # Match JWK by kid from token header
         header = jwt.get_unverified_header(token)
         kid = header.get("kid")
         if not kid:
@@ -54,7 +73,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         if not key_dict:
             raise ValueError("No matching JWK for token 'kid'")
 
-        # 3) Build public key and decode
+        # Build public key and decode token
         public_key = RSAAlgorithm.from_jwk(json.dumps(key_dict))
         payload = jwt.decode(
             token,
@@ -76,9 +95,7 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
             detail=f"HTTP error fetching JWKS: {e}",
         ) from e
     except jwt.ExpiredSignatureError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired"
-        ) from e
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired") from e
     except jwt.InvalidAudienceError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid audience"
@@ -94,17 +111,25 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
         ) from e
 
 
-# ---------- Router (recommended) ----------
+# Router for Auth0 verification endpoints
 router = APIRouter(prefix="/auth0", tags=["auth"])
 
 
 @router.get("/verify")
-def verify(payload: dict = Depends(verify_token)):
-    """Protected endpoint—returns user info if token is valid."""
+def verify(payload=Depends(verify_token)):
+    """
+    Protected endpoint that returns user info if token is valid.
+
+    Args:
+        payload: Decoded JWT payload from verify_token dependency
+
+    Returns:
+        Dict containing validation message and user ID from token
+    """
     return {"message": "Token valid ✅", "user": payload.get("sub")}
 
 
-# ---------- Minimal standalone app (optional for local testing) ----------
+# Minimal standalone app for local testing
 if os.getenv("AUTH0_STANDALONE", "0") == "1":
     from fastapi import FastAPI
 

@@ -27,5 +27,5 @@ COPY . .
 # 暴露端口（FastAPI 默认12345）
 EXPOSE 12345
 
-# 启动命令（生产环境建议用 --workers 4）
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "12345"]
+# 启动命令 - Service Discovery endpoint
+CMD ["uvicorn", "docs.main:app", "--host", "0.0.0.0", "--port", "12345"]

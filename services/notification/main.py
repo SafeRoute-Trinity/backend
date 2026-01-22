@@ -4,22 +4,13 @@
 
 import os
 import sys
-import time
 import uuid
 from datetime import datetime
 from typing import Dict, Literal, Optional
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    CollectorRegistry,
-    Counter,
-    Histogram,
-    generate_latest,
-)
+from fastapi import HTTPException
 from pydantic import BaseModel
 
 # Load environment variables from .env file
@@ -28,86 +19,38 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
+)
 from libs.service_urls import SOS_SERVICE_URL
 from libs.twilio_client import get_twilio_client
 
-app = FastAPI(
+# Create service configuration
+service_config = ServiceAppConfig(
     title="Notification Service",
-    version="1.0.0",
     description="Create and check SOS notifications (SMS/Call).",
+    service_name="notification",
+    cors_config=CORSMiddlewareConfig(),
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
+
+# Add business-specific metrics
+NOTIFICATION_SOS_CREATED_TOTAL = factory.add_business_metric(
+    "notification_sos_created_total",
+    "Total number of SOS notifications created",
+)
+
+NOTIFICATION_STATUS_CHECKS_TOTAL = factory.add_business_metric(
+    "notification_status_checks_total",
+    "Total number of notification status lookups",
 )
 
 NOTIFICATIONS = {}
-
-# ========= Metrics =========
-
-SERVICE_NAME = "notification"
-registry = CollectorRegistry()
-
-# Generic per-request counter
-REQUEST_COUNT = Counter(
-    "service_requests_total",
-    "Total HTTP requests handled by the service",
-    ["service", "method", "path", "http_status"],
-    registry=registry,
-)
-
-# Latency histogram
-REQUEST_LATENCY = Histogram(
-    "service_request_duration_seconds",
-    "Request latency in seconds",
-    ["service", "path"],
-    registry=registry,
-)
-
-# Business metrics
-NOTIFICATION_SOS_CREATED_TOTAL = Counter(
-    "notification_sos_created_total",
-    "Total number of SOS notifications created",
-    registry=registry,
-)
-
-NOTIFICATION_STATUS_CHECKS_TOTAL = Counter(
-    "notification_status_checks_total",
-    "Total number of notification status lookups",
-    registry=registry,
-)
-
-
-@app.middleware("http")
-async def prometheus_middleware(request: Request, call_next):
-    """
-    Track:
-    - request count
-    - latency per path
-    """
-    start = time.time()
-    response = await call_next(request)
-
-    path = request.url.path
-
-    # Count requests
-    REQUEST_COUNT.labels(
-        service=SERVICE_NAME,
-        method=request.method,
-        path=path,
-        http_status=response.status_code,
-    ).inc()
-
-    # Request time
-    REQUEST_LATENCY.labels(
-        service=SERVICE_NAME,
-        path=path,
-    ).observe(time.time() - start)
-
-    return response
 
 
 # ========= Models =========
@@ -140,9 +83,7 @@ class CreateResp(BaseModel):
 
 
 class StatusResult(BaseModel):
-    sms_status: Literal[
-        "queued", "sending", "sent", "delivered", "failed", "not_triggered"
-    ]
+    sms_status: Literal["queued", "sending", "sent", "delivered", "failed", "not_triggered"]
     push_status: Literal["sent", "failed", "not_triggered"]
     call_status: Literal["queued", "calling", "answered", "failed", "not_triggered"]
 
@@ -182,9 +123,7 @@ async def health():
     return {"status": "ok", "service": "notification"}
 
 
-async def send_push_notification(
-    user_id: str, message: str, location: Optional[Location]
-) -> dict:
+async def send_push_notification(user_id: str, message: str, location: Optional[Location]) -> dict:
     """
     Dummy implementation for push notification.
     In production, this would integrate with FCM/APNs.
@@ -219,16 +158,12 @@ async def send_sms_via_sos_service(body: SOSNotificationRequest) -> dict:
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{SOS_SERVICE_URL}/v1/emergency/sms", json=payload
-            )
+            response = await client.post(f"{SOS_SERVICE_URL}/v1/emergency/sms", json=payload)
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
         print(f"Error calling SOS service: {e}")
-        raise HTTPException(
-            status_code=503, detail=f"Failed to send SMS via SOS service: {str(e)}"
-        )
+        raise HTTPException(status_code=503, detail=f"Failed to send SMS via SOS service: {str(e)}")
 
 
 @app.post("/v1/notifications/sos", response_model=CreateResp)
@@ -263,9 +198,7 @@ async def create_sos(body: SOSNotificationRequest):
     try:
         sms_result = await send_sms_via_sos_service(body)
         sms_status = sms_result.get("status", "failed")
-        print(
-            f"✓ SMS via SOS service: {sms_status} (SID: {sms_result.get('sms_id', 'N/A')})"
-        )
+        print(f"✓ SMS via SOS service: {sms_status} (SID: {sms_result.get('sms_id', 'N/A')})")
 
         if sms_status == "sent":
             notification_status = "delivered"
@@ -334,13 +267,6 @@ async def test_sms(body: TestSMSRequest):
         )
     except ValueError as e:
         # Twilio not configured
-        raise HTTPException(
-            status_code=500, detail=f"Twilio configuration error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Twilio configuration error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
-
-
-@app.get("/metrics")
-async def metrics():
-    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
