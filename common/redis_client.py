@@ -19,7 +19,7 @@ import base64
 import json
 import os
 import time
-from typing import Optional
+from typing import Optional, Set
 
 import redis
 from redis.exceptions import ConnectionError, RedisError, TimeoutError
@@ -300,7 +300,7 @@ class RedisClient:
             self.client = None
             return -2
 
-    def delete_many(self, keys: list[str]) -> int:
+    def delete_many(self, keys: list) -> int:
         """
         Delete multiple keys from Redis.
         
@@ -366,7 +366,7 @@ class RedisClient:
             self.client = None
             return 0
 
-    def smembers(self, key: str) -> set[str]:
+    def smembers(self, key: str) -> Set[str]:
         """
         Get all members of a Redis Set.
         
