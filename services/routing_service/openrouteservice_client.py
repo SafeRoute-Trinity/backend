@@ -28,13 +28,9 @@ try:
             logging.getLogger(__name__).debug(f"Loaded .env from {env_path}")
         else:
             load_dotenv()  # Load from default location
-            logging.getLogger(__name__).debug(
-                "Attempted to load .env from default location"
-            )
+            logging.getLogger(__name__).debug("Attempted to load .env from default location")
 except ImportError:
-    logging.getLogger(__name__).warning(
-        "python-dotenv not installed, .env file will not be loaded"
-    )
+    logging.getLogger(__name__).warning("python-dotenv not installed, .env file will not be loaded")
 except Exception as e:
     logging.getLogger(__name__).warning(f"Failed to load .env file: {e}")
 
@@ -61,9 +57,7 @@ class OpenRouteServiceClient:
         if self.api_key:
             # Log partial key for debugging (first 4 and last 4 chars)
             masked_key = (
-                f"{self.api_key[:4]}...{self.api_key[-4:]}"
-                if len(self.api_key) > 8
-                else "***"
+                f"{self.api_key[:4]}...{self.api_key[-4:]}" if len(self.api_key) > 8 else "***"
             )
             logger.info(f"OpenRouteService API key loaded: {masked_key}")
         else:
@@ -154,9 +148,7 @@ class OpenRouteServiceClient:
             logger.error(f"OpenRouteService request error: {e}")
             return None
         except Exception as e:
-            logger.error(
-                f"Unexpected error calling OpenRouteService: {e}", exc_info=True
-            )
+            logger.error(f"Unexpected error calling OpenRouteService: {e}", exc_info=True)
             return None
 
     async def get_isochrones(
@@ -224,9 +216,7 @@ class OpenRouteServiceClient:
             logger.error(f"OpenRouteService request error: {e}")
             return None
         except Exception as e:
-            logger.error(
-                f"Unexpected error calling OpenRouteService: {e}", exc_info=True
-            )
+            logger.error(f"Unexpected error calling OpenRouteService: {e}", exc_info=True)
             return None
 
 

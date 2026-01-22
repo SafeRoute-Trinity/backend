@@ -36,9 +36,7 @@ def test_score_route():
 
 
 def test_safety_factors_and_weights():
-    r = client.post(
-        "/v1/safety/factors", json={"lat": 53.34, "lon": -6.26, "radius_m": 50}
-    )
+    r = client.post("/v1/safety/factors", json={"lat": 53.34, "lon": -6.26, "radius_m": 50})
     assert r.status_code == 200
     assert "composite_score" in r.json()
 

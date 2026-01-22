@@ -203,9 +203,7 @@ async def calc(body: RouteCalculateRequest):
         safety_score=87.5,
         waypoints=[
             Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
-            Waypoint(
-                lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"
-            ),
+            Waypoint(lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"),
         ],
     )
     ROUTES[rid] = {
@@ -228,9 +226,7 @@ async def recalc(route_id: str, body: RecalculateRequest):
             origin=body.current_location,
             destination=body.current_location,
             user_id="demo",
-            preferences=RoutePreferences(
-                optimize_for="balanced", transport_mode="walking"
-            ),
+            preferences=RoutePreferences(optimize_for="balanced", transport_mode="walking"),
         )
     )
 

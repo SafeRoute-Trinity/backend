@@ -113,9 +113,7 @@ class FastAPIServiceFactory:
             config: ServiceAppConfig containing all service-specific settings
         """
         self.config = config
-        self.metrics = (
-            ServiceMetrics(config.service_name) if config.enable_metrics else None
-        )
+        self.metrics = ServiceMetrics(config.service_name) if config.enable_metrics else None
 
     def create_app(self) -> FastAPI:
         """
@@ -183,9 +181,7 @@ class FastAPIServiceFactory:
                 media_type=CONTENT_TYPE_LATEST,
             )
 
-    def add_business_metric(
-        self, name: str, description: str, labels: List[str] = None
-    ) -> Counter:
+    def add_business_metric(self, name: str, description: str, labels: List[str] = None) -> Counter:
         """
         Add a business-specific metric counter.
 

@@ -108,23 +108,18 @@ def convert_ors_route_to_mapbox(
         # Fallback: routes-style JSON (no "features" key)
         elif "routes" in ors_response:
             logger.debug(
-                "Converting OpenRouteService 'routes' response "
-                "(non-GeoJSON) to GeoJSON"
+                "Converting OpenRouteService 'routes' response " "(non-GeoJSON) to GeoJSON"
             )
             for idx, route in enumerate(ors_response.get("routes", [])):
                 geometry = route.get("geometry")
                 if not geometry:
-                    logger.warning(
-                        "Route is missing 'geometry' field; skipping this route"
-                    )
+                    logger.warning("Route is missing 'geometry' field; skipping this route")
                     continue
 
                 # Decode encoded polyline geometry into coordinates
                 coords = _decode_polyline(geometry, precision=5)
                 if not coords:
-                    logger.warning(
-                        "Decoded geometry is empty for route; skipping this route"
-                    )
+                    logger.warning("Decoded geometry is empty for route; skipping this route")
                     continue
 
                 summary = route.get("summary", {})
@@ -147,15 +142,12 @@ def convert_ors_route_to_mapbox(
                 features.append(mapbox_feature)
         else:
             logger.error(
-                "Invalid OpenRouteService response: missing both "
-                "'features' and 'routes'"
+                "Invalid OpenRouteService response: missing both " "'features' and 'routes'"
             )
             return None
 
         if not features:
-            logger.warning(
-                "No valid LineString features found in OpenRouteService response"
-            )
+            logger.warning("No valid LineString features found in OpenRouteService response")
             return None
 
         return {
@@ -213,9 +205,7 @@ def convert_ors_isochrone_to_mapbox(
             features.append(mapbox_feature)
 
         if not features:
-            logger.warning(
-                "No valid Polygon features found in OpenRouteService response"
-            )
+            logger.warning("No valid Polygon features found in OpenRouteService response")
             return None
 
         return {

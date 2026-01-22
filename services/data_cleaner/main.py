@@ -162,9 +162,7 @@ async def sanitize(body: DataSanitizeRequest):
 async def audit_log(body: AuditLogRequest):
     log_id = f"log_{len(AUDIT)+1:06d}"
     AUDIT.append({**body.dict(), "log_id": log_id})
-    return AuditLogResponse(
-        log_id=log_id, status="recorded", created_at=datetime.utcnow()
-    )
+    return AuditLogResponse(log_id=log_id, status="recorded", created_at=datetime.utcnow())
 
 
 @app.post("/v1/audit/query", response_model=AuditQueryResponse)

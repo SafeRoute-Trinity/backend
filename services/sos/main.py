@@ -159,7 +159,9 @@ async def sms(body: EmergencySMSRequest):
 
     # Add location if provided
     if body.location:
-        location_text = f"\n\nLocation: https://maps.google.com/?q={body.location.lat},{body.location.lon}"
+        location_text = (
+            f"\n\nLocation: https://maps.google.com/?q={body.location.lat},{body.location.lon}"
+        )
         if body.location.accuracy_m:
             location_text += f" (±{body.location.accuracy_m}m)"
         message += location_text
@@ -246,8 +248,6 @@ async def test_sms(body: TestSMSRequest):
         )
     except ValueError as e:
         # Twilio not configured
-        raise HTTPException(
-            status_code=500, detail=f"Twilio configuration error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Twilio configuration error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
