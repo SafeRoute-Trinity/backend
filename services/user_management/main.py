@@ -404,17 +404,36 @@ async def login(
     response_model=PreferencesResponse,
     tags=["User Management"],
 )
-async def save_preferences(user_id, payload):
+async def save_preferences(
+    user_id: str,
+    payload: PreferencesRequest,
+    auth: dict = Depends(verify_token_with_session),
+):
     """
-    Save user preferences.
+    Save user preferences (protected endpoint).
 
     Args:
-        user_id: User identifier
+        user_id: User identifier (must match authenticated user)
         payload: Preferences to save
+        auth: Enhanced auth object from verify_token_with_session dependency
 
     Returns:
         PreferencesResponse with saved preferences and timestamp
+
+    Raises:
+        HTTPException: 401 if not authenticated or user_id mismatch
+        HTTPException: 403 if user tries to modify another user's preferences
     """
+    # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
+    auth_sub = auth["sub"]
+    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+
+    # Verify user can only modify their own preferences
+    if auth_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only modify your own preferences",
+        )
     now = datetime.utcnow()
 
     # Get user data from memory
@@ -447,17 +466,36 @@ async def save_preferences(user_id, payload):
     response_model=TrustedContactUpsertResponse,
     tags=["User Management"],
 )
-async def upsert_trusted_contact(user_id, payload):
+async def upsert_trusted_contact(
+    user_id: str,
+    payload: TrustedContactUpsertRequest,
+    auth: dict = Depends(verify_token_with_session),
+):
     """
-    Create or update a trusted contact for a user.
+    Create or update a trusted contact for a user (protected endpoint).
 
     Args:
-        user_id: User identifier
+        user_id: User identifier (must match authenticated user)
         payload: Contact information to create or update
+        auth: Enhanced auth object from verify_token_with_session dependency
 
     Returns:
         TrustedContactUpsertResponse with contact details and timestamp
+
+    Raises:
+        HTTPException: 401 if not authenticated
+        HTTPException: 403 if user tries to modify another user's contacts
     """
+    # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
+    auth_sub = auth["sub"]
+    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+
+    # Verify user can only modify their own contacts
+    if auth_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only modify your own trusted contacts",
+        )
     contacts = trusted_contacts.setdefault(user_id, [])
     if payload.contact_id:
         for c in contacts:
@@ -488,20 +526,37 @@ async def upsert_trusted_contact(user_id, payload):
     response_model=UserResponse,
     tags=["User Management"],
 )
-async def get_user(user_id, db=Depends(get_db)):
+async def get_user(
+    user_id: str,
+    auth: dict = Depends(verify_token_with_session),
+    db=Depends(get_db),
+):
     """
-    Get user information by user ID.
+    Get user information by user ID (protected endpoint).
 
     Args:
-        user_id: User identifier
+        user_id: User identifier (must match authenticated user)
+        auth: Enhanced auth object from verify_token_with_session dependency
         db: Database session dependency
 
     Returns:
         UserResponse with user details
 
     Raises:
+        HTTPException: 401 if not authenticated
+        HTTPException: 403 if user tries to access another user's data
         HTTPException: 404 if user not found
     """
+    # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
+    auth_sub = auth["sub"]
+    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+
+    # Verify user can only access their own data
+    if auth_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only access your own user information",
+        )
     # Query PostgreSQL database (primary source of truth)
     result = await db.execute(select(User).where(User.user_id == user_id))
     db_user = result.scalar_one_or_none()
@@ -544,19 +599,35 @@ async def get_user(user_id, db=Depends(get_db)):
     tags=["User Management"],
 )
 async def list_trusted_contacts(
-    user_id,
+    user_id: str,
+    auth: dict = Depends(verify_token_with_session),
     include_inactive=Query(False, description="Mock flag; no effect in stub"),
 ):
     """
-    List all trusted contacts for a user.
+    List all trusted contacts for a user (protected endpoint).
 
     Args:
-        user_id: User identifier
+        user_id: User identifier (must match authenticated user)
+        auth: Enhanced auth object from verify_token_with_session dependency
         include_inactive: Flag to include inactive contacts (not implemented)
 
     Returns:
         TrustedContactsListResponse with list of contacts
+
+    Raises:
+        HTTPException: 401 if not authenticated
+        HTTPException: 403 if user tries to access another user's contacts
     """
+    # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
+    auth_sub = auth["sub"]
+    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+
+    # Verify user can only access their own contacts
+    if auth_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only access your own trusted contacts",
+        )
     contacts = trusted_contacts.get(user_id, [])
     return TrustedContactsListResponse(
         user_id=user_id,
