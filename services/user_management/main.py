@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 from common.auth.session import get_session_manager
 from common.constants import AUTH_TOKEN_TTL
-from libs.auth.auth0_verify import verify_token
+from libs.auth.auth0_verify import verify_token, verify_token_with_session
 from libs.db import get_db
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -669,6 +669,58 @@ async def metrics_endpoint():
     Prometheus will scrape this endpoint inside the cluster.
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
+@app.get(
+    "/v1/users/me",
+    response_model=UserResponse,
+    tags=["User Management"],
+    summary="Get current user information (protected)",
+)
+async def get_current_user(
+    auth: dict = Depends(verify_token_with_session),
+):
+    """
+    Get current user information (protected endpoint example).
+    
+    This endpoint demonstrates how to use verify_token_with_session:
+    - Requires valid JWT token
+    - Requires valid Redis session
+    - Automatically validates session belongs to token user
+    - Updates session last_seen_at for sliding TTL
+    
+    Mobile app must send:
+    - Authorization: Bearer <access_token>
+    - X-Session-Id: <sid>
+    - X-Device-Id: <device_id> (optional)
+    
+    Args:
+        auth: Enhanced auth object from verify_token_with_session dependency
+            Contains JWT claims, session_id, and session_data
+            
+    Returns:
+        UserResponse with user information
+        
+    Raises:
+        HTTPException: 401 if JWT or session is invalid
+        HTTPException: 503 if Redis is unavailable
+    """
+    sub = auth["sub"]
+    session_data = auth["session_data"]
+    
+    # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
+    user_id = sub.split("|")[-1] if "|" in sub else sub
+    
+    # In a real implementation, you would query the database
+    # For now, return mock data based on session
+    return UserResponse(
+        user_id=user_id,
+        name=session_data.get("device_name"),
+        email=f"{user_id}@example.com",  # Mock email
+        phone=None,
+        created_at=datetime.utcnow(),
+        last_login=None,
+    )
+
 
 # ========= Session Management Endpoints =========
 

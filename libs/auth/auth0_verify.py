@@ -11,14 +11,16 @@ Environment variables (with safe defaults for local dev):
 
 import json
 import os
+from typing import Optional
 
 import certifi
 import jwt
 import requests
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.security import HTTPBearer
 from jwt.algorithms import RSAAlgorithm
 
+from common.auth.session import get_session_manager
 from common.constants import ALGORITHMS, API_AUDIENCE, ISSUER, JWKS_URL
 
 # Security scheme
@@ -127,6 +129,115 @@ def verify(payload=Depends(verify_token)):
         Dict containing validation message and user ID from token
     """
     return {"message": "Token valid ✅", "user": payload.get("sub")}
+
+
+def verify_token_with_session(
+    token_payload: dict = Depends(verify_token),
+    session_id: Optional[str] = Header(None, alias="X-Session-Id", description="Server session ID"),
+    device_id: Optional[str] = Header(None, alias="X-Device-Id", description="Device ID (optional)"),
+) -> dict:
+    """
+    Enhanced authentication dependency that combines JWT verification + Redis session check.
+    
+    This is the recommended dependency for protected endpoints in mobile apps.
+    
+    Validation flow:
+    1. Verify JWT (signature/aud/iss/exp) - via verify_token
+    2. Check Redis session exists - read session:<sid>
+    3. Match session to token subject - ensure session.sub == token.sub
+    4. (Optional) Check device_id matches session record
+    5. Update last_seen_at for sliding TTL
+    
+    Mobile app must send:
+    - Authorization: Bearer <access_token> (Auth0 JWT)
+    - X-Session-Id: <sid> (server session ID from /session/start)
+    - X-Device-Id: <device_id> (optional, for additional security)
+    
+    Args:
+        token_payload: Decoded JWT payload from verify_token dependency
+        session_id: Session ID from X-Session-Id header
+        device_id: Device ID from X-Device-Id header (optional)
+        
+    Returns:
+        Enhanced dict containing:
+        - All JWT claims (sub, exp, etc.)
+        - session_data: Session information from Redis
+        - session_id: Session ID
+        
+    Raises:
+        HTTPException: 401 if JWT is invalid, session not found, or session doesn't match user
+        HTTPException: 503 if Redis is unavailable (fail closed)
+        
+    Example:
+        ```python
+        @app.get("/protected")
+        async def protected_route(auth: dict = Depends(verify_token_with_session)):
+            user_id = auth["sub"]
+            session_id = auth["session_id"]
+            return {"user_id": user_id, "session_id": session_id}
+        ```
+    """
+    # Extract user ID from JWT
+    sub = token_payload.get("sub")
+    if not sub:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token: missing 'sub' claim",
+        )
+
+    # Session ID is required
+    if not session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing X-Session-Id header. Please call /session/start first.",
+        )
+
+    # Get session manager
+    session_manager = get_session_manager()
+
+    # Check Redis availability (fail closed)
+    if not session_manager.redis.is_connected():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Redis is unavailable. Session validation cannot proceed. "
+            "This is a fail-closed security policy.",
+        )
+
+    # Get session from Redis
+    session_data = session_manager.get_session(session_id)
+    
+    if not session_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session not found or expired. Please login again.",
+        )
+
+    # Verify session belongs to this user (prevents session stealing)
+    if session_data.get("sub") != sub:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Session does not match token user. Session may have been stolen.",
+        )
+
+    # Optional: Verify device_id matches (additional security layer)
+    if device_id:
+        session_device_id = session_data.get("device_id")
+        if session_device_id and session_device_id != device_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Device ID mismatch. Session may have been stolen.",
+            )
+
+    # Update last_seen_at for sliding TTL (if enabled)
+    # This happens in the background and doesn't block the request
+    session_manager.update_last_seen(session_id)
+
+    # Return enhanced auth object
+    return {
+        **token_payload,  # All JWT claims
+        "session_id": session_id,
+        "session_data": session_data,
+    }
 
 
 # Minimal standalone app for local testing
