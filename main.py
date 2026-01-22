@@ -98,7 +98,7 @@ def start_all_services():
             process.join()
     except KeyboardInterrupt:
         print("\n\nShutting down all services...")
-        for process, service_name in zip(processes, service_names):
+        for process, service_name in zip(processes, service_names, strict=True):
             if process.is_alive():
                 print(f"  Stopping {service_name}...")
                 process.terminate()
