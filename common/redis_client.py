@@ -19,7 +19,7 @@ import base64
 import json
 import os
 import time
-from typing import Optional, Set
+from typing import Optional, Set, List
 
 import redis
 from redis.exceptions import ConnectionError, RedisError, TimeoutError
@@ -300,7 +300,7 @@ class RedisClient:
             self.client = None
             return -2
 
-    def delete_many(self, keys: list) -> int:
+    def delete_many(self, keys: List[str]) -> int:
         """
         Delete multiple keys from Redis.
         
