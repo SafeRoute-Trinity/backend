@@ -315,7 +315,7 @@ async def root():
     summary="Register a new user",
 )
 async def register_user(
-    payload,
+    payload: RegisterRequest,
     db=Depends(get_db),
 ):
     """
@@ -402,7 +402,7 @@ async def register_user(
     tags=["User Management"],
 )
 async def login(
-    payload,
+    payload: LoginRequest,
     db=Depends(get_db),
 ):
     """

@@ -19,7 +19,7 @@ import base64
 import json
 import os
 import time
-from typing import Optional, Set, List
+from typing import List, Optional, Set
 
 import redis
 from redis.exceptions import ConnectionError, RedisError, TimeoutError
