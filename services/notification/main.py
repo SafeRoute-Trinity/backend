@@ -4,18 +4,9 @@
 
 import os
 import sys
-import time
 from typing import Dict
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
-from prometheus_client import (
-    CONTENT_TYPE_LATEST,
-    CollectorRegistry,
-    Counter,
-    Histogram,
-    generate_latest,
-)
+from fastapi import HTTPException
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,7 +19,6 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-from libs.service_urls import SOS_SERVICE_URL
 from libs.twilio_client import get_twilio_client
 from services.notification.manager import NotificationManager
 from services.notification.models import (
@@ -68,73 +58,6 @@ NOTIFICATION_STATUS_CHECKS_TOTAL = factory.add_business_metric(
 
 NOTIFICATIONS = {}
 manager = NotificationManager(NOTIFICATIONS)
-
-# ========= Metrics =========
-
-SERVICE_NAME = "notification"
-registry = CollectorRegistry()
-
-# Generic per-request counter
-REQUEST_COUNT = Counter(
-    "service_requests_total",
-    "Total HTTP requests handled by the service",
-    ["service", "method", "path", "http_status"],
-    registry=registry,
-)
-
-# Latency histogram
-REQUEST_LATENCY = Histogram(
-    "service_request_duration_seconds",
-    "Request latency in seconds",
-    ["service", "path"],
-    registry=registry,
-)
-
-# Business metrics
-NOTIFICATION_SOS_CREATED_TOTAL = Counter(
-    "notification_sos_created_total",
-    "Total number of SOS notifications created",
-    registry=registry,
-)
-
-NOTIFICATION_STATUS_CHECKS_TOTAL = Counter(
-    "notification_status_checks_total",
-    "Total number of notification status lookups",
-    registry=registry,
-)
-
-
-@app.middleware("http")
-async def prometheus_middleware(request: Request, call_next):
-    """
-    Track:
-    - request count
-    - latency per path
-    """
-    start = time.time()
-    response = await call_next(request)
-
-    path = request.url.path
-
-    # Count requests
-    REQUEST_COUNT.labels(
-        service=SERVICE_NAME,
-        method=request.method,
-        path=path,
-        http_status=response.status_code,
-    ).inc()
-
-    # Request time
-    REQUEST_LATENCY.labels(
-        service=SERVICE_NAME,
-        path=path,
-    ).observe(time.time() - start)
-
-    return response
-
-
-# ========= Routes =========
-
 
 # ========= Routes =========
 
@@ -205,8 +128,3 @@ async def test_sms(body: TestSMSRequest):
         raise HTTPException(status_code=500, detail=f"Twilio configuration error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
-
-
-@app.get("/metrics")
-async def metrics():
-    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
