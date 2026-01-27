@@ -23,6 +23,12 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
+)
+from libs.service_urls import SOS_SERVICE_URL
 from libs.twilio_client import get_twilio_client
 from services.notification.manager import NotificationManager
 from services.notification.models import (
@@ -37,17 +43,27 @@ from services.notification.models import (
     TestSMSResponse,
 )
 
-app = FastAPI(
+# Create service configuration
+service_config = ServiceAppConfig(
     title="Notification Service",
-    version="1.0.0",
     description="Create and check SOS notifications (SMS/Call).",
+    service_name="notification",
+    cors_config=CORSMiddlewareConfig(),
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
+
+# Add business-specific metrics
+NOTIFICATION_SOS_CREATED_TOTAL = factory.add_business_metric(
+    "notification_sos_created_total",
+    "Total number of SOS notifications created",
+)
+
+NOTIFICATION_STATUS_CHECKS_TOTAL = factory.add_business_metric(
+    "notification_status_checks_total",
+    "Total number of notification status lookups",
 )
 
 NOTIFICATIONS = {}
@@ -120,6 +136,9 @@ async def prometheus_middleware(request: Request, call_next):
 # ========= Routes =========
 
 
+# ========= Routes =========
+
+
 @app.get("/")
 async def root():
     return {"service": "notification", "status": "running"}
@@ -183,9 +202,7 @@ async def test_sms(body: TestSMSRequest):
         )
     except ValueError as e:
         # Twilio not configured
-        raise HTTPException(
-            status_code=500, detail=f"Twilio configuration error: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Twilio configuration error: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
 

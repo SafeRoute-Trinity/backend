@@ -7,3 +7,6 @@ geopy>=2.4.0
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.0
 prometheus-client>=0.23.1
+httpx>=0.24.0
+python-dotenv>=1.0.0
+prometheus-client>=0.23.1

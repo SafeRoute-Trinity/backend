@@ -3,8 +3,12 @@
 # Docs: http://127.0.0.1:20002/docs
 
 import time
+import logging
+import os
+import sys
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import List, Literal, Optional
 
 from fastapi import FastAPI, Request, Response
@@ -16,19 +20,89 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from fastapi import HTTPException, Query, status
 from pydantic import BaseModel
 
-app = FastAPI(
-    title="Routing Service",
-    version="1.0.0",
-    description="Route calculation & navigation session APIs.",
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+# Load .env file at startup (before other imports that need env vars)
+try:
+    from dotenv import load_dotenv
+
+    # Try to find .env file
+    env_path = Path(__file__).parent / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+        print(f"✅ Loaded .env from {env_path}")
+    else:
+        # Try backend root directory
+        env_path = Path(__file__).parent.parent.parent / ".env"
+        if env_path.exists():
+            load_dotenv(env_path)
+            print(f"✅ Loaded .env from {env_path}")
+        else:
+            load_dotenv()  # Load from default location
+            print("⚠️  Attempted to load .env from default location")
+except ImportError:
+    print("⚠️  python-dotenv not installed, .env file will not be loaded")
+except Exception as e:
+    print(f"⚠️  Failed to load .env file: {e}")
+
+try:
+    # Try relative imports first (when run as module)
+    from .mapbox_converter import (
+        convert_ors_isochrone_to_mapbox,
+        convert_ors_route_to_mapbox,
+    )
+    from .openrouteservice_client import get_ors_client
+except ImportError:
+    # Fall back to absolute imports (when run directly)
+    from mapbox_converter import (
+        convert_ors_isochrone_to_mapbox,
+        convert_ors_route_to_mapbox,
+    )
+    from openrouteservice_client import get_ors_client
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# Create service configuration
+service_config = ServiceAppConfig(
+    title="Routing Service",
+    description="Route calculation & navigation session APIs.",
+    service_name="routing_service",
+    cors_config=CORSMiddlewareConfig(),
+)
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
+
+# Add business-specific metrics
+ROUTING_ROUTE_CALCULATIONS_TOTAL = factory.add_business_metric(
+    "routing_route_calculations_total",
+    "Total number of initial route calculation requests",
+)
+
+ROUTING_ROUTE_RECALCULATIONS_TOTAL = factory.add_business_metric(
+    "routing_route_recalculations_total",
+    "Total number of route recalculation requests",
+)
+
+ROUTING_NAVIGATION_STARTS_TOTAL = factory.add_business_metric(
+    "routing_navigation_starts_total",
+    "Total number of navigation sessions started",
 )
 
 ROUTES = {}
@@ -171,11 +245,32 @@ async def root():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "routing_service"}
+    """Health check endpoint with OpenRouteService status."""
+    import os
+
+    ors_client = get_ors_client()
+    ors_enabled = ors_client._is_enabled()
+
+    # Check environment variable for debugging
+    env_key_exists = os.getenv("ORS_API_KEY") is not None
+    env_key_set = bool(os.getenv("ORS_API_KEY"))
+
+    return {
+        "status": "ok",
+        "service": "routing_service",
+        "openrouteservice": "enabled" if ors_enabled else "disabled",
+        "openrouteservice_env_check": {
+            "ORS_API_KEY_exists": env_key_exists,
+            "ORS_API_KEY_set": env_key_set,
+        },
+    }
 
 
 @app.post("/v1/routes/calculate", response_model=RouteCalculateResponse)
 async def calc(body: RouteCalculateRequest):
+    # Business metric: initial route calculation
+    ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
+
     # Business metric: initial route calculation
     ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
 
@@ -190,9 +285,7 @@ async def calc(body: RouteCalculateRequest):
         safety_score=87.5,
         waypoints=[
             Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
-            Waypoint(
-                lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"
-            ),
+            Waypoint(lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"),
         ],
     )
     ROUTES[rid] = {
@@ -210,20 +303,25 @@ async def recalc(route_id: str, body: RecalculateRequest):
     ROUTING_ROUTE_RECALCULATIONS_TOTAL.inc()
 
     # For mock purposes, reuse calc with current_location as both origin & dest
+    # Business metric: route recalculation
+    ROUTING_ROUTE_RECALCULATIONS_TOTAL.inc()
+
+    # For mock purposes, reuse calc with current_location as both origin & dest
     return await calc(
         RouteCalculateRequest(
             origin=body.current_location,
             destination=body.current_location,
             user_id="demo",
-            preferences=RoutePreferences(
-                optimize_for="balanced", transport_mode="walking"
-            ),
+            preferences=RoutePreferences(optimize_for="balanced", transport_mode="walking"),
         )
     )
 
 
 @app.post("/v1/navigation/start", response_model=NavigationStartResponse)
 async def nav_start(body: NavigationStartRequest):
+    # Business metric: navigation session started
+    ROUTING_NAVIGATION_STARTS_TOTAL.inc()
+
     # Business metric: navigation session started
     ROUTING_NAVIGATION_STARTS_TOTAL.inc()
 

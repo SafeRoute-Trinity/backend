@@ -1,3 +1,4 @@
+
 # Project dependencies
 fastapi>=0.100.0
 uvicorn[standard]>=0.24.0
@@ -6,14 +7,17 @@ python-multipart>=0.0.6
 geopy>=2.4.0
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.0
+asyncpg>=0.29.0
 redis>=5.0.0
 twilio>=8.10.0
 httpx>=0.25.0
 prometheus-client>=0.23.1
+greenlet>=3.0.0
+prometheus-client>=0.23.1
 
 
 # --- Dev Tools ---
-black>=24.4.2 # Linter
+black>=24.10.0 # Linter
 flake8>=7.1.0 # Linter
 isort>=5.13.2 # Sort import
 mypy>=1.10.0 # Check types

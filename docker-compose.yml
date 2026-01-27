@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: services/user_management/dockerfile
-    image: saferoute/user-management:latest
+    image: saferoute/user_management:latest
     container_name: saferoute-user-management
     platform: linux/amd64
     ports:
@@ -45,7 +45,7 @@ services:
     build:
       context: .
       dockerfile: services/safety_scoring/dockerfile
-    image: saferoute/safety-scoring:latest
+    image: saferoute/safety_score:latest
     container_name: saferoute-safety-scoring
     platform: linux/amd64
     ports:

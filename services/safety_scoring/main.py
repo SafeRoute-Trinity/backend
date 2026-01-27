@@ -3,6 +3,8 @@
 # Docs: http://127.0.0.1:20003/docs
 
 import time
+import os
+import sys
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
@@ -17,9 +19,18 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
-app = FastAPI(
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
+)
+
+# Create service configuration
+service_config = ServiceAppConfig(
     title="Safety Scoring Service",
-    version="1.0.0",
     description="Safety scoring, factors, and weights APIs.",
 )
 app.add_middleware(

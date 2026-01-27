@@ -26,9 +26,7 @@ class TwilioClient:
 
         self.client = Client(self.account_sid, self.auth_token)
 
-    def send_sms(
-        self, to_phone: str, message: str, from_phone: Optional[str] = None
-    ) -> dict:
+    def send_sms(self, to_phone: str, message: str, from_phone: Optional[str] = None) -> dict:
         """
         Send an SMS message
 
@@ -72,9 +70,7 @@ class TwilioClient:
                 "error": f"Unexpected error: {str(e)}",
             }
 
-    def make_call(
-        self, to_phone: str, twiml_url: str, from_phone: Optional[str] = None
-    ) -> dict:
+    def make_call(self, to_phone: str, twiml_url: str, from_phone: Optional[str] = None) -> dict:
         """
         Make a voice call
 

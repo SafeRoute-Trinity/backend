@@ -2,6 +2,8 @@
 # uvicorn services.feedback.main:app --host 0.0.0.0 --port 20004 --reload
 # Docs: http://127.0.0.1:20004/docs
 
+import os
+import sys
 import time
 import uuid
 from datetime import datetime
@@ -18,17 +20,41 @@ from prometheus_client import (
 )
 from pydantic import BaseModel, HttpUrl
 
-app = FastAPI(
-    title="Feedback Service",
-    version="1.0.0",
-    description="Submit/validate feedback and check status.",
+# Add parent directory to path for imports
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+# Create service configuration
+service_config = ServiceAppConfig(
+    title="Feedback Service",
+    description="Submit/validate feedback and check status.",
+    service_name="feedback",
+    cors_config=CORSMiddlewareConfig(),
+)
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
+
+# Add business-specific metrics
+FEEDBACK_SUBMISSIONS_TOTAL = factory.add_business_metric(
+    "feedback_submissions_total",
+    "Total feedback submissions received",
+)
+
+FEEDBACK_VALIDATIONS_TOTAL = factory.add_business_metric(
+    "feedback_validations_total",
+    "Total feedback validation attempts",
+)
+
+FEEDBACK_STATUS_CHECKS_TOTAL = factory.add_business_metric(
+    "feedback_status_checks_total",
+    "Total feedback status lookups",
 )
 
 FEEDBACK = {}
@@ -102,6 +128,9 @@ async def prometheus_middleware(request: Request, call_next):
     ).observe(time.time() - start)
 
     return response
+
+
+# ========= MODELS =========
 
 
 # ========= MODELS =========

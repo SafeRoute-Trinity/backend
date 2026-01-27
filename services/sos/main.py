@@ -29,15 +29,27 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 from libs.service_urls import NOTIFICATION_SERVICE_URL
 
-app = FastAPI(
-    title="SOS Service", version="1.0.0", description="Emergency call/SMS/status APIs."
+# Create service configuration
+service_config = ServiceAppConfig(
+    title="SOS Service",
+    description="Emergency call/SMS/status APIs.",
+    service_name="sos",
+    cors_config=CORSMiddlewareConfig(),
 )
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+# Create factory and build app
+factory = FastAPIServiceFactory(service_config)
+app = factory.create_app()
+
+# Add business-specific metrics
+SOS_CALLS_TOTAL = factory.add_business_metric(
+    "sos_calls_total",
+    "Total SOS emergency calls initiated",
+)
+
+SOS_SMS_TOTAL = factory.add_business_metric(
+    "sos_sms_total",
+    "Total SOS emergency SMS sent",
 )
 
 STATUS = {}
