@@ -5,10 +5,10 @@
 import os
 import sys
 import time
-import uuid
 from datetime import datetime
 from typing import Literal, Optional
 
+import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Path, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +27,7 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from libs.twilio_client import get_twilio_client
+from libs.service_urls import NOTIFICATION_SERVICE_URL
 
 app = FastAPI(
     title="SOS Service", version="1.0.0", description="Emergency call/SMS/status APIs."
@@ -141,8 +141,10 @@ class EmergencySMSRequest(BaseModel):
     user_id: str
     location: Optional[Location] = None
     emergency_contact: SOSContact
-    message_template: str
+    message_template: Optional[str] = None
     variables: dict[str, str]
+    notification_type: Optional[str] = "sos"
+    locale: Optional[str] = "en"
 
 
 class EmergencySMSResponse(BaseModel):
@@ -185,63 +187,54 @@ async def health():
 
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
 async def call(body: EmergencyCallRequest):
-    cid = f"CALL-{uuid.uuid4().hex[:6]}"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/call",
+                json=body.model_dump(),
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to dispatch SOS call via notification service: {str(e)}",
+        )
+
     now = datetime.utcnow()
     STATUS[body.sos_id] = {
         "sos_id": body.sos_id,
-        "call_status": "initiated",
+        "call_status": data.get("status", "failed"),
         "sms_status": "not_sent",
         "last_update": now,
     }
 
-    # Business metric: count SOS calls
     SOS_CALLS_TOTAL.inc()
-
-    return EmergencyCallResponse(status="initiated", call_id=cid, timestamp=now)
+    return EmergencyCallResponse(**data)
 
 
 @app.post("/v1/emergency/sms", response_model=EmergencySMSResponse)
 async def sms(body: EmergencySMSRequest):
     """
     Send emergency SMS with rich details (templates, variables, location).
-    This is the production SMS sender using Twilio.
+    Delegates delivery to the Notification service.
     """
-    now = datetime.utcnow()
-
-    # Format the message with variables
-    message = body.message_template
-    for key, value in body.variables.items():
-        message = message.replace(f"{{{key}}}", value)
-
-    # Add location if provided
-    if body.location:
-        location_text = f"\n\nLocation: https://maps.google.com/?q={body.location.lat},{body.location.lon}"
-        if body.location.accuracy_m:
-            location_text += f" (±{body.location.accuracy_m}m)"
-        message += location_text
-
-    # Send SMS via Twilio
     try:
-        twilio = get_twilio_client()
-        result = twilio.send_sms(to_phone=body.emergency_contact.phone, message=message)
-
-        if result["status"] == "sent":
-            sid = result["sid"]
-            sms_status = "sent"
-            status = "sent"
-        else:
-            sid = f"SMS-{uuid.uuid4().hex[:6]}"
-            sms_status = "failed"
-            status = "failed"
-            print(f"SMS send failed: {result.get('error')}")
-
-    except Exception as e:
-        print(f"Error sending SMS: {e}")
-        sid = f"SMS-{uuid.uuid4().hex[:6]}"
-        sms_status = "failed"
-        status = "failed"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
+                json=body.model_dump(),
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to send SMS via notification service: {str(e)}",
+        )
 
     # Update status
+    now = datetime.utcnow()
     s = STATUS.setdefault(
         body.sos_id,
         {
@@ -251,20 +244,13 @@ async def sms(body: EmergencySMSRequest):
             "last_update": now,
         },
     )
-    s["sms_status"] = sms_status
+    s["sms_status"] = data.get("status", "failed")
     s["last_update"] = now
 
     # Business metric: count SOS SMS
     SOS_SMS_TOTAL.inc()
 
-    return EmergencySMSResponse(status="sent", sms_id=sid, timestamp=now)
-    return EmergencySMSResponse(
-        status=status,
-        sms_id=sid,
-        timestamp=now,
-        message_sent=message,
-        recipient=body.emergency_contact.phone,
-    )
+    return EmergencySMSResponse(**data)
 
 
 @app.get("/v1/emergency/{sos_id}/status", response_model=EmergencyStatusResponse)
@@ -298,20 +284,14 @@ async def test_sms(body: TestSMSRequest):
     Phone number must be in E.164 format (e.g., +1234567890)
     """
     try:
-        twilio = get_twilio_client()
-        result = twilio.send_sms(to_phone=body.to_phone, message=body.message)
-
-        return TestSMSResponse(
-            status=result["status"],
-            sid=result["sid"],
-            to=result["to"],
-            message=body.message,
-            error=result.get("error"),
-        )
-    except ValueError as e:
-        # Twilio not configured
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{NOTIFICATION_SERVICE_URL}/v1/test/sms", json=body.model_dump()
+            )
+            response.raise_for_status()
+            return TestSMSResponse(**response.json())
+    except httpx.HTTPError as e:
         raise HTTPException(
-            status_code=500, detail=f"Twilio configuration error: {str(e)}"
+            status_code=503,
+            detail=f"Failed to send SMS via notification service: {str(e)}",
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")

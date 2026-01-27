@@ -14,7 +14,8 @@ def test_create_and_get_notification_status():
         "location": {"lat": 53.34, "lon": -6.26},
         "emergency_contact": {"name": "Alice", "phone": "+353800000111"},
         "call_number": "+112",
-        "message_template": "Help {{name}} at {{loc}}",
+        "notification_type": "sos",
+        "locale": "en",
         "variables": {"name": "Alice", "loc": "Front Gate"},
     }
     r = client.post("/v1/notifications/sos", json=req)
