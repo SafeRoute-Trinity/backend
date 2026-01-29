@@ -7,11 +7,19 @@ and trusted contact management.
 
 import os
 import sys
+import time
 import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import Depends, HTTPException, Query, status
+from fastapi import Depends, HTTPException, Query, Request, Response, status
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -61,6 +69,66 @@ feedback_store = {}
 audit_logs = []
 data_batches = {}
 emergency_status = {}
+
+
+# ========= Shared Models =========
+# ========= Metrics =========
+
+SERVICE_NAME = "user_management"
+registry = CollectorRegistry()
+
+# Generic per-request counter: can be shared across all services
+REQUEST_COUNT = Counter(
+    "service_requests_total",
+    "Total HTTP requests handled by the service",
+    ["service", "method", "path", "http_status"],
+    registry=registry,
+)
+
+# Request latency histogram per path
+REQUEST_LATENCY = Histogram(
+    "service_request_duration_seconds",
+    "Request latency in seconds",
+    ["service", "path"],
+    registry=registry,
+)
+
+# Business metric: total user registrations
+USER_REGISTRATION_TOTAL = Counter(
+    "user_registrations_total",
+    "Total user registrations",
+    registry=registry,
+)
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    """
+    Middleware to measure:
+    - request count
+    - latency per path
+    for every HTTP request handled by this service.
+    """
+    start = time.time()
+    response = await call_next(request)
+
+    path = request.url.path
+
+    # Increment per-request counter
+    REQUEST_COUNT.labels(
+        service=SERVICE_NAME,
+        method=request.method,
+        path=path,
+        http_status=response.status_code,
+    ).inc()
+
+    # Record latency
+    REQUEST_LATENCY.labels(
+        service=SERVICE_NAME,
+        path=path,
+    ).observe(time.time() - start)
+
+    return response
 
 
 # ========= Shared Models =========
@@ -286,6 +354,9 @@ async def register_user(
     }
 
     # Business metric: increment registrations counter
+    USER_REGISTRATION_TOTAL.inc()
+
+    # Business metric: bump registrations counter
     USER_REGISTRATION_TOTAL.inc()
 
     return RegisterResponse(
@@ -543,8 +614,16 @@ async def auth0_callback(code=None, state=None):
     Returns:
         Dict with callback message and received parameters
     """
-    return {
-        "message": "Auth0 callback received",
-        "code": code,
-        "state": state,
-    }
+    return {"message": "Auth0 callback received", "code": code, "state": state}
+
+
+# ========= Metrics endpoint for Prometheus =========
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """
+    Expose Prometheus metrics for this service.
+    Prometheus will scrape this endpoint inside the cluster.
+    """
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
