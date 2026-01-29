@@ -616,7 +616,6 @@ async def auth0_callback(code=None, state=None):
     Returns:
         Dict with callback message and received parameters
     """
-<<<<<<< HEAD
     return {"message": "Auth0 callback received", "code": code, "state": state}
 
 
@@ -630,10 +629,3 @@ async def metrics_endpoint():
     Prometheus will scrape this endpoint inside the cluster.
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
-=======
-    return {
-        "message": "Auth0 callback received",
-        "code": code,
-        "state": state,
-    }
->>>>>>> main
