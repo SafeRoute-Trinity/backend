@@ -3,23 +3,26 @@ repos:
     rev: 24.8.0
     hooks:
       - id: black
+        pass_filenames: false
+        always_run: true
+        args: ["."]
         stages: [pre-commit]
 
   - repo: https://github.com/charliermarsh/ruff-pre-commit
     rev: v0.6.3
     hooks:
       - id: ruff
-        args: [--fix]
-        stages: [pre-commit]
+        pass_filenames: false
+        always_run: true
+        args: ["--fix"]
+        stages: [pre-commit] 
 
-  # Note: isort is disabled because Ruff already handles import sorting (I rule)
-  # This prevents conflicts with main branch import order
-  # - repo: https://github.com/PyCQA/isort
-  #   rev: 5.13.2
-  #   hooks:
-  #     - id: isort
-  #       args: ["--profile", "black"]
-  #       stages: [pre-commit]
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        stages: [pre-commit]
+        args: ["--profile", "black"] 
 
   - repo: local
     hooks:
