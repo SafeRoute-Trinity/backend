@@ -28,9 +28,8 @@ from sqlalchemy.exc import IntegrityError
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from common.auth.session import get_session_manager
 from common.constants import AUTH_TOKEN_TTL
-from libs.auth.auth0_verify import verify_token, verify_token_with_session
+from libs.auth.auth0_verify import verify_token
 from libs.db import get_db
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -193,40 +192,6 @@ class LoginResponse(BaseModel):
     email: str
     device_id: str
     last_login: datetime
-
-
-# ========= Session Management Models =========
-
-
-class SessionStartRequest(BaseModel):
-    """Request model for starting a session."""
-
-    device_id: str
-    device_name: Optional[str] = None
-    app_version: Optional[str] = None
-
-
-class SessionStartResponse(BaseModel):
-    """Response model for session start."""
-
-    sid: str
-    status: Literal["session_started"]
-    expires_in: int  # TTL in seconds
-
-
-class SessionLogoutResponse(BaseModel):
-    """Response model for session logout."""
-
-    status: Literal["logged_out"]
-    message: str
-
-
-class SessionLogoutAllResponse(BaseModel):
-    """Response model for logout all devices."""
-
-    status: Literal["logged_out_all"]
-    sessions_deleted: int
-    message: str
 
 
 class PreferencesRequest(BaseModel):
@@ -467,7 +432,7 @@ async def login(
 async def save_preferences(
     user_id: str,
     payload: PreferencesRequest,
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
 ):
     """
     Save user preferences (protected endpoint).
@@ -475,7 +440,7 @@ async def save_preferences(
     Args:
         user_id: User identifier (must match authenticated user)
         payload: Preferences to save
-        auth: Enhanced auth object from verify_token_with_session dependency
+        auth: Enhanced auth object from verify_token dependency
 
     Returns:
         PreferencesResponse with saved preferences and timestamp
@@ -485,8 +450,8 @@ async def save_preferences(
         HTTPException: 403 if user tries to modify another user's preferences
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth["sub"]
-    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub")
+    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
 
     # Verify user can only modify their own preferences
     if auth_user_id != user_id:
@@ -529,7 +494,7 @@ async def save_preferences(
 async def upsert_trusted_contact(
     user_id: str,
     payload: TrustedContactUpsertRequest,
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
 ):
     """
     Create or update a trusted contact for a user (protected endpoint).
@@ -537,7 +502,7 @@ async def upsert_trusted_contact(
     Args:
         user_id: User identifier (must match authenticated user)
         payload: Contact information to create or update
-        auth: Enhanced auth object from verify_token_with_session dependency
+        auth: Enhanced auth object from verify_token dependency
 
     Returns:
         TrustedContactUpsertResponse with contact details and timestamp
@@ -547,8 +512,8 @@ async def upsert_trusted_contact(
         HTTPException: 403 if user tries to modify another user's contacts
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth["sub"]
-    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub")
+    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
 
     # Verify user can only modify their own contacts
     if auth_user_id != user_id:
@@ -588,7 +553,7 @@ async def upsert_trusted_contact(
 )
 async def get_user(
     user_id: str,
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
     db=Depends(get_db),
 ):
     """
@@ -596,7 +561,7 @@ async def get_user(
 
     Args:
         user_id: User identifier (must match authenticated user)
-        auth: Enhanced auth object from verify_token_with_session dependency
+        auth: Enhanced auth object from verify_token dependency
         db: Database session dependency
 
     Returns:
@@ -608,8 +573,8 @@ async def get_user(
         HTTPException: 404 if user not found
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth["sub"]
-    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub")
+    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
 
     # Verify user can only access their own data
     if auth_user_id != user_id:
@@ -660,7 +625,7 @@ async def get_user(
 )
 async def list_trusted_contacts(
     user_id: str,
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
     include_inactive=Query(False, description="Mock flag; no effect in stub"),
 ):
     """
@@ -668,7 +633,7 @@ async def list_trusted_contacts(
 
     Args:
         user_id: User identifier (must match authenticated user)
-        auth: Enhanced auth object from verify_token_with_session dependency
+        auth: Enhanced auth object from verify_token dependency
         include_inactive: Flag to include inactive contacts (not implemented)
 
     Returns:
@@ -679,8 +644,8 @@ async def list_trusted_contacts(
         HTTPException: 403 if user tries to access another user's contacts
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth["sub"]
-    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub")
+    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
 
     # Verify user can only access their own contacts
     if auth_user_id != user_id:
@@ -748,44 +713,40 @@ async def metrics_endpoint():
     summary="Get current user information (protected)",
 )
 async def get_current_user(
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
 ):
     """
     Get current user information (protected endpoint example).
     
-    This endpoint demonstrates how to use verify_token_with_session:
+    This endpoint demonstrates how to use verify_token for stateless auth:
     - Requires valid JWT token
-    - Requires valid Redis session
-    - Automatically validates session belongs to token user
-    - Updates session last_seen_at for sliding TTL
+    - Validates token against Auth0 JWKS
     
     Mobile app must send:
     - Authorization: Bearer <access_token>
-    - X-Session-Id: <sid>
-    - X-Device-Id: <device_id> (optional)
     
     Args:
-        auth: Enhanced auth object from verify_token_with_session dependency
-            Contains JWT claims, session_id, and session_data
+        auth: Enhanced auth object from verify_token dependency
+            Contains JWT claims
             
     Returns:
         UserResponse with user information
         
     Raises:
-        HTTPException: 401 if JWT or session is invalid
-        HTTPException: 503 if Redis is unavailable
+        HTTPException: 401 if JWT is invalid
     """
-    sub = auth["sub"]
-    session_data = auth["session_data"]
+    auth_sub = auth.get("sub")
     
     # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
-    user_id = sub.split("|")[-1] if "|" in sub else sub
+    user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
     
+    print(f"👤 [UserMgmt] get_current_user called for: {user_id}")
+
     # In a real implementation, you would query the database
-    # For now, return mock data based on session
+    # For now, return mock data based on token
     return UserResponse(
         user_id=user_id,
-        name=session_data.get("device_name"),
+        name=None, # Name not in token usually
         email=f"{user_id}@example.com",  # Mock email
         phone=None,
         created_at=datetime.utcnow(),
