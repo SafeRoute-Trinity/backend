@@ -4,9 +4,11 @@
 
 import os
 import sys
+import traceback
 from typing import Dict
 from dotenv import load_dotenv
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
 
 # Load environment variables from .env file
 load_dotenv()
@@ -58,6 +60,22 @@ NOTIFICATION_STATUS_CHECKS_TOTAL = factory.add_business_metric(
 
 NOTIFICATIONS = {}
 manager = NotificationManager(NOTIFICATIONS)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Return 500 with error detail so we can see the real cause."""
+    tb = traceback.format_exc()
+    print(f"[500] {request.method} {request.url.path}: {exc!r}\n{tb}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal Server Error",
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        },
+    )
+
 
 # ========= Routes =========
 

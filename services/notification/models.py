@@ -99,3 +99,37 @@ class EmergencySMSResponse(BaseModel):
     timestamp: datetime
     message_sent: str
     recipient: str
+
+
+# Response types for factory senders (based on Swagger API definitions)
+class PushNotificationResponse(BaseModel):
+    """Response type for push notification sender"""
+    status: Literal["sent", "failed"]
+    push_id: str
+    platform: str
+
+
+class SMSNotificationResponse(BaseModel):
+    """Response type for SMS notification sender (matches Twilio response)"""
+    status: Literal["sent", "failed"]
+    sid: Optional[str]
+    to: str
+    from_: Optional[str] = None
+    message_status: Optional[str] = None
+    error: Optional[str] = None
+
+    model_config = {
+        "populate_by_name": True,
+        "json_schema_extra": {
+            "properties": {
+                "from": {"$ref": "#/properties/from_"}
+            }
+        }
+    }
+
+
+class CallNotificationResponse(BaseModel):
+    """Response type for call notification sender"""
+    status: Literal["initiated", "failed", "not_triggered", "answered"]
+    sid: Optional[str] = None
+    error: Optional[str] = None

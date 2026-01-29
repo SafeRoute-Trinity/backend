@@ -4,6 +4,13 @@ from typing import Dict, Iterable, Literal
 
 from fastapi import HTTPException
 
+from common.notification_status import (
+    CallStatus,
+    EmergencyStatus,
+    NotificationStatus,
+    PushStatus,
+    SMSStatus,
+)
 from services.notification.factory import NotificationFactory
 from services.notification.models import (
     CreateResp,
@@ -18,8 +25,14 @@ from services.notification.models import (
 from services.notification.templates import get_template
 
 DEFAULT_CHANNELS: list[Literal["push", "sms", "call"]] = ["push", "sms"]
-SUCCESS_STATUSES = {"sent", "delivered", "answered", "connected", "initiated"}
-FAIL_STATUSES = {"failed", "not_triggered"}
+SUCCESS_STATUSES = {
+    SMSStatus.SENT.value,
+    SMSStatus.DELIVERED.value,
+    CallStatus.ANSWERED.value,
+    PushStatus.SENT.value,
+    CallStatus.INITIATED.value,
+}
+FAIL_STATUSES = {SMSStatus.FAILED.value, CallStatus.FAILED.value, PushStatus.FAILED.value, CallStatus.NOT_TRIGGERED.value}
 
 
 class NotificationManager:
@@ -48,30 +61,35 @@ class NotificationManager:
         successes = [s for s in status_list if s in SUCCESS_STATUSES]
         failures = [s for s in status_list if s in FAIL_STATUSES]
         if successes and not failures:
-            return "delivered"
+            return NotificationStatus.DELIVERED.value
         if successes and failures:
-            return "partial"
+            return NotificationStatus.PARTIAL.value
         if failures and not successes:
-            return "failed"
-        return "failed"
+            return NotificationStatus.FAILED.value
+        return NotificationStatus.FAILED.value
 
     async def send_sos_notification(self, body: SOSNotificationRequest) -> CreateResp:
         notification_id = f"ntf_{uuid.uuid4().hex[:6]}"
         now = datetime.utcnow()
 
-        channels = body.channels or list(DEFAULT_CHANNELS)
+        raw_channels = body.channels or list(DEFAULT_CHANNELS)
+        channels = [
+            c.value if hasattr(c, "value") else str(c) for c in raw_channels
+        ]
         results = {
-            "sms_status": "not_triggered",
-            "push_status": "not_triggered",
-            "call_status": "not_triggered",
+            "sms_status": SMSStatus.NOT_TRIGGERED.value,
+            "push_status": PushStatus.NOT_TRIGGERED.value,
+            "call_status": CallStatus.NOT_TRIGGERED.value,
         }
 
         template = body.message_template
         notification_type = (
-            body.notification_type.value
+            getattr(body.notification_type, "value", body.notification_type)
             if body.notification_type is not None
             else "sos"
         )
+        if not isinstance(notification_type, str):
+            notification_type = "sos"
         if not template and notification_type:
             template = get_template(notification_type, "sms", body.locale or "en")
         if not template:
@@ -90,20 +108,25 @@ class NotificationManager:
                     if push_template
                     else message
                 )
+                location_dict = None
+                if body.location:
+                    location_dict = (
+                        body.location.model_dump()
+                        if hasattr(body.location, "model_dump")
+                        else body.location.dict()
+                    )
                 push_result = await sender.send(
                     {
                         "user_id": body.user_id,
                         "message": push_message,
-                        "location": body.location.model_dump()
-                        if body.location
-                        else None,
+                        "location": location_dict,
                     }
                 )
                 results["push_status"] = (
-                    "sent" if push_result.get("status") == "sent" else "failed"
+                    PushStatus.SENT.value if push_result.status == "sent" else PushStatus.FAILED.value
                 )
             except Exception:
-                results["push_status"] = "failed"
+                results["push_status"] = PushStatus.FAILED.value
 
         if "sms" in channels:
             try:
@@ -115,10 +138,10 @@ class NotificationManager:
                     }
                 )
                 results["sms_status"] = (
-                    "sent" if sms_result.get("status") == "sent" else "failed"
+                    SMSStatus.SENT.value if sms_result.status == "sent" else SMSStatus.FAILED.value
                 )
             except Exception:
-                results["sms_status"] = "failed"
+                results["sms_status"] = SMSStatus.FAILED.value
 
         if "call" in channels:
             try:
@@ -130,18 +153,18 @@ class NotificationManager:
                     }
                 )
                 results["call_status"] = (
-                    "answered"
-                    if call_result.get("status") == "answered"
-                    else "failed"
+                    CallStatus.ANSWERED.value
+                    if call_result.status == "answered"
+                    else CallStatus.FAILED.value
                 )
             except Exception:
-                results["call_status"] = "failed"
+                results["call_status"] = CallStatus.FAILED.value
 
         notification_status = self._aggregate_status(
             [
-                results["push_status"] if "push" in channels else "not_triggered",
-                results["sms_status"] if "sms" in channels else "not_triggered",
-                results["call_status"] if "call" in channels else "not_triggered",
+                results["push_status"] if "push" in channels else PushStatus.NOT_TRIGGERED.value,
+                results["sms_status"] if "sms" in channels else SMSStatus.NOT_TRIGGERED.value,
+                results["call_status"] if "call" in channels else CallStatus.NOT_TRIGGERED.value,
             ]
         )
 
@@ -161,10 +184,12 @@ class NotificationManager:
     ) -> EmergencySMSResponse:
         template = body.message_template
         notification_type = (
-            body.notification_type.value
+            getattr(body.notification_type, "value", body.notification_type)
             if body.notification_type is not None
             else "sos"
         )
+        if not isinstance(notification_type, str):
+            notification_type = "sos"
         if not template and notification_type:
             template = get_template(notification_type, "sms", body.locale or "en")
         if not template:
@@ -183,8 +208,8 @@ class NotificationManager:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
 
-        status = "sent" if result.get("status") == "sent" else "failed"
-        sms_id = result.get("sid") or f"SMS-{uuid.uuid4().hex[:6]}"
+        status = EmergencyStatus.SENT.value if result.status == "sent" else EmergencyStatus.FAILED.value
+        sms_id = result.sid or f"SMS-{uuid.uuid4().hex[:6]}"
 
         return EmergencySMSResponse(
             status=status,
@@ -200,23 +225,26 @@ class NotificationManager:
         call_id = f"CALL-{uuid.uuid4().hex[:6]}"
         # Call delivery is not implemented yet; keep current behavior.
         return EmergencyCallResponse(
-            status="initiated", call_id=call_id, timestamp=datetime.utcnow()
+            status=EmergencyStatus.INITIATED.value, call_id=call_id, timestamp=datetime.utcnow()
         )
 
     def get_status(self, notification_id: str) -> StatusResp:
         now = datetime.utcnow()
         ntf = self._store.get(notification_id)
         if not ntf:
-            ntf = {
-                "notification_id": notification_id,
-                "sos_id": "SOS-demo",
-                "status": "delivered",
-                "results": {
-                    "sms_status": "delivered",
-                    "push_status": "sent",
-                    "call_status": "not_triggered",
-                },
-                "created_at": now,
-                "updated_at": now,
-            }
-        return StatusResp(**ntf)
+            ntf = StatusResp(
+                notification_id=notification_id,
+                sos_id="SOS-demo",
+                status=NotificationStatus.DELIVERED.value,
+                results=StatusResult(
+                    sms_status=SMSStatus.DELIVERED.value,
+                    push_status=PushStatus.SENT.value,
+                    call_status=CallStatus.NOT_TRIGGERED.value,
+                ),
+                created_at=now,
+                updated_at=now,
+            )
+        else:
+            # Ensure the stored data is properly typed as StatusResp
+            ntf = StatusResp(**ntf)
+        return ntf
