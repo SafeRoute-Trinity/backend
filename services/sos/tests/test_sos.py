@@ -19,9 +19,7 @@ _REAL_ASYNC_CLIENT = httpx.AsyncClient
 class _AsyncClientProxy:
     def __init__(self, *args, **kwargs) -> None:
         transport = ASGITransport(app=notification_app)
-        self._client = _REAL_ASYNC_CLIENT(
-            transport=transport, base_url="http://testserver"
-        )
+        self._client = _REAL_ASYNC_CLIENT(transport=transport, base_url="http://testserver")
 
     async def __aenter__(self):
         return self._client
@@ -32,6 +30,7 @@ class _AsyncClientProxy:
 
 def test_emergency_call_sms_status(monkeypatch):
     monkeypatch.setattr(sos_main.httpx, "AsyncClient", _AsyncClientProxy)
+
     async def _sms_stub(self, payload):
         return {"status": "sent", "sid": "SMSTEST"}
 

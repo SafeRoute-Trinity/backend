@@ -32,7 +32,12 @@ SUCCESS_STATUSES = {
     PushStatus.SENT.value,
     CallStatus.INITIATED.value,
 }
-FAIL_STATUSES = {SMSStatus.FAILED.value, CallStatus.FAILED.value, PushStatus.FAILED.value, CallStatus.NOT_TRIGGERED.value}
+FAIL_STATUSES = {
+    SMSStatus.FAILED.value,
+    CallStatus.FAILED.value,
+    PushStatus.FAILED.value,
+    CallStatus.NOT_TRIGGERED.value,
+}
 
 
 class NotificationManager:
@@ -49,9 +54,7 @@ class NotificationManager:
     def _append_location(self, message: str, location) -> str:
         if not location:
             return message
-        location_text = (
-            f"\n\nLocation: https://maps.google.com/?q={location.lat},{location.lon}"
-        )
+        location_text = f"\n\nLocation: https://maps.google.com/?q={location.lat},{location.lon}"
         if location.accuracy_m:
             location_text += f" (±{location.accuracy_m}m)"
         return message + location_text
@@ -73,9 +76,7 @@ class NotificationManager:
         now = datetime.utcnow()
 
         raw_channels = body.channels or list(DEFAULT_CHANNELS)
-        channels = [
-            c.value if hasattr(c, "value") else str(c) for c in raw_channels
-        ]
+        channels = [c.value if hasattr(c, "value") else str(c) for c in raw_channels]
         results = {
             "sms_status": SMSStatus.NOT_TRIGGERED.value,
             "push_status": PushStatus.NOT_TRIGGERED.value,
@@ -100,9 +101,7 @@ class NotificationManager:
         if "push" in channels:
             try:
                 sender = self._factory.get_sender("push")
-                push_template = get_template(
-                    notification_type, "push", body.locale or "en"
-                )
+                push_template = get_template(notification_type, "push", body.locale or "en")
                 push_message = (
                     self._render_message(push_template, body.variables)
                     if push_template
@@ -123,7 +122,9 @@ class NotificationManager:
                     }
                 )
                 results["push_status"] = (
-                    PushStatus.SENT.value if push_result.status == "sent" else PushStatus.FAILED.value
+                    PushStatus.SENT.value
+                    if push_result.status == "sent"
+                    else PushStatus.FAILED.value
                 )
             except Exception:
                 results["push_status"] = PushStatus.FAILED.value
@@ -179,9 +180,7 @@ class NotificationManager:
 
         return CreateResp(notification_id=notification_id, status=notification_status)
 
-    async def send_emergency_sms(
-        self, body: EmergencySMSRequest
-    ) -> EmergencySMSResponse:
+    async def send_emergency_sms(self, body: EmergencySMSRequest) -> EmergencySMSResponse:
         template = body.message_template
         notification_type = (
             getattr(body.notification_type, "value", body.notification_type)
@@ -208,7 +207,9 @@ class NotificationManager:
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
 
-        status = EmergencyStatus.SENT.value if result.status == "sent" else EmergencyStatus.FAILED.value
+        status = (
+            EmergencyStatus.SENT.value if result.status == "sent" else EmergencyStatus.FAILED.value
+        )
         sms_id = result.sid or f"SMS-{uuid.uuid4().hex[:6]}"
 
         return EmergencySMSResponse(
@@ -219,9 +220,7 @@ class NotificationManager:
             recipient=body.emergency_contact.phone,
         )
 
-    async def send_emergency_call(
-        self, body: EmergencyCallRequest
-    ) -> EmergencyCallResponse:
+    async def send_emergency_call(self, body: EmergencyCallRequest) -> EmergencyCallResponse:
         call_id = f"CALL-{uuid.uuid4().hex[:6]}"
         # Call delivery is not implemented yet; keep current behavior.
         return EmergencyCallResponse(

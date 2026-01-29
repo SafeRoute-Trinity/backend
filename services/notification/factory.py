@@ -11,16 +11,16 @@ from services.notification.models import (
 
 class BaseSender:
     """Base class for notification senders"""
-    
+
     async def send(
         self, payload: Dict
     ) -> Union[PushNotificationResponse, SMSNotificationResponse, CallNotificationResponse]:
         """
         Send notification via this channel.
-        
+
         Args:
             payload: Channel-specific payload dictionary
-            
+
         Returns:
             Channel-specific response model based on Swagger API definition
         """
@@ -29,14 +29,14 @@ class BaseSender:
 
 class PushSender(BaseSender):
     """Push notification sender"""
-    
+
     async def send(self, payload: Dict) -> PushNotificationResponse:
         """
         Send push notification.
-        
+
         Args:
             payload: Dictionary with user_id, message, location
-            
+
         Returns:
             PushNotificationResponse matching Swagger API definition
         """
@@ -50,14 +50,14 @@ class PushSender(BaseSender):
 
 class SmsSender(BaseSender):
     """SMS notification sender"""
-    
+
     async def send(self, payload: Dict) -> SMSNotificationResponse:
         """
         Send SMS notification.
-        
+
         Args:
             payload: Dictionary with to_phone, message
-            
+
         Returns:
             SMSNotificationResponse matching Swagger API definition
         """
@@ -72,9 +72,7 @@ class SmsSender(BaseSender):
                 error=None,
             )
         twilio = get_twilio_client()
-        twilio_result = twilio.send_sms(
-            to_phone=payload["to_phone"], message=payload["message"]
-        )
+        twilio_result = twilio.send_sms(to_phone=payload["to_phone"], message=payload["message"])
         return SMSNotificationResponse(
             status=twilio_result["status"],
             sid=twilio_result.get("sid"),
@@ -87,14 +85,14 @@ class SmsSender(BaseSender):
 
 class CallSender(BaseSender):
     """Call notification sender"""
-    
+
     async def send(self, payload: Dict) -> CallNotificationResponse:
         """
         Send call notification.
-        
+
         Args:
             payload: Dictionary with to_phone, sos_id
-            
+
         Returns:
             CallNotificationResponse matching Swagger API definition
         """

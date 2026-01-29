@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from services.notification.types import NotificationChannel, NotificationType
 
+
 class Location(BaseModel):
     lat: float
     lon: float
@@ -35,9 +36,7 @@ class CreateResp(BaseModel):
 
 
 class StatusResult(BaseModel):
-    sms_status: Literal[
-        "queued", "sending", "sent", "delivered", "failed", "not_triggered"
-    ]
+    sms_status: Literal["queued", "sending", "sent", "delivered", "failed", "not_triggered"]
     push_status: Literal["sent", "failed", "not_triggered"]
     call_status: Literal["queued", "calling", "answered", "failed", "not_triggered"]
 
@@ -104,6 +103,7 @@ class EmergencySMSResponse(BaseModel):
 # Response types for factory senders (based on Swagger API definitions)
 class PushNotificationResponse(BaseModel):
     """Response type for push notification sender"""
+
     status: Literal["sent", "failed"]
     push_id: str
     platform: str
@@ -111,6 +111,7 @@ class PushNotificationResponse(BaseModel):
 
 class SMSNotificationResponse(BaseModel):
     """Response type for SMS notification sender (matches Twilio response)"""
+
     status: Literal["sent", "failed"]
     sid: Optional[str]
     to: str
@@ -120,16 +121,13 @@ class SMSNotificationResponse(BaseModel):
 
     model_config = {
         "populate_by_name": True,
-        "json_schema_extra": {
-            "properties": {
-                "from": {"$ref": "#/properties/from_"}
-            }
-        }
+        "json_schema_extra": {"properties": {"from": {"$ref": "#/properties/from_"}}},
     }
 
 
 class CallNotificationResponse(BaseModel):
     """Response type for call notification sender"""
+
     status: Literal["initiated", "failed", "not_triggered", "answered"]
     sid: Optional[str] = None
     error: Optional[str] = None
