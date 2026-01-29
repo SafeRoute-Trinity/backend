@@ -3,7 +3,7 @@ repos:
     rev: 24.8.0
     hooks:
       - id: black
-        ass_filenames: false
+        pass_filenames: false
         always_run: true
         args: ["."]
         stages: [pre-commit]
@@ -12,8 +12,9 @@ repos:
     rev: v0.6.3
     hooks:
       - id: ruff
+        pass_filenames: false
         always_run: true
-        args: [--fix]
+        args: ["--fix"]
         stages: [pre-commit] 
 
   - repo: https://github.com/PyCQA/isort

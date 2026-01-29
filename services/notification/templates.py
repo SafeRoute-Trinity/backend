@@ -1,6 +1,5 @@
 from typing import Dict
 
-
 # In-code templates for now; later swap this module with DB-backed store.
 # Key format: "{notification_type}.{channel}.{locale}"
 TEMPLATES: Dict[str, str] = {

@@ -4,7 +4,7 @@
 
 import os
 import sys
-from typing import Dict
+
 from dotenv import load_dotenv
 from fastapi import HTTPException
 
