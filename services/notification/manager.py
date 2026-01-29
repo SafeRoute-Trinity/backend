@@ -13,7 +13,6 @@ from services.notification.models import (
     EmergencySMSResponse,
     SOSNotificationRequest,
     StatusResp,
-    StatusResult,
 )
 from services.notification.templates import get_template
 
@@ -36,9 +35,7 @@ class NotificationManager:
     def _append_location(self, message: str, location) -> str:
         if not location:
             return message
-        location_text = (
-            f"\n\nLocation: https://maps.google.com/?q={location.lat},{location.lon}"
-        )
+        location_text = f"\n\nLocation: https://maps.google.com/?q={location.lat},{location.lon}"
         if location.accuracy_m:
             location_text += f" (±{location.accuracy_m}m)"
         return message + location_text
@@ -68,9 +65,7 @@ class NotificationManager:
 
         template = body.message_template
         notification_type = (
-            body.notification_type.value
-            if body.notification_type is not None
-            else "sos"
+            body.notification_type.value if body.notification_type is not None else "sos"
         )
         if not template and notification_type:
             template = get_template(notification_type, "sms", body.locale or "en")
@@ -82,9 +77,7 @@ class NotificationManager:
         if "push" in channels:
             try:
                 sender = self._factory.get_sender("push")
-                push_template = get_template(
-                    notification_type, "push", body.locale or "en"
-                )
+                push_template = get_template(notification_type, "push", body.locale or "en")
                 push_message = (
                     self._render_message(push_template, body.variables)
                     if push_template
@@ -94,14 +87,10 @@ class NotificationManager:
                     {
                         "user_id": body.user_id,
                         "message": push_message,
-                        "location": body.location.model_dump()
-                        if body.location
-                        else None,
+                        "location": body.location.model_dump() if body.location else None,
                     }
                 )
-                results["push_status"] = (
-                    "sent" if push_result.get("status") == "sent" else "failed"
-                )
+                results["push_status"] = "sent" if push_result.get("status") == "sent" else "failed"
             except Exception:
                 results["push_status"] = "failed"
 
@@ -114,9 +103,7 @@ class NotificationManager:
                         "message": message,
                     }
                 )
-                results["sms_status"] = (
-                    "sent" if sms_result.get("status") == "sent" else "failed"
-                )
+                results["sms_status"] = "sent" if sms_result.get("status") == "sent" else "failed"
             except Exception:
                 results["sms_status"] = "failed"
 
@@ -130,9 +117,7 @@ class NotificationManager:
                     }
                 )
                 results["call_status"] = (
-                    "answered"
-                    if call_result.get("status") == "answered"
-                    else "failed"
+                    "answered" if call_result.get("status") == "answered" else "failed"
                 )
             except Exception:
                 results["call_status"] = "failed"
@@ -156,14 +141,10 @@ class NotificationManager:
 
         return CreateResp(notification_id=notification_id, status=notification_status)
 
-    async def send_emergency_sms(
-        self, body: EmergencySMSRequest
-    ) -> EmergencySMSResponse:
+    async def send_emergency_sms(self, body: EmergencySMSRequest) -> EmergencySMSResponse:
         template = body.message_template
         notification_type = (
-            body.notification_type.value
-            if body.notification_type is not None
-            else "sos"
+            body.notification_type.value if body.notification_type is not None else "sos"
         )
         if not template and notification_type:
             template = get_template(notification_type, "sms", body.locale or "en")
@@ -194,9 +175,7 @@ class NotificationManager:
             recipient=body.emergency_contact.phone,
         )
 
-    async def send_emergency_call(
-        self, body: EmergencyCallRequest
-    ) -> EmergencyCallResponse:
+    async def send_emergency_call(self, body: EmergencyCallRequest) -> EmergencyCallResponse:
         call_id = f"CALL-{uuid.uuid4().hex[:6]}"
         # Call delivery is not implemented yet; keep current behavior.
         return EmergencyCallResponse(

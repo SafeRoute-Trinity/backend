@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from services.notification.types import NotificationChannel, NotificationType
 
+
 class Location(BaseModel):
     lat: float
     lon: float
@@ -35,9 +36,7 @@ class CreateResp(BaseModel):
 
 
 class StatusResult(BaseModel):
-    sms_status: Literal[
-        "queued", "sending", "sent", "delivered", "failed", "not_triggered"
-    ]
+    sms_status: Literal["queued", "sending", "sent", "delivered", "failed", "not_triggered"]
     push_status: Literal["sent", "failed", "not_triggered"]
     call_status: Literal["queued", "calling", "answered", "failed", "not_triggered"]
 

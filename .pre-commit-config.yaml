@@ -16,11 +16,11 @@ repos:
         args: [--fix]
         stages: [pre-commit] 
 
-  # - repo: https://github.com/PyCQA/isort
-  #   rev: 5.13.2
-  #   hooks:
-  #     - id: isort
-  #       stages: [pre-commit]
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        stages: [pre-commit]
         args: ["--profile", "black"] 
 
   - repo: local

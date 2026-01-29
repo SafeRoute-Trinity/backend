@@ -12,8 +12,7 @@ import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Depends, HTTPException, Query, Request, Response, status
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -21,7 +20,6 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from fastapi import Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -616,7 +614,6 @@ async def auth0_callback(code=None, state=None):
     Returns:
         Dict with callback message and received parameters
     """
-<<<<<<< HEAD
     return {"message": "Auth0 callback received", "code": code, "state": state}
 
 
@@ -630,10 +627,3 @@ async def metrics_endpoint():
     Prometheus will scrape this endpoint inside the cluster.
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
-=======
-    return {
-        "message": "Auth0 callback received",
-        "code": code,
-        "state": state,
-    }
->>>>>>> main
