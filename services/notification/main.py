@@ -5,7 +5,7 @@
 import os
 import sys
 import traceback
-from typing import Dict
+
 from dotenv import load_dotenv
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse

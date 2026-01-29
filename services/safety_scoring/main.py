@@ -2,9 +2,9 @@
 # uvicorn services.safety_scoring.main:app --host 0.0.0.0 --port 20003 --reload
 # Docs: http://127.0.0.1:20003/docs
 
-import time
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
@@ -22,9 +22,9 @@ from pydantic import BaseModel
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+app = FastAPI()
+
 from libs.fastapi_service import (
-    CORSMiddlewareConfig,
-    FastAPIServiceFactory,
     ServiceAppConfig,
 )
 

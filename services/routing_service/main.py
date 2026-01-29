@@ -2,17 +2,16 @@
 # uvicorn services.routing_service.main:app --host 0.0.0.0 --port 20002 --reload
 # Docs: http://127.0.0.1:20002/docs
 
-import time
 import logging
 import os
 import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import FastAPI, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -20,7 +19,6 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from fastapi import HTTPException, Query, status
 from pydantic import BaseModel
 
 # Add parent directory to path for imports
@@ -57,17 +55,9 @@ except Exception as e:
 
 try:
     # Try relative imports first (when run as module)
-    from .mapbox_converter import (
-        convert_ors_isochrone_to_mapbox,
-        convert_ors_route_to_mapbox,
-    )
     from .openrouteservice_client import get_ors_client
 except ImportError:
     # Fall back to absolute imports (when run directly)
-    from mapbox_converter import (
-        convert_ors_isochrone_to_mapbox,
-        convert_ors_route_to_mapbox,
-    )
     from openrouteservice_client import get_ors_client
 
 # Setup logging
