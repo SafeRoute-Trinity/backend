@@ -20,9 +20,8 @@ from sqlalchemy.exc import IntegrityError
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from common.auth.session import get_session_manager
 from common.constants import AUTH_TOKEN_TTL
-from libs.auth.auth0_verify import verify_token, verify_token_with_session
+from libs.auth.auth0_verify import verify_token
 from libs.db import get_db
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -125,40 +124,6 @@ class LoginResponse(BaseModel):
     email: str
     device_id: str
     last_login: datetime
-
-
-# ========= Session Management Models =========
-
-
-class SessionStartRequest(BaseModel):
-    """Request model for starting a session."""
-
-    device_id: str
-    device_name: Optional[str] = None
-    app_version: Optional[str] = None
-
-
-class SessionStartResponse(BaseModel):
-    """Response model for session start."""
-
-    sid: str
-    status: Literal["session_started"]
-    expires_in: int  # TTL in seconds
-
-
-class SessionLogoutResponse(BaseModel):
-    """Response model for session logout."""
-
-    status: Literal["logged_out"]
-    message: str
-
-
-class SessionLogoutAllResponse(BaseModel):
-    """Response model for logout all devices."""
-
-    status: Literal["logged_out_all"]
-    sessions_deleted: int
-    message: str
 
 
 class PreferencesRequest(BaseModel):
@@ -407,7 +372,7 @@ async def login(
 async def save_preferences(
     user_id: str,
     payload: PreferencesRequest,
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
 ):
     """
     Save user preferences (protected endpoint).
@@ -415,7 +380,7 @@ async def save_preferences(
     Args:
         user_id: User identifier (must match authenticated user)
         payload: Preferences to save
-        auth: Enhanced auth object from verify_token_with_session dependency
+        auth: Enhanced auth object from verify_token dependency
 
     Returns:
         PreferencesResponse with saved preferences and timestamp
@@ -425,8 +390,8 @@ async def save_preferences(
         HTTPException: 403 if user tries to modify another user's preferences
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth["sub"]
-    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub")
+    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
 
     # Verify user can only modify their own preferences
     if auth_user_id != user_id:
@@ -469,7 +434,7 @@ async def save_preferences(
 async def upsert_trusted_contact(
     user_id: str,
     payload: TrustedContactUpsertRequest,
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
 ):
     """
     Create or update a trusted contact for a user (protected endpoint).
@@ -477,7 +442,7 @@ async def upsert_trusted_contact(
     Args:
         user_id: User identifier (must match authenticated user)
         payload: Contact information to create or update
-        auth: Enhanced auth object from verify_token_with_session dependency
+        auth: Enhanced auth object from verify_token dependency
 
     Returns:
         TrustedContactUpsertResponse with contact details and timestamp
@@ -487,8 +452,8 @@ async def upsert_trusted_contact(
         HTTPException: 403 if user tries to modify another user's contacts
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth["sub"]
-    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub")
+    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
 
     # Verify user can only modify their own contacts
     if auth_user_id != user_id:
@@ -528,7 +493,7 @@ async def upsert_trusted_contact(
 )
 async def get_user(
     user_id: str,
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
     db=Depends(get_db),
 ):
     """
@@ -536,7 +501,7 @@ async def get_user(
 
     Args:
         user_id: User identifier (must match authenticated user)
-        auth: Enhanced auth object from verify_token_with_session dependency
+        auth: Enhanced auth object from verify_token dependency
         db: Database session dependency
 
     Returns:
@@ -548,8 +513,8 @@ async def get_user(
         HTTPException: 404 if user not found
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth["sub"]
-    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub")
+    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
 
     # Verify user can only access their own data
     if auth_user_id != user_id:
@@ -600,7 +565,7 @@ async def get_user(
 )
 async def list_trusted_contacts(
     user_id: str,
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
     include_inactive=Query(False, description="Mock flag; no effect in stub"),
 ):
     """
@@ -608,7 +573,7 @@ async def list_trusted_contacts(
 
     Args:
         user_id: User identifier (must match authenticated user)
-        auth: Enhanced auth object from verify_token_with_session dependency
+        auth: Enhanced auth object from verify_token dependency
         include_inactive: Flag to include inactive contacts (not implemented)
 
     Returns:
@@ -619,8 +584,8 @@ async def list_trusted_contacts(
         HTTPException: 403 if user tries to access another user's contacts
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth["sub"]
-    auth_user_id = auth_sub.split("|")[-1] if "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub")
+    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
 
     # Verify user can only access their own contacts
     if auth_user_id != user_id:
@@ -664,239 +629,42 @@ async def auth0_callback(code=None, state=None):
     summary="Get current user information (protected)",
 )
 async def get_current_user(
-    auth: dict = Depends(verify_token_with_session),
+    auth: dict = Depends(verify_token),
 ):
     """
     Get current user information (protected endpoint example).
     
-    This endpoint demonstrates how to use verify_token_with_session:
+    This endpoint demonstrates how to use verify_token for stateless auth:
     - Requires valid JWT token
-    - Requires valid Redis session
-    - Automatically validates session belongs to token user
-    - Updates session last_seen_at for sliding TTL
+    - Validates token against Auth0 JWKS
     
     Mobile app must send:
     - Authorization: Bearer <access_token>
-    - X-Session-Id: <sid>
-    - X-Device-Id: <device_id> (optional)
     
     Args:
-        auth: Enhanced auth object from verify_token_with_session dependency
-            Contains JWT claims, session_id, and session_data
+        auth: Enhanced auth object from verify_token dependency
+            Contains JWT claims
             
     Returns:
         UserResponse with user information
         
     Raises:
-        HTTPException: 401 if JWT or session is invalid
-        HTTPException: 503 if Redis is unavailable
+        HTTPException: 401 if JWT is invalid
     """
-    sub = auth["sub"]
-    session_data = auth["session_data"]
+    auth_sub = auth.get("sub")
     
     # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
-    user_id = sub.split("|")[-1] if "|" in sub else sub
+    user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
     
+    print(f"👤 [UserMgmt] get_current_user called for: {user_id}")
+
     # In a real implementation, you would query the database
-    # For now, return mock data based on session
+    # For now, return mock data based on token
     return UserResponse(
         user_id=user_id,
-        name=session_data.get("device_name"),
+        name=None, # Name not in token usually
         email=f"{user_id}@example.com",  # Mock email
         phone=None,
         created_at=datetime.utcnow(),
         last_login=None,
-    )
-
-
-# ========= Session Management Endpoints =========
-
-
-@app.post(
-    "/session/start",
-    response_model=SessionStartResponse,
-    tags=["Session Management"],
-    summary="Start a server session",
-)
-async def session_start(
-    payload: SessionStartRequest,
-    token_payload: dict = Depends(verify_token),
-):
-    """
-    Create a server-side session after Auth0 login.
-    
-    Mobile app calls this immediately after Auth0 login to register a session.
-    
-    Flow:
-    1. Mobile logs in with Auth0 (gets access token + refresh token)
-    2. Mobile calls this endpoint with access token in Authorization header
-    3. API verifies JWT and creates server session
-    4. API returns session ID (sid) to mobile app
-    
-    Mobile app should:
-    - Store sid securely
-    - Include sid in X-Session-Id header for all subsequent API calls
-    
-    Args:
-        payload: Session start request with device metadata
-        token_payload: Decoded JWT payload from verify_token dependency
-        
-    Returns:
-        SessionStartResponse with server-generated session ID (sid)
-        
-    Raises:
-        HTTPException: 401 if JWT is invalid
-        HTTPException: 503 if Redis is unavailable (fail closed)
-    """
-    from common.constants import SESSION_TTL
-    
-    # Extract user ID from JWT
-    sub = token_payload.get("sub")
-    if not sub:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token: missing 'sub' claim",
-        )
-
-    # Get session manager
-    session_manager = get_session_manager()
-
-    try:
-        # Create server session
-        sid = session_manager.create_session(
-            sub=sub,
-            device_id=payload.device_id,
-            device_name=payload.device_name,
-            app_version=payload.app_version,
-        )
-    except RuntimeError as e:
-        # Redis unavailable - fail closed
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e),
-        ) from e
-
-    return SessionStartResponse(
-        sid=sid,
-        status="session_started",
-        expires_in=SESSION_TTL,
-    )
-
-
-@app.post(
-    "/session/logout",
-    response_model=SessionLogoutResponse,
-    tags=["Session Management"],
-    summary="Logout from current device",
-)
-async def session_logout(
-    token_payload: dict = Depends(verify_token),
-    session_id: str = Header(..., alias="X-Session-Id", description="Server session ID"),
-):
-    """
-    Logout from current device (delete single session).
-    
-    Mobile app should:
-    - Include Authorization: Bearer <access_token> header
-    - Include X-Session-Id: <sid> header
-    - Clear local tokens and session ID after successful logout
-    
-    Args:
-        token_payload: Decoded JWT payload from verify_token dependency
-        session_id: Session ID from X-Session-Id header
-        
-    Returns:
-        SessionLogoutResponse confirming logout
-        
-    Raises:
-        HTTPException: 401 if JWT is invalid or session doesn't exist
-        HTTPException: 503 if Redis is unavailable
-    """
-    sub = token_payload.get("sub")
-    if not sub:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token: missing 'sub' claim",
-        )
-
-    session_manager = get_session_manager()
-
-    # Verify session belongs to this user
-    if not session_manager.is_session_valid(session_id, sub):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session not found or invalid",
-        )
-
-    # Delete session
-    if not session_manager.delete_session(session_id):
-        # Redis might be unavailable
-        if not session_manager.redis.is_connected():
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Redis is unavailable. Cannot logout.",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session not found",
-        )
-
-    return SessionLogoutResponse(
-        status="logged_out",
-        message="Session terminated successfully",
-    )
-
-
-@app.post(
-    "/session/logout_all",
-    response_model=SessionLogoutAllResponse,
-    tags=["Session Management"],
-    summary="Logout from all devices",
-)
-async def session_logout_all(
-    token_payload: dict = Depends(verify_token),
-):
-    """
-    Logout from all devices (delete all sessions for user).
-    
-    This immediately invalidates all sessions for the user across all devices.
-    All devices will start failing API calls on next request.
-    
-    Mobile app should:
-    - Include Authorization: Bearer <access_token> header
-    - Clear local tokens after successful logout
-    
-    Args:
-        token_payload: Decoded JWT payload from verify_token dependency
-        
-    Returns:
-        SessionLogoutAllResponse with number of sessions deleted
-        
-    Raises:
-        HTTPException: 401 if JWT is invalid
-        HTTPException: 503 if Redis is unavailable
-    """
-    sub = token_payload.get("sub")
-    if not sub:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token: missing 'sub' claim",
-        )
-
-    session_manager = get_session_manager()
-
-    # Check Redis availability
-    if not session_manager.redis.is_connected():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis is unavailable. Cannot logout.",
-        )
-
-    # Delete all sessions for this user
-    deleted_count = session_manager.delete_user_sessions(sub)
-
-    return SessionLogoutAllResponse(
-        status="logged_out_all",
-        sessions_deleted=deleted_count,
-        message=f"All {deleted_count} session(s) terminated successfully",
     )
