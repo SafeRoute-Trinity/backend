@@ -8,6 +8,7 @@ from enum import Enum
 
 class SMSStatus(str, Enum):
     """SMS notification status values"""
+
     QUEUED = "queued"
     SENDING = "sending"
     SENT = "sent"
@@ -18,6 +19,7 @@ class SMSStatus(str, Enum):
 
 class PushStatus(str, Enum):
     """Push notification status values"""
+
     SENT = "sent"
     FAILED = "failed"
     NOT_TRIGGERED = "not_triggered"
@@ -25,6 +27,7 @@ class PushStatus(str, Enum):
 
 class CallStatus(str, Enum):
     """Call notification status values"""
+
     QUEUED = "queued"
     CALLING = "calling"
     ANSWERED = "answered"
@@ -35,6 +38,7 @@ class CallStatus(str, Enum):
 
 class NotificationStatus(str, Enum):
     """Overall notification status values"""
+
     QUEUED = "queued"
     SENDING = "sending"
     DELIVERED = "delivered"
@@ -44,6 +48,7 @@ class NotificationStatus(str, Enum):
 
 class EmergencyStatus(str, Enum):
     """Emergency service status values (used by SOS service)"""
+
     SENT = "sent"
     FAILED = "failed"
     INITIATED = "initiated"
