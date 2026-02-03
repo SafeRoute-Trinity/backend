@@ -599,6 +599,23 @@ async def list_trusted_contacts(
     )
 
 
+@app.get("/login", tags=["Auth"])
+async def login_info(iss: Optional[str] = None):
+    """
+    Auth0 login information endpoint.
+
+    This endpoint is called by Auth0 for validation purposes.
+    Returns information about the authentication configuration.
+    """
+    return {
+        "message": "Authentication is handled by Auth0",
+        "auth0_domain": "saferoute.eu.auth0.com",
+        "issuer": iss,
+        "mobile_callback": "saferouteapp://auth/callback",
+        "note": "Mobile clients should use Auth0 native authentication",
+    }
+
+
 @app.get("/auth0/callback", tags=["Auth"])
 @app.post("/auth0/callback", tags=["Auth"])
 async def auth0_callback(code=None, state=None):
