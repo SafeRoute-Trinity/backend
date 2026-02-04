@@ -1,6 +1,9 @@
 # backend/libs/postgis_db.py
+import asyncio
 import os
+from typing import Optional, Tuple
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -21,6 +24,23 @@ AsyncPostgisSessionLocal = sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False,
 )
+
+
+async def check_postgis_health(timeout: float = 1.0) -> Tuple[bool, Optional[str]]:
+    """
+    PostGIS health check (SELECT PostGIS_Version()). Reuses engine pool.
+    Returns (success, error_message). Safe for use in /health/ready.
+    """
+    try:
+        async def _run() -> None:
+            async with engine_postgis.connect() as conn:
+                await conn.execute(text("SELECT PostGIS_Version()"))
+        await asyncio.wait_for(_run(), timeout=timeout)
+        return True, None
+    except asyncio.TimeoutError:
+        return False, "postgis check timeout"
+    except Exception as e:
+        return False, str(e).split("\n")[0][:200]
 
 
 async def get_postgis_db() -> AsyncSession:

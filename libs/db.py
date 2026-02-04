@@ -4,9 +4,12 @@ Database connection module for SafeRoute backend.
 Provides async database engine and session management using SQLAlchemy.
 """
 
+import asyncio
 import os
+from typing import Optional, Tuple
 from urllib.parse import quote_plus
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -40,6 +43,23 @@ AsyncSessionLocal = sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False,
 )
+
+
+async def check_health(timeout: float = 1.0) -> Tuple[bool, Optional[str]]:
+    """
+    Lightweight DB health check (SELECT 1). Reuses engine pool.
+    Returns (success, error_message). Safe for use in /health/ready.
+    """
+    try:
+        async def _run() -> None:
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        await asyncio.wait_for(_run(), timeout=timeout)
+        return True, None
+    except asyncio.TimeoutError:
+        return False, "database connection timeout"
+    except Exception as e:
+        return False, str(e).split("\n")[0][:200]
 
 
 async def get_db():
