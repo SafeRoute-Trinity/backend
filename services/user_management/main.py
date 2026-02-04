@@ -24,6 +24,8 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
+from models.audit import Audit
+
 # Add parent directory to path to import libs and models
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -332,6 +334,17 @@ async def register_user(
     )
 
     db.add(user)
+
+    audit = Audit(
+        user_id=user_id,
+        event_type="USER_REGISTER",
+        event_id=user_id,
+        message="",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
     try:
         await db.commit()
     except IntegrityError:
@@ -410,7 +423,25 @@ async def login(
 
     # Update last_login timestamp
     user.last_login = now
-    await db.commit()
+
+    audit = Audit(
+        user_id=user.user_id,
+        event_type="USER_LOGIN",
+        event_id=user.user_id,
+        message="",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not login",
+        )
 
     # Update in-memory cache (optional, can be removed later)
     users[user.user_id] = {
@@ -439,7 +470,10 @@ async def login(
     response_model=PreferencesResponse,
     tags=["User Management"],
 )
-async def save_preferences(user_id, payload):
+async def save_preferences(
+    payload,
+    db=Depends(get_db),
+):
     """
     Save user preferences.
 
@@ -451,6 +485,10 @@ async def save_preferences(user_id, payload):
         PreferencesResponse with saved preferences and timestamp
     """
     now = datetime.utcnow()
+
+    user_id = payload.user_id
+
+    # TODO: the user preference should be stored in DB, not in memory
 
     # Get user data from memory
     users.setdefault(user_id, {"user_id": user_id})
@@ -469,6 +507,25 @@ async def save_preferences(user_id, payload):
             datetime.fromisoformat(user_data["last_login"]) if user_data.get("last_login") else None
         )
 
+    audit = Audit(
+        user_id=user_id,
+        event_type="UPDATE_PREFERENCE",
+        event_id=user_id,
+        message="",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not update preference",
+        )
+
     return PreferencesResponse(
         user_id=user_id,
         status="preferences_saved",
@@ -482,7 +539,10 @@ async def save_preferences(user_id, payload):
     response_model=TrustedContactUpsertResponse,
     tags=["User Management"],
 )
-async def upsert_trusted_contact(user_id, payload):
+async def upsert_trusted_contact(
+    payload,
+    db=Depends(get_db),
+):
     """
     Create or update a trusted contact for a user.
 
@@ -493,6 +553,9 @@ async def upsert_trusted_contact(user_id, payload):
     Returns:
         TrustedContactUpsertResponse with contact details and timestamp
     """
+
+    user_id = payload.user_id
+
     contacts = trusted_contacts.setdefault(user_id, [])
     if payload.contact_id:
         for c in contacts:
@@ -509,6 +572,26 @@ async def upsert_trusted_contact(user_id, payload):
     now: datetime = datetime.utcnow()
     stored = [c for c in contacts if c["contact_id"] == contact_id][0]
     contact_obj = TrustedContact(**stored)
+
+    audit = Audit(
+        user_id=user_id,
+        event_type="UPDATE_TRUSTED_CONTACT",
+        event_id=user_id,
+        message="",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not update trusted contact",
+        )
+
     return TrustedContactUpsertResponse(
         user_id=user_id,
         contact_id=contact_id,
