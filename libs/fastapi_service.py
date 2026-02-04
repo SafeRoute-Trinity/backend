@@ -138,6 +138,9 @@ class FastAPIServiceFactory:
             allow_headers=self.config.cors_config.allow_headers,
         )
 
+        # Add health check endpoint (always enabled)
+        self._add_health_endpoint(app)
+
         # Add Prometheus metrics middleware if enabled
         if self.config.enable_metrics and self.metrics:
             self._add_metrics_middleware(app)
@@ -180,6 +183,20 @@ class FastAPIServiceFactory:
                 content=metrics.get_metrics_prometheus(),
                 media_type=CONTENT_TYPE_LATEST,
             )
+
+    def _add_health_endpoint(self, app: FastAPI):
+        """Add /health endpoint for health checks."""
+        service_name = self.config.service_name  # Capture for closure
+
+        @app.get("/health")
+        async def health_check():
+            """
+            Health check endpoint.
+
+            Returns:
+                Dict with status and service name
+            """
+            return {"status": "ok", "service": service_name}
 
     def add_business_metric(self, name: str, description: str, labels: List[str] = None) -> Counter:
         """

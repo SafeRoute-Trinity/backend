@@ -85,11 +85,6 @@ async def root():
     return {"service": "notification", "status": "running"}
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "notification"}
-
-
 @app.post("/v1/notifications/sos", response_model=CreateResp)
 async def create_sos(body: SOSNotificationRequest):
     """
