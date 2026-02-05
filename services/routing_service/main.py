@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
 
-from fastapi import Request, Response
+from fastapi import Depends, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -20,6 +20,10 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel
+
+from libs.db import get_db
+from libs.postgis_db import get_postgis_db
+from models.audit import Audit
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -182,7 +186,7 @@ class RoutePreferences(BaseModel):
 class RouteCalculateRequest(BaseModel):
     origin: Point
     destination: Point
-    user_id: str
+    user_id: uuid.UUID
     preferences: RoutePreferences
     time_of_day: Optional[datetime] = None
 
@@ -204,26 +208,26 @@ class RouteOption(BaseModel):
 
 
 class RouteCalculateResponse(BaseModel):
-    route_id: str
+    route_id: uuid.UUID
     routes: List[RouteOption]
     alternatives_count: int
     calculated_at: datetime
 
 
 class RecalculateRequest(BaseModel):
-    route_id: str
+    route_id: uuid.UUID
     current_location: Point
     reason: Literal["off_track", "road_closure", "user_request", "safety_alert"]
 
 
 class NavigationStartRequest(BaseModel):
-    route_id: str
-    user_id: str
+    route_id: uuid.UUID
+    user_id: uuid.UUID
     estimated_arrival: datetime
 
 
 class NavigationStartResponse(BaseModel):
-    session_id: str
+    session_id: uuid.UUID
     status: Literal["active"]
     started_at: datetime
 
@@ -257,14 +261,14 @@ async def health():
 
 
 @app.post("/v1/routes/calculate", response_model=RouteCalculateResponse)
-async def calc(body: RouteCalculateRequest):
+async def calc(body: RouteCalculateRequest, db=Depends(get_db), postgisDB=Depends(get_postgis_db)):
     # Business metric: initial route calculation
     ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
 
     # Business metric: initial route calculation
     ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
 
-    rid = f"rt_{uuid.uuid4().hex[:6]}"
+    rid = uuid.uuid4()
     now = datetime.utcnow()
     opt = RouteOption(
         route_index=0,
@@ -284,11 +288,27 @@ async def calc(body: RouteCalculateRequest):
         "alternatives_count": 1,
         "calculated_at": now,
     }
+
+    audit = Audit(
+        log_id=uuid.uuid4(),
+        user_id=body.user_id,
+        event_type="routing",
+        event_id=rid,
+        message="calculate",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
     return RouteCalculateResponse(**ROUTES[rid])
 
 
 @app.post("/v1/routes/{route_id}/recalculate", response_model=RouteCalculateResponse)
-async def recalc(route_id: str, body: RecalculateRequest):
+async def recalc(
+    route_id: str, body: RecalculateRequest, db=Depends(get_db), postgisDB=Depends(get_postgis_db)
+):
+    # TODO: should use actual route_id (uuid) and test AUDIT again
+
     # Business metric: route recalculation
     ROUTING_ROUTE_RECALCULATIONS_TOTAL.inc()
 
@@ -308,16 +328,32 @@ async def recalc(route_id: str, body: RecalculateRequest):
 
 
 @app.post("/v1/navigation/start", response_model=NavigationStartResponse)
-async def nav_start(body: NavigationStartRequest):
-    # Business metric: navigation session started
-    ROUTING_NAVIGATION_STARTS_TOTAL.inc()
+async def nav_start(
+    body: NavigationStartRequest, db=Depends(get_db), postgisDB=Depends(get_postgis_db)
+):
+    # TODO: should use actual route_id and user_id (uuid) and test AUDIT again
 
     # Business metric: navigation session started
     ROUTING_NAVIGATION_STARTS_TOTAL.inc()
 
-    sid = f"nav_{uuid.uuid4().hex[:8]}"
+    # Business metric: navigation session started
+    ROUTING_NAVIGATION_STARTS_TOTAL.inc()
+
+    sid = uuid.uuid4()
     now = datetime.utcnow()
     NAV[sid] = {"route_id": body.route_id, "user_id": body.user_id, "started_at": now}
+
+    audit = Audit(
+        log_id=uuid.uuid4(),
+        user_id=body.user_id,
+        event_type="routing",
+        event_id=body.route_id,
+        message="calculate",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
     return NavigationStartResponse(session_id=sid, status="active", started_at=now)
 
 
