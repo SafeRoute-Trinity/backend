@@ -1,3 +1,7 @@
+# Run:
+# uvicorn services.user_management.main:app --host 0.0.0.0 --port 20000 --reload
+# Docs: http://127.0.0.1:20000/docs
+
 """
 User Management Service for SafeRoute backend.
 
