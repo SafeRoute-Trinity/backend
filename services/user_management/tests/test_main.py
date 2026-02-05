@@ -9,9 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import libs.db as db
+from libs.db import DatabaseType, get_database_factory
 from models.user_models import Base
-from services.user_management.main import app
+from services.user_management.main import app, get_db
 
 DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
@@ -27,9 +27,10 @@ AsyncTestingSessionLocal = sessionmaker(
     expire_on_commit=False,
 )
 
-# ---- IMPORTANT PATCH ----
-db.engine = async_engine
-db.AsyncSessionLocal = AsyncTestingSessionLocal
+factory = get_database_factory()
+if DatabaseType.POSTGRES in factory._connections:
+    factory._connections[DatabaseType.POSTGRES].engine = async_engine
+    factory._connections[DatabaseType.POSTGRES].session_maker = AsyncTestingSessionLocal
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -53,48 +54,14 @@ def setup_test_db():
     asyncio.get_event_loop().run_until_complete(drop_models())
 
 
-# override dependency
+# Override dependency with test database session
 async def override_get_db():
     async with AsyncTestingSessionLocal() as session:
         yield session
 
 
-app.dependency_overrides[db.get_db] = override_get_db
+app.dependency_overrides[get_db] = override_get_db
 client = TestClient(app)
-
-
-# -------------------------
-# 3. Mock Redis
-# -------------------------
-class MockRedis:
-    def __init__(self):
-        self.store = {}
-
-    def is_connected(self):
-        return True
-
-    def set(self, key, value, ttl=None):
-        self.store[key] = value
-
-    def get(self, key):
-        return self.store.get(key)
-
-    def set_json(self, key, value, ttl=None):
-        self.store[key] = value
-
-    def get_json(self, key):
-        return self.store.get(key)
-
-
-# 注入 Fake Redis
-import services.user_management.main as UM
-
-UM.redis_client = MockRedis()
-
-
-# =====================================================
-# 🔥                Begin Tests
-# =====================================================
 
 
 # ------------------------------------------------------
