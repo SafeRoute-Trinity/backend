@@ -182,18 +182,16 @@ class LoginRequest(BaseModel):
     """Request model for user login."""
 
     email: str
-    password_hash: str
-    device_id: str
+    password: str
 
 
 class LoginResponse(BaseModel):
     """Response model for user login."""
 
-    user_id: str
+    user_id: uuid.UUID
     status: Literal["authenticated"]
     auth: AuthInfo
     email: str
-    device_id: str
     last_login: datetime
 
 
@@ -301,7 +299,7 @@ async def register_user(
     Register a new user account.
 
     Args:
-        payload: Registration request containing user details
+        body: Registration request
         db: Database session dependency
 
     Returns:
@@ -392,7 +390,7 @@ async def register_user(
     tags=["User Management"],
 )
 async def login(
-    payload,
+    body: LoginRequest,
     db=Depends(get_db),
 ):
     """
@@ -412,10 +410,10 @@ async def login(
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Query PostgreSQL database for user
-    result = await db.execute(select(User).where(User.email == payload.email))
+    result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
 
-    if not user or user.password_hash != payload.password_hash:
+    if not user or user.password != body.password:
         # Don't distinguish between "user not found" and "wrong password"
         # to prevent user enumeration
         raise HTTPException(
@@ -427,10 +425,11 @@ async def login(
     user.last_login = now
 
     audit = Audit(
+        log_id=uuid.uuid4(),
         user_id=user.user_id,
-        event_type="USER_LOGIN",
+        event_type="authentication",
         event_id=user.user_id,
-        message="",
+        message="Login",
         created_at=now,
         updated_at=now,
     )
@@ -451,8 +450,7 @@ async def login(
         "email": user.email,
         "phone": user.phone,
         "name": user.name,
-        "device_id": user.device_id,
-        "password_hash": user.password_hash,
+        "password": user.password,
         "created_at": user.created_at,
         "last_login": now,
     }
@@ -462,7 +460,6 @@ async def login(
         status="authenticated",
         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
         email=user.email,
-        device_id=payload.device_id,
         last_login=now,
     )
 
