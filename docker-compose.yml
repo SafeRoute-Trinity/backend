@@ -11,6 +11,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      - DATABASE_URL=postgresql+asyncpg://saferoute:saferoute@db:5432/saferoute
+    depends_on:
+      - db
     restart: unless-stopped
 
   notification-service:
@@ -25,6 +28,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      - DATABASE_URL=postgresql+asyncpg://saferoute:saferoute@db:5432/saferoute
+    depends_on:
+      - db
     restart: unless-stopped
 
   routing-service:
@@ -39,6 +45,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      - DATABASE_URL=postgresql+asyncpg://saferoute:saferoute@db:5432/saferoute
+    depends_on:
+      - db
     restart: unless-stopped
 
   safety-scoring-service:
@@ -53,6 +62,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      - DATABASE_URL=postgresql+asyncpg://saferoute:saferoute@db:5432/saferoute
+    depends_on:
+      - db
     restart: unless-stopped
 
   feedback-service:
@@ -67,6 +79,9 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      - DATABASE_URL=postgresql+asyncpg://saferoute:saferoute@db:5432/saferoute
+    depends_on:
+      - db
     restart: unless-stopped
 
   sos-service:
@@ -81,4 +96,23 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      - DATABASE_URL=postgresql+asyncpg://saferoute:saferoute@db:5432/saferoute
+    depends_on:
+      - db
     restart: unless-stopped
+
+  db:
+    image: pgrouting/pgrouting:15-3.3-3.4
+    container_name: saferoute-db
+    restart: always
+    environment:
+      - POSTGRES_USER=saferoute
+      - POSTGRES_PASSWORD=saferoute
+      - POSTGRES_DB=saferoute
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
