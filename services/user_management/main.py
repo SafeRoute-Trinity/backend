@@ -633,36 +633,36 @@ async def get_current_user(
 ):
     """
     Get current user information (protected endpoint example).
-    
+
     This endpoint demonstrates how to use verify_token for stateless auth:
     - Requires valid JWT token
     - Validates token against Auth0 JWKS
-    
+
     Mobile app must send:
     - Authorization: Bearer <access_token>
-    
+
     Args:
         auth: Enhanced auth object from verify_token dependency
             Contains JWT claims
-            
+
     Returns:
         UserResponse with user information
-        
+
     Raises:
         HTTPException: 401 if JWT is invalid
     """
     auth_sub = auth.get("sub")
-    
+
     # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
     user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
-    
+
     print(f"👤 [UserMgmt] get_current_user called for: {user_id}")
 
     # In a real implementation, you would query the database
     # For now, return mock data based on token
     return UserResponse(
         user_id=user_id,
-        name=None, # Name not in token usually
+        name=None,  # Name not in token usually
         email=f"{user_id}@example.com",  # Mock email
         phone=None,
         created_at=datetime.utcnow(),
