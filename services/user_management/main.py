@@ -206,7 +206,7 @@ class PreferencesRequest(BaseModel):
 class PreferencesResponse(BaseModel):
     """Response model for saved preferences."""
 
-    user_id: str
+    user_id: uuid.UUID
     status: Literal["preferences_saved"]
     preferences: PreferencesRequest
     updated_at: datetime
@@ -215,7 +215,7 @@ class PreferencesResponse(BaseModel):
 class TrustedContactUpsertRequest(BaseModel):
     """Request model for creating/updating trusted contacts."""
 
-    contact_id: Optional[str] = None
+    contact_id: Optional[uuid.UUID] = None
     name: str
     phone: str
     relationship: Optional[str] = None
@@ -225,7 +225,7 @@ class TrustedContactUpsertRequest(BaseModel):
 class TrustedContact(BaseModel):
     """Model representing a trusted contact."""
 
-    contact_id: str
+    contact_id: uuid.UUID
     name: str
     phone: str
     relationship: Optional[str] = None
@@ -235,8 +235,8 @@ class TrustedContact(BaseModel):
 class TrustedContactUpsertResponse(BaseModel):
     """Response model for trusted contact upsert operation."""
 
-    user_id: str
-    contact_id: str
+    user_id: uuid.UUID
+    contact_id: uuid.UUID
     status: Literal["contact_upserted"]
     contact: TrustedContact
     updated_at: datetime
@@ -245,7 +245,7 @@ class TrustedContactUpsertResponse(BaseModel):
 class UserResponse(BaseModel):
     """Response model for user information."""
 
-    user_id: str
+    user_id: uuid.UUID
     name: Optional[str]
     email: str
     phone: Optional[str] = None
@@ -256,7 +256,7 @@ class UserResponse(BaseModel):
 class TrustedContactsListResponse(BaseModel):
     """Response model for listing trusted contacts."""
 
-    user_id: str
+    user_id: uuid.UUID
     contacts: List[TrustedContact]
 
 
@@ -397,7 +397,7 @@ async def login(
     Authenticate a user and return auth token.
 
     Args:
-        payload: Login request with email and password
+        body: Login request with email and password
         db: Database session dependency
 
     Returns:
@@ -470,7 +470,8 @@ async def login(
     tags=["User Management"],
 )
 async def save_preferences(
-    payload,
+    user_id: str,
+    body: PreferencesRequest,
     db=Depends(get_db),
 ):
     """
@@ -485,7 +486,7 @@ async def save_preferences(
     """
     now = datetime.utcnow()
 
-    user_id = payload.user_id
+    user_id = body.user_id
 
     # TODO: the user preference should be stored in DB, not in memory
 
@@ -494,7 +495,7 @@ async def save_preferences(
     user_data = users[user_id]
 
     # Update preferences
-    user_data["preferences"] = payload.dict()
+    user_data["preferences"] = body.dict()
     user_data["updated_at"] = now.isoformat()
 
     # Update in memory
@@ -507,10 +508,11 @@ async def save_preferences(
         )
 
     audit = Audit(
-        user_id=user_id,
-        event_type="UPDATE_PREFERENCE",
-        event_id=user_id,
-        message="",
+        log_id=uuid.uuid4(),
+        user_id=uuid.uuid4(user_id),
+        event_type="authentication",
+        event_id=uuid.uuid4(user_id),
+        message="save_preference",
         created_at=now,
         updated_at=now,
     )
@@ -526,9 +528,9 @@ async def save_preferences(
         )
 
     return PreferencesResponse(
-        user_id=user_id,
+        user_id=uuid.uuid4(user_id),
         status="preferences_saved",
-        preferences=payload,
+        preferences=body,
         updated_at=now,
     )
 
@@ -539,7 +541,7 @@ async def save_preferences(
     tags=["User Management"],
 )
 async def upsert_trusted_contact(
-    payload,
+    body: TrustedContactUpsertRequest,
     db=Depends(get_db),
 ):
     """
@@ -547,36 +549,39 @@ async def upsert_trusted_contact(
 
     Args:
         user_id: User identifier
-        payload: Contact information to create or update
+        body: Contact information to create or update
 
     Returns:
         TrustedContactUpsertResponse with contact details and timestamp
     """
 
-    user_id = payload.user_id
+    user_id = body.user_id
 
     contacts = trusted_contacts.setdefault(user_id, [])
-    if payload.contact_id:
+    # TODO: contact_id should be UUID
+
+    if body.contact_id:
         for c in contacts:
-            if c["contact_id"] == payload.contact_id:
-                c.update(payload.dict(exclude_unset=True))
-                contact_id = payload.contact_id
+            if c["contact_id"] == body.contact_id:
+                c.update(body.dict(exclude_unset=True))
+                contact_id = body.contact_id
                 break
         else:
-            contact_id = payload.contact_id
-            contacts.append({**payload.dict(), "contact_id": contact_id})
+            contact_id = body.contact_id
+            contacts.append({**body.dict(), "contact_id": contact_id})
     else:
         contact_id = f"ctc_{uuid.uuid4().hex[:6]}"
-        contacts.append({**payload.dict(), "contact_id": contact_id})
+        contacts.append({**body.dict(), "contact_id": contact_id})
     now: datetime = datetime.utcnow()
     stored = [c for c in contacts if c["contact_id"] == contact_id][0]
     contact_obj = TrustedContact(**stored)
 
     audit = Audit(
-        user_id=user_id,
-        event_type="UPDATE_TRUSTED_CONTACT",
-        event_id=user_id,
-        message="",
+        log_id=uuid.uuid4(),
+        user_id=uuid.uuid4(user_id),
+        event_type="authentication",
+        event_id=uuid.uuid4(user_id),
+        message="update trusted-contacts",
         created_at=now,
         updated_at=now,
     )
@@ -592,7 +597,7 @@ async def upsert_trusted_contact(
         )
 
     return TrustedContactUpsertResponse(
-        user_id=user_id,
+        user_id=uuid.uuid4(user_id),
         contact_id=contact_id,
         status="contact_upserted",
         contact=contact_obj,
