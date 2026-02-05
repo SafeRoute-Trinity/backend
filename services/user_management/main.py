@@ -28,8 +28,7 @@ from sqlalchemy.exc import IntegrityError
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from common.auth.session import get_session_manager
-from common.constants import AUTH_TOKEN_TTL, SESSION_TTL
+from common.constants import AUTH_TOKEN_TTL
 from libs.auth.auth0_verify import verify_token
 from libs.db import get_db
 from libs.fastapi_service import (
@@ -260,38 +259,7 @@ class TrustedContactsListResponse(BaseModel):
     contacts: List[TrustedContact]
 
 
-# ========= Session Management Models =========
 
-
-class SessionStartRequest(BaseModel):
-    """Request model for starting a server session."""
-
-    device_id: str
-    device_name: Optional[str] = None
-    app_version: Optional[str] = None
-
-
-class SessionStartResponse(BaseModel):
-    """Response model for session start."""
-
-    sid: str
-    status: Literal["session_started"]
-    expires_in: int
-
-
-class SessionLogoutResponse(BaseModel):
-    """Response model for session logout."""
-
-    status: Literal["logged_out"]
-    message: str
-
-
-class SessionLogoutAllResponse(BaseModel):
-    """Response model for logout all sessions."""
-
-    status: Literal["logged_out_all"]
-    sessions_deleted: int
-    message: str
 
 
 # ========= User Management Endpoints =========
@@ -359,11 +327,12 @@ async def register_user(
     db.add(user)
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         await db.rollback()
+        print(f"[UserMgmt] Database integrity error during user registration: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Could not create user",
+            detail=f"Could not create user: {e}",
         )
 
     # Store in memory for backward compatibility (can be removed later)
@@ -776,7 +745,7 @@ async def get_current_user(
     # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
     user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
 
-    print(f"👤 [UserMgmt] get_current_user called for: {user_id}")
+    print(f"[UserMgmt] get_current_user called for: {user_id}")
 
     # In a real implementation, you would query the database
     # For now, return mock data based on token
@@ -787,195 +756,4 @@ async def get_current_user(
         phone=None,
         created_at=datetime.utcnow(),
         last_login=None,
-    )
-
-
-# ========= Session Management Endpoints =========
-
-
-@app.post(
-    "/session/start",
-    response_model=SessionStartResponse,
-    tags=["Session Management"],
-    summary="Start a server session",
-)
-async def session_start(
-    payload: SessionStartRequest,
-    token_payload: dict = Depends(verify_token),
-):
-    """
-    Create a server-side session after Auth0 login.
-
-    Mobile app calls this immediately after Auth0 login to register a session.
-
-    Flow:
-    1. Mobile logs in with Auth0 (gets access token + refresh token)
-    2. Mobile calls this endpoint with access token in Authorization header
-    3. API verifies JWT and creates server session
-    4. API returns session ID (sid) to mobile app
-
-    Mobile app should:
-    - Store sid securely
-    - Include sid in X-Session-Id header for all subsequent API calls
-
-    Args:
-        payload: Session start request with device metadata
-        token_payload: Decoded JWT payload from verify_token dependency
-
-    Returns:
-        SessionStartResponse with server-generated session ID (sid)
-
-    Raises:
-        HTTPException: 401 if JWT is invalid
-        HTTPException: 503 if Redis is unavailable (fail closed)
-    """
-    # Extract user ID from JWT
-    sub = token_payload.get("sub")
-    if not sub:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token: missing 'sub' claim",
-        )
-
-    # Get session manager
-    session_manager = get_session_manager()
-
-    try:
-        # Create server session
-        sid = session_manager.create_session(
-            sub=sub,
-            device_id=payload.device_id,
-            device_name=payload.device_name,
-            app_version=payload.app_version,
-        )
-    except RuntimeError as e:
-        # Redis unavailable - fail closed
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e),
-        ) from e
-
-    return SessionStartResponse(
-        sid=sid,
-        status="session_started",
-        expires_in=SESSION_TTL,
-    )
-
-
-@app.post(
-    "/session/logout",
-    response_model=SessionLogoutResponse,
-    tags=["Session Management"],
-    summary="Logout from current device",
-)
-async def session_logout(
-    token_payload: dict = Depends(verify_token),
-    session_id: str = Header(..., alias="X-Session-Id", description="Server session ID"),
-):
-    """
-    Logout from current device (delete single session).
-
-    Mobile app should:
-    - Include Authorization: Bearer <access_token> header
-    - Include X-Session-Id: <sid> header
-    - Clear local tokens and session ID after successful logout
-
-    Args:
-        token_payload: Decoded JWT payload from verify_token dependency
-        session_id: Session ID from X-Session-Id header
-
-    Returns:
-        SessionLogoutResponse confirming logout
-
-    Raises:
-        HTTPException: 401 if JWT is invalid or session doesn't exist
-        HTTPException: 503 if Redis is unavailable
-    """
-    sub = token_payload.get("sub")
-    if not sub:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token: missing 'sub' claim",
-        )
-
-    session_manager = get_session_manager()
-
-    # Verify session belongs to this user
-    if not session_manager.is_session_valid(session_id, sub):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session not found or invalid",
-        )
-
-    # Delete session
-    if not session_manager.delete_session(session_id):
-        # Redis might be unavailable
-        if not session_manager.redis.is_connected():
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Redis is unavailable. Cannot logout.",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session not found",
-        )
-
-    return SessionLogoutResponse(
-        status="logged_out",
-        message="Session terminated successfully",
-    )
-
-
-@app.post(
-    "/session/logout_all",
-    response_model=SessionLogoutAllResponse,
-    tags=["Session Management"],
-    summary="Logout from all devices",
-)
-async def session_logout_all(
-    token_payload: dict = Depends(verify_token),
-):
-    """
-    Logout from all devices (delete all sessions for user).
-
-    This immediately invalidates all sessions for the user across all devices.
-    All devices will start failing API calls on next request.
-
-    Mobile app should:
-    - Include Authorization: Bearer <access_token> header
-    - Clear local tokens after successful logout
-
-    Args:
-        token_payload: Decoded JWT payload from verify_token dependency
-
-    Returns:
-        SessionLogoutAllResponse with number of sessions deleted
-
-    Raises:
-        HTTPException: 401 if JWT is invalid
-        HTTPException: 503 if Redis is unavailable
-    """
-    sub = token_payload.get("sub")
-    if not sub:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token: missing 'sub' claim",
-        )
-
-    session_manager = get_session_manager()
-
-    # Check Redis availability
-    if not session_manager.redis.is_connected():
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis is unavailable. Cannot logout.",
-        )
-
-    # Delete all sessions for this user
-    deleted_count = session_manager.delete_user_sessions(sub)
-
-    return SessionLogoutAllResponse(
-        status="logged_out_all",
-        sessions_deleted=deleted_count,
-        message=f"All {deleted_count} session(s) terminated successfully",
     )

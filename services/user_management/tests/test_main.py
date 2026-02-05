@@ -63,35 +63,6 @@ app.dependency_overrides[db.get_db] = override_get_db
 client = TestClient(app)
 
 
-# -------------------------
-# 3. Mock Redis
-# -------------------------
-class MockRedis:
-    def __init__(self):
-        self.store = {}
-
-    def is_connected(self):
-        return True
-
-    def set(self, key, value, ttl=None):
-        self.store[key] = value
-
-    def get(self, key):
-        return self.store.get(key)
-
-    def set_json(self, key, value, ttl=None):
-        self.store[key] = value
-
-    def get_json(self, key):
-        return self.store.get(key)
-
-
-# 注入 Fake Redis
-import services.user_management.main as UM
-
-UM.redis_client = MockRedis()
-
-
 # =====================================================
 # 🔥                Begin Tests
 # =====================================================
