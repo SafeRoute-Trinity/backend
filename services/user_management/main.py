@@ -259,9 +259,6 @@ class TrustedContactsListResponse(BaseModel):
     contacts: List[TrustedContact]
 
 
-
-
-
 # ========= User Management Endpoints =========
 
 
