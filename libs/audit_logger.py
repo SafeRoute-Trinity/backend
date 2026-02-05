@@ -7,6 +7,7 @@ from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import common.storage as _storage
 from models.audit import Audit
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,20 @@ async def write_audit(
             str(event_id) if event_id else None,
             repr(exc),
         )
+        # Fallback: keep the audit in an in-memory store so we don't lose it when DB is down.
+        try:
+            _storage.audit_logs.append(
+                {
+                    "event_type": et,
+                    "user_id": str(user_id) if user_id else None,
+                    "event_id": str(event_id) if event_id else None,
+                    "message": msg,
+                    "error": repr(exc),
+                }
+            )
+        except Exception:
+            # best-effort only
+            logger.exception("Failed to append audit to in-memory fallback")
         try:
             await db.rollback()
         except Exception:

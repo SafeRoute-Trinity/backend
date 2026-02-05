@@ -2,15 +2,24 @@
 # uvicorn services.sos.main:app --host 0.0.0.0 --port 20006 --reload
 # Docs: http://127.0.0.1:20006/docs
 
+import logging
 import os
 import sys
+import uuid
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import HTTPException, Path
+from fastapi import Depends, HTTPException, Path
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from libs.audit_logger import write_audit
+from libs.db import get_db
+
+logger = logging.getLogger(__name__)
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -49,6 +58,19 @@ SOS_SMS_TOTAL = factory.add_business_metric(
 )
 
 STATUS = {}
+
+
+def _uuid_or_none(val: Optional[Union[str, uuid.UUID]]):
+    if val is None:
+        return None
+    if isinstance(val, uuid.UUID):
+        return val
+    if isinstance(val, str):
+        try:
+            return uuid.UUID(val)
+        except Exception:
+            return None
+    return None
 
 
 class Point(BaseModel):
@@ -130,7 +152,7 @@ async def health():
 
 
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
-async def call(body: EmergencyCallRequest):
+async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
@@ -140,6 +162,22 @@ async def call(body: EmergencyCallRequest):
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPError as e:
+        # Log the httpx error details for easier debugging
+        logger.exception(
+            "Notification service call failed for sos_id=%s phone=%s: %s",
+            body.sos_id,
+            body.phone_number,
+            repr(e),
+        )
+
+        await write_audit(
+            db=db,
+            event_type="emergency",
+            user_id=None,  # call request 没 user_id 字段
+            event_id=_uuid_or_none(body.sos_id),
+            message=f"sos_call_failed sos_id={body.sos_id} phone={body.phone_number} reason={body.call_reason} error={str(e)}",
+            commit=True,
+        )
         raise HTTPException(
             status_code=503,
             detail=f"Failed to dispatch SOS call via notification service: {str(e)}",
@@ -154,11 +192,23 @@ async def call(body: EmergencyCallRequest):
     }
 
     SOS_CALLS_TOTAL.inc()
+    # Audit call success
+    try:
+        await write_audit(
+            db=db,
+            event_type="emergency",
+            user_id=None,
+            event_id=_uuid_or_none(body.sos_id),
+            message=f"sos_call_initiated sos_id={body.sos_id} phone={body.phone_number} status={data.get('status')}",
+            commit=True,
+        )
+    except Exception:
+        pass
     return EmergencyCallResponse(**data)
 
 
 @app.post("/v1/emergency/sms", response_model=EmergencySMSResponse)
-async def sms(body: EmergencySMSRequest):
+async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     """
     Send emergency SMS with rich details (templates, variables, location).
     Delegates delivery to the Notification service.
@@ -172,6 +222,28 @@ async def sms(body: EmergencySMSRequest):
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPError as e:
+        # Log and audit SMS failure
+        logger.exception(
+            "Notification service SMS call failed for sos_id=%s user_id=%s recipient=%s: %s",
+            body.sos_id,
+            body.user_id,
+            body.emergency_contact.phone,
+            repr(e),
+        )
+
+        try:
+            await write_audit(
+                db=db,
+                event_type="emergency",
+                user_id=_uuid_or_none(body.user_id),
+                event_id=_uuid_or_none(body.sos_id),
+                message=f"sos_sms_failed sos_id={body.sos_id} user_id={body.user_id} recipient={body.emergency_contact.phone} error={str(e)}",
+                commit=True,
+            )
+        except Exception:
+            # Audit failures should not block the main error
+            pass
+
         raise HTTPException(
             status_code=503,
             detail=f"Failed to send SMS via notification service: {str(e)}",
@@ -194,6 +266,20 @@ async def sms(body: EmergencySMSRequest):
     # Business metric: count SOS SMS
     SOS_SMS_TOTAL.inc()
 
+    # Audit SMS success
+    try:
+        await write_audit(
+            db=db,
+            event_type="emergency",
+            user_id=_uuid_or_none(body.user_id),
+            event_id=_uuid_or_none(body.sos_id),
+            message=f"sos_sms_sent sos_id={body.sos_id} user_id={body.user_id} sms_id={data.get('sms_id')} recipient={data.get('recipient')}",
+            commit=True,
+        )
+    except Exception:
+        # don't let audit failures affect response
+        pass
+
     return EmergencySMSResponse(**data)
 
 
@@ -213,7 +299,7 @@ async def get_status(sos_id: str = Path(..., description="SOS event to check")):
 
 
 @app.post("/v1/test/sms", response_model=TestSMSResponse)
-async def test_sms(body: TestSMSRequest):
+async def test_sms(body: TestSMSRequest, db: AsyncSession = Depends(get_db)):
     """
     Test endpoint to send an SMS to a phone number using Twilio.
 
@@ -227,6 +313,21 @@ async def test_sms(body: TestSMSRequest):
             response.raise_for_status()
             return TestSMSResponse(**response.json())
     except httpx.HTTPError as e:
+        # Log and audit test sms failure
+        logger.exception("Notification test SMS call failed to=%s: %s", body.to_phone, repr(e))
+
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=None,
+                event_id=None,
+                message=f"test_sms_failed to={body.to_phone} error={str(e)}",
+                commit=True,
+            )
+        except Exception:
+            pass
+
         raise HTTPException(
             status_code=503,
             detail=f"Failed to send SMS via notification service: {str(e)}",
