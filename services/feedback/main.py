@@ -2,6 +2,7 @@
 # uvicorn services.feedback.main:app --host 0.0.0.0 --port 20004 --reload
 # Docs: http://127.0.0.1:20004/docs
 
+import logging
 import os
 import sys
 import time
@@ -9,7 +10,7 @@ import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import Request, Response
+from fastapi import Depends, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -18,6 +19,10 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel, HttpUrl
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from libs.audit_logger import write_audit
+from libs.db import get_db
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -129,6 +134,24 @@ async def prometheus_middleware(request: Request, call_next):
     return response
 
 
+logger = logging.getLogger(__name__)
+
+
+def _maybe_uuid(val):
+    try:
+        import uuid as _uuid
+
+        if val is None:
+            return None
+        if isinstance(val, _uuid.UUID):
+            return val
+        if isinstance(val, str):
+            return _uuid.UUID(val)
+    except Exception:
+        return None
+    return None
+
+
 # ========= MODELS =========
 
 
@@ -198,7 +221,7 @@ async def health():
 
 
 @app.post("/v1/feedback/submit", response_model=FeedbackSubmitResponse)
-async def submit(body: FeedbackSubmitRequest):
+async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)):
     # Business metric
     FEEDBACK_SUBMISSIONS_TOTAL.inc()
 
@@ -212,21 +235,35 @@ async def submit(body: FeedbackSubmitRequest):
         "created_at": now,
         "updated_at": now,
     }
-    return FeedbackSubmitResponse(
+    resp = FeedbackSubmitResponse(
         feedback_id=body.feedback_id,
         status="received",
         ticket_number=ticket,
         created_at=now,
     )
+    # Audit the submission (best-effort)
+    try:
+        await write_audit(
+            db=db,
+            event_type="feedback",
+            user_id=_maybe_uuid(getattr(body, "user_id", None)),
+            event_id=_maybe_uuid(getattr(body, "feedback_id", None)),
+            message=f"feedback.submit feedback_id={body.feedback_id} ticket={ticket} type={body.type} severity={body.severity}",
+            commit=True,
+        )
+    except Exception:
+        logger.exception("Failed to write audit for feedback.submit")
+
+    return resp
 
 
 @app.post("/v1/feedback/validate", response_model=FeedbackValidateResponse)
-async def validate(body: FeedbackValidateRequest):
+async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get_db)):
     # Business metric
     FEEDBACK_VALIDATIONS_TOTAL.inc()
 
     is_spam = body.recent_submissions_count > 10
-    return FeedbackValidateResponse(
+    resp = FeedbackValidateResponse(
         is_spam=is_spam,
         confidence=0.95 if is_spam else 0.9,
         flags=["high_frequency"] if is_spam else [],
@@ -234,9 +271,24 @@ async def validate(body: FeedbackValidateRequest):
         reason="OK" if not is_spam else "Too many submissions",
     )
 
+    # Audit validation attempt
+    try:
+        await write_audit(
+            db=db,
+            event_type="feedback",
+            user_id=_maybe_uuid(getattr(body, "user_id", None)),
+            event_id=None,
+            message=f"feedback.validate user_id={body.user_id} is_spam={resp.is_spam} confidence={resp.confidence} allow_submission={resp.allow_submission}",
+            commit=True,
+        )
+    except Exception:
+        logger.exception("Failed to write audit for feedback.validate")
+
+    return resp
+
 
 @app.get("/v1/feedback/{feedback_id}/status", response_model=FeedbackStatusResponse)
-async def status(feedback_id: str):
+async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
     # Business metric
     FEEDBACK_STATUS_CHECKS_TOTAL.inc()
 
@@ -251,7 +303,22 @@ async def status(feedback_id: str):
             "created_at": now,
             "updated_at": now,
         }
-    return FeedbackStatusResponse(feedback_id=feedback_id, **fb)
+    res = FeedbackStatusResponse(feedback_id=feedback_id, **fb)
+
+    # Audit status lookup
+    try:
+        await write_audit(
+            db=db,
+            event_type="feedback",
+            user_id=None,
+            event_id=_maybe_uuid(feedback_id),
+            message=f"feedback.status_check feedback_id={feedback_id} ticket={fb.get('ticket_number')} status={fb.get('status')}",
+            commit=True,
+        )
+    except Exception:
+        logger.exception("Failed to write audit for feedback.status_check")
+
+    return res
 
 
 # ========= PROMETHEUS METRICS ENDPOINT =========
