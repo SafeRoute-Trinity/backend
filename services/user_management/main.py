@@ -336,15 +336,18 @@ async def register_user(
 
     db.add(user)
 
-    # audit = Audit(
-    #     user_id=uuid.uuid4(),
-    #     event_type="USER_REGISTER",
-    #     event_id=user_id,
-    #     message="",
-    #     created_at=now,
-    #     updated_at=now,
-    # )
-    # db.add(audit)
+    await db.flush()
+
+    audit = Audit(
+        log_id=uuid.uuid4(),
+        user_id=user_id,
+        event_type="authentication",
+        event_id=user_id,
+        message="Register",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
 
     try:
         await db.commit()
