@@ -30,14 +30,14 @@ from common.constants import REDIS_DB, REDIS_HOST, REDIS_PORT
 class RedisClient:
     """
     Redis client wrapper with connection pooling and automatic reconnection.
-    
+
     Features:
     - Connection pooling: Reuses connections instead of creating new ones
     - Health checks: Automatically checks connection health
     - Auto-reconnect: Handles connection failures gracefully
     - Environment-aware: Detects local dev, Docker, or K8s environment
     - Graceful degradation: Works even if Redis is unavailable (for dev)
-    
+
     Connection Management:
     - Uses connection pool (max 50 connections)
     - Connection timeout: 5 seconds
@@ -94,7 +94,7 @@ class RedisClient:
     def _connect(self) -> None:
         """
         Create Redis client connection using connection pool.
-        
+
         The connection pool manages connections automatically:
         - Creates connections as needed (up to max_connections)
         - Reuses existing connections
@@ -115,9 +115,9 @@ class RedisClient:
     def _ensure_connected(self) -> bool:
         """
         Ensure Redis connection is healthy.
-        
+
         Performs periodic health checks and reconnects if needed.
-        
+
         Returns:
             True if connected, False otherwise
         """
@@ -142,7 +142,7 @@ class RedisClient:
     def is_connected(self) -> bool:
         """
         Check if Redis is connected and healthy.
-        
+
         Returns:
             True if connected and healthy, False otherwise
         """
@@ -150,17 +150,15 @@ class RedisClient:
             return False
         return self.client is not None
 
-    def set(
-        self, key: str, value: str, ttl: Optional[int] = None
-    ) -> bool:
+    def set(self, key: str, value: str, ttl: Optional[int] = None) -> bool:
         """
         Set a key-value pair in Redis.
-        
+
         Args:
             key: Redis key
             value: Value to store (string)
             ttl: Time to live in seconds (optional)
-            
+
         Returns:
             True if successful, False otherwise
         """
@@ -181,10 +179,10 @@ class RedisClient:
     def get(self, key: str) -> Optional[str]:
         """
         Get a value from Redis by key.
-        
+
         Args:
             key: Redis key
-            
+
         Returns:
             Value if found, None otherwise
         """
@@ -202,10 +200,10 @@ class RedisClient:
     def exists(self, key: str) -> bool:
         """
         Check if a key exists in Redis.
-        
+
         Args:
             key: Redis key
-            
+
         Returns:
             True if key exists, False otherwise
         """
@@ -222,10 +220,10 @@ class RedisClient:
     def delete(self, key: str) -> bool:
         """
         Delete a key from Redis.
-        
+
         Args:
             key: Redis key
-            
+
         Returns:
             True if key was deleted, False otherwise
         """
@@ -239,17 +237,15 @@ class RedisClient:
             self.client = None
             return False
 
-    def set_json(
-        self, key: str, value: dict, ttl: Optional[int] = None
-    ) -> bool:
+    def set_json(self, key: str, value: dict, ttl: Optional[int] = None) -> bool:
         """
         Store a JSON-serializable dict in Redis.
-        
+
         Args:
             key: Redis key
             value: Dictionary to store
             ttl: Time to live in seconds (optional)
-            
+
         Returns:
             True if successful, False otherwise
         """
@@ -263,10 +259,10 @@ class RedisClient:
     def get_json(self, key: str) -> Optional[dict]:
         """
         Get and deserialize a JSON value from Redis.
-        
+
         Args:
             key: Redis key
-            
+
         Returns:
             Deserialized dictionary if found, None otherwise
         """
@@ -283,10 +279,10 @@ class RedisClient:
     def ttl(self, key: str) -> int:
         """
         Get the remaining TTL of a key in seconds.
-        
+
         Args:
             key: Redis key
-            
+
         Returns:
             TTL in seconds, -1 if key exists but has no TTL, -2 if key doesn't exist
         """
@@ -303,10 +299,10 @@ class RedisClient:
     def delete_many(self, keys: List[str]) -> int:
         """
         Delete multiple keys from Redis.
-        
+
         Args:
             keys: List of Redis keys to delete
-            
+
         Returns:
             Number of keys deleted
         """
@@ -325,13 +321,13 @@ class RedisClient:
     def sadd(self, key: str, *values: str) -> int:
         """
         Add one or more members to a Redis Set.
-        
+
         Used for: user_sessions:<sub> Set to track all sessions for a user.
-        
+
         Args:
             key: Redis Set key
             *values: One or more values to add to the set
-            
+
         Returns:
             Number of members added (0 if already exists)
         """
@@ -348,11 +344,11 @@ class RedisClient:
     def srem(self, key: str, *values: str) -> int:
         """
         Remove one or more members from a Redis Set.
-        
+
         Args:
             key: Redis Set key
             *values: One or more values to remove from the set
-            
+
         Returns:
             Number of members removed
         """
@@ -369,12 +365,12 @@ class RedisClient:
     def smembers(self, key: str) -> Set[str]:
         """
         Get all members of a Redis Set.
-        
+
         Used for: Getting all session IDs for a user (logout_all).
-        
+
         Args:
             key: Redis Set key
-            
+
         Returns:
             Set of all members (empty set if key doesn't exist)
         """
@@ -392,11 +388,11 @@ class RedisClient:
     def sismember(self, key: str, value: str) -> bool:
         """
         Check if a value is a member of a Redis Set.
-        
+
         Args:
             key: Redis Set key
             value: Value to check
-            
+
         Returns:
             True if member exists, False otherwise
         """
@@ -413,7 +409,7 @@ class RedisClient:
     def close(self) -> None:
         """
         Close Redis connection pool.
-        
+
         This should be called when the application shuts down.
         In practice, the connection pool will be garbage collected,
         but explicitly closing is cleaner.
@@ -437,12 +433,12 @@ _redis_client: Optional[RedisClient] = None
 def get_redis_client() -> RedisClient:
     """
     Get singleton Redis client instance.
-    
+
     The singleton pattern ensures:
     - Only one connection pool is created
     - Connections are reused across requests
     - Memory is not wasted on multiple pools
-    
+
     Returns:
         RedisClient instance
     """
@@ -450,4 +446,3 @@ def get_redis_client() -> RedisClient:
     if _redis_client is None:
         _redis_client = RedisClient()
     return _redis_client
-

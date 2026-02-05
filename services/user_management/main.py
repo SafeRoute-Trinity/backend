@@ -28,7 +28,8 @@ from sqlalchemy.exc import IntegrityError
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from common.constants import AUTH_TOKEN_TTL
+from common.auth.session import get_session_manager
+from common.constants import AUTH_TOKEN_TTL, SESSION_TTL
 from libs.auth.auth0_verify import verify_token
 from libs.db import get_db
 from libs.fastapi_service import (
@@ -257,6 +258,40 @@ class TrustedContactsListResponse(BaseModel):
 
     user_id: str
     contacts: List[TrustedContact]
+
+
+# ========= Session Management Models =========
+
+
+class SessionStartRequest(BaseModel):
+    """Request model for starting a server session."""
+
+    device_id: str
+    device_name: Optional[str] = None
+    app_version: Optional[str] = None
+
+
+class SessionStartResponse(BaseModel):
+    """Response model for session start."""
+
+    sid: str
+    status: Literal["session_started"]
+    expires_in: int
+
+
+class SessionLogoutResponse(BaseModel):
+    """Response model for session logout."""
+
+    status: Literal["logged_out"]
+    message: str
+
+
+class SessionLogoutAllResponse(BaseModel):
+    """Response model for logout all sessions."""
+
+    status: Literal["logged_out_all"]
+    sessions_deleted: int
+    message: str
 
 
 # ========= User Management Endpoints =========
@@ -706,6 +741,7 @@ async def metrics_endpoint():
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
+
 @app.get(
     "/v1/users/me",
     response_model=UserResponse,
@@ -717,36 +753,36 @@ async def get_current_user(
 ):
     """
     Get current user information (protected endpoint example).
-    
+
     This endpoint demonstrates how to use verify_token for stateless auth:
     - Requires valid JWT token
     - Validates token against Auth0 JWKS
-    
+
     Mobile app must send:
     - Authorization: Bearer <access_token>
-    
+
     Args:
         auth: Enhanced auth object from verify_token dependency
             Contains JWT claims
-            
+
     Returns:
         UserResponse with user information
-        
+
     Raises:
         HTTPException: 401 if JWT is invalid
     """
     auth_sub = auth.get("sub")
-    
+
     # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
     user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
-    
+
     print(f"👤 [UserMgmt] get_current_user called for: {user_id}")
 
     # In a real implementation, you would query the database
     # For now, return mock data based on token
     return UserResponse(
         user_id=user_id,
-        name=None, # Name not in token usually
+        name=None,  # Name not in token usually
         email=f"{user_id}@example.com",  # Mock email
         phone=None,
         created_at=datetime.utcnow(),
@@ -755,6 +791,7 @@ async def get_current_user(
 
 
 # ========= Session Management Endpoints =========
+
 
 @app.post(
     "/session/start",
@@ -768,32 +805,30 @@ async def session_start(
 ):
     """
     Create a server-side session after Auth0 login.
-    
+
     Mobile app calls this immediately after Auth0 login to register a session.
-    
+
     Flow:
     1. Mobile logs in with Auth0 (gets access token + refresh token)
     2. Mobile calls this endpoint with access token in Authorization header
     3. API verifies JWT and creates server session
     4. API returns session ID (sid) to mobile app
-    
+
     Mobile app should:
     - Store sid securely
     - Include sid in X-Session-Id header for all subsequent API calls
-    
+
     Args:
         payload: Session start request with device metadata
         token_payload: Decoded JWT payload from verify_token dependency
-        
+
     Returns:
         SessionStartResponse with server-generated session ID (sid)
-        
+
     Raises:
         HTTPException: 401 if JWT is invalid
         HTTPException: 503 if Redis is unavailable (fail closed)
     """
-    from common.constants import SESSION_TTL
-    
     # Extract user ID from JWT
     sub = token_payload.get("sub")
     if not sub:
@@ -839,19 +874,19 @@ async def session_logout(
 ):
     """
     Logout from current device (delete single session).
-    
+
     Mobile app should:
     - Include Authorization: Bearer <access_token> header
     - Include X-Session-Id: <sid> header
     - Clear local tokens and session ID after successful logout
-    
+
     Args:
         token_payload: Decoded JWT payload from verify_token dependency
         session_id: Session ID from X-Session-Id header
-        
+
     Returns:
         SessionLogoutResponse confirming logout
-        
+
     Raises:
         HTTPException: 401 if JWT is invalid or session doesn't exist
         HTTPException: 503 if Redis is unavailable
@@ -902,20 +937,20 @@ async def session_logout_all(
 ):
     """
     Logout from all devices (delete all sessions for user).
-    
+
     This immediately invalidates all sessions for the user across all devices.
     All devices will start failing API calls on next request.
-    
+
     Mobile app should:
     - Include Authorization: Bearer <access_token> header
     - Clear local tokens after successful logout
-    
+
     Args:
         token_payload: Decoded JWT payload from verify_token dependency
-        
+
     Returns:
         SessionLogoutAllResponse with number of sessions deleted
-        
+
     Raises:
         HTTPException: 401 if JWT is invalid
         HTTPException: 503 if Redis is unavailable

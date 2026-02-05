@@ -11,12 +11,11 @@ Environment variables (with safe defaults for local dev):
 
 import json
 import os
-from typing import Optional
 
 import certifi
 import jwt
 import requests
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer
 from jwt.algorithms import RSAAlgorithm
 
@@ -76,7 +75,7 @@ def verify_token(
 
         # Build public key and decode token
         public_key = RSAAlgorithm.from_jwk(json.dumps(key_dict))
-        print(f"ℹ️ [Auth0] Attempting to decode token...")
+        print("ℹ️ [Auth0] Attempting to decode token...")
         payload = jwt.decode(
             token,
             public_key,
@@ -114,7 +113,6 @@ def verify_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Token verification failed: {e}",
         ) from e
-
 
 
 # Router for Auth0 verification endpoints
