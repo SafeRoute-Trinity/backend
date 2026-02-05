@@ -272,17 +272,6 @@ async def root():
     return {"service": "user_management", "status": "running"}
 
 
-@app.get("/health")
-async def health():
-    """
-    Health check endpoint.
-
-    Returns:
-        Dict with status and service name
-    """
-    return {"status": "ok", "service": "user_management"}
-
-
 @app.post(
     "/v1/users/register",
     response_model=RegisterResponse,

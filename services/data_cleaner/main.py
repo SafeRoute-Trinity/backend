@@ -118,11 +118,6 @@ async def root():
     return {"service": "data_cleaner", "status": "running"}
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "data_cleaner"}
-
-
 @app.post("/v1/data/collect", response_model=DataCollectResponse)
 async def collect(body: DataCollectRequest):
     now = datetime.utcnow()
