@@ -154,8 +154,7 @@ class RegisterRequest(BaseModel):
     """Request model for user registration."""
 
     email: str
-    password_hash: str
-    device_id: str
+    password: str
     phone: Optional[str] = None
     name: Optional[str] = None
 
@@ -170,13 +169,12 @@ class AuthInfo(BaseModel):
 class RegisterResponse(BaseModel):
     """Response model for user registration."""
 
-    user_id: str
+    user_id: uuid.UUID
     status: Literal["created"]
     auth: AuthInfo
     email: str
     phone: Optional[str] = None
     name: Optional[str] = None
-    device_id: str
     created_at: datetime
 
 
@@ -296,7 +294,7 @@ async def health():
     summary="Register a new user",
 )
 async def register_user(
-    payload,
+    body: RegisterRequest,
     db=Depends(get_db),
 ):
     """
@@ -312,12 +310,12 @@ async def register_user(
     Raises:
         HTTPException: 400 if email already registered or creation fails
     """
-    user_id = f"usr_{uuid.uuid4().hex[:8]}"
+    user_id = uuid.uuid4()
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Check if email already exists (prevent duplicate registration)
-    result = await db.execute(select(User).where(User.email == payload.email))
+    result = await db.execute(select(User).where(User.email == body.email))
     existing = result.scalar_one_or_none()
     if existing:
         raise HTTPException(
@@ -328,26 +326,25 @@ async def register_user(
     # Write to PostgreSQL database
     user = User(
         user_id=user_id,
-        email=payload.email,
-        password_hash=payload.password_hash,
-        device_id=payload.device_id,
-        phone=payload.phone,
-        name=payload.name,
+        email=body.email,
+        password=body.password,
+        phone=body.phone,
+        name=body.name,
         created_at=now,
         last_login=None,
     )
 
     db.add(user)
 
-    audit = Audit(
-        user_id=user_id,
-        event_type="USER_REGISTER",
-        event_id=user_id,
-        message="",
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(audit)
+    # audit = Audit(
+    #     user_id=uuid.uuid4(),
+    #     event_type="USER_REGISTER",
+    #     event_id=user_id,
+    #     message="",
+    #     created_at=now,
+    #     updated_at=now,
+    # )
+    # db.add(audit)
 
     try:
         await db.commit()
@@ -361,11 +358,10 @@ async def register_user(
     # Store in memory for backward compatibility (can be removed later)
     users[user_id] = {
         "user_id": user_id,
-        "email": payload.email,
-        "phone": payload.phone,
-        "name": payload.name,
-        "device_id": payload.device_id,
-        "password_hash": payload.password_hash,
+        "email": body.email,
+        "phone": body.phone,
+        "name": body.name,
+        "password": body.password,
         "created_at": now,
         "last_login": None,
     }
@@ -380,10 +376,9 @@ async def register_user(
         user_id=user_id,
         status="created",
         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-        email=payload.email,
-        phone=payload.phone,
-        name=payload.name,
-        device_id=payload.device_id,
+        email=body.email,
+        phone=body.phone,
+        name=body.name,
         created_at=now,
     )
 
@@ -401,7 +396,7 @@ async def login(
     Authenticate a user and return auth token.
 
     Args:
-        payload: Login request with email and password hash
+        payload: Login request with email and password
         db: Database session dependency
 
     Returns:
