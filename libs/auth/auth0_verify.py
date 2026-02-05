@@ -101,7 +101,9 @@ def verify_token(
         ) from e
     except jwt.ExpiredSignatureError as e:
         print(f"[Auth0] Token expired: {e}")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Token expired: {e}") from e
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Token expired: {e}"
+        ) from e
     except jwt.InvalidAudienceError as e:
         print(f"[Auth0] Invalid audience: {e}")
         raise HTTPException(
@@ -117,7 +119,6 @@ def verify_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Token verification failed: {e}",
         ) from e
-
 
 
 # Router for Auth0 verification endpoints
