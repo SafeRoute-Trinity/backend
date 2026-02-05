@@ -4,10 +4,19 @@
 
 import os
 import sys
+import time
 import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
+from fastapi import Request, Response
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    CollectorRegistry,
+    Counter,
+    Histogram,
+    generate_latest,
+)
 from pydantic import BaseModel, HttpUrl
 
 # Add parent directory to path for imports
@@ -48,6 +57,79 @@ FEEDBACK_STATUS_CHECKS_TOTAL = factory.add_business_metric(
 )
 
 FEEDBACK = {}
+
+# ========= PROMETHEUS METRICS =========
+
+SERVICE_NAME = "feedback"
+registry = CollectorRegistry()
+
+# Generic request counter
+REQUEST_COUNT = Counter(
+    "service_requests_total",
+    "Total HTTP requests handled by the service",
+    ["service", "method", "path", "http_status"],
+    registry=registry,
+)
+
+# Request latency
+REQUEST_LATENCY = Histogram(
+    "service_request_duration_seconds",
+    "Request latency in seconds",
+    ["service", "path"],
+    registry=registry,
+)
+
+# Business-specific metrics
+FEEDBACK_SUBMISSIONS_TOTAL = Counter(
+    "feedback_submissions_total",
+    "Total feedback submissions received",
+    registry=registry,
+)
+
+FEEDBACK_VALIDATIONS_TOTAL = Counter(
+    "feedback_validations_total",
+    "Total feedback validation attempts",
+    registry=registry,
+)
+
+
+FEEDBACK_STATUS_CHECKS_TOTAL = Counter(
+    "feedback_status_checks_total",
+    "Total feedback status lookups",
+    registry=registry,
+)
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    """
+    Global metrics middleware to capture:
+    - total requests
+    - latency per endpoint
+    """
+    start = time.time()
+    response = await call_next(request)
+
+    path = request.url.path
+
+    # Count request
+    REQUEST_COUNT.labels(
+        service=SERVICE_NAME,
+        method=request.method,
+        path=path,
+        http_status=response.status_code,
+    ).inc()
+
+    # Measure latency
+    REQUEST_LATENCY.labels(
+        service=SERVICE_NAME,
+        path=path,
+    ).observe(time.time() - start)
+
+    return response
+
+
+# ========= MODELS =========
 
 
 # ========= MODELS =========
@@ -110,11 +192,6 @@ async def root():
     return {"service": "feedback", "status": "running"}
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "feedback"}
-
-
 @app.post("/v1/feedback/submit", response_model=FeedbackSubmitResponse)
 async def submit(body: FeedbackSubmitRequest):
     # Business metric
@@ -170,3 +247,11 @@ async def status(feedback_id: str):
             "updated_at": now,
         }
     return FeedbackStatusResponse(feedback_id=feedback_id, **fb)
+
+
+# ========= PROMETHEUS METRICS ENDPOINT =========
+
+
+@app.get("/metrics")
+async def metrics():
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)

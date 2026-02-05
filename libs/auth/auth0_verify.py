@@ -76,7 +76,7 @@ def verify_token(
 
         # Build public key and decode token
         public_key = RSAAlgorithm.from_jwk(json.dumps(key_dict))
-        print(f"ℹ️ [Auth0] Attempting to decode token...")
+        print("ℹ️ [Auth0] Attempting to decode token...")
         payload = jwt.decode(
             token,
             public_key,

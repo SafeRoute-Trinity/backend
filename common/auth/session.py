@@ -33,7 +33,7 @@ from common.redis_client import get_redis_client
 class SessionManager:
     """
     Manages server-side sessions in Redis for mobile authentication.
-    
+
     Features:
     - Server-generated session IDs (stable across token refreshes)
     - Session storage with TTL (sliding or absolute)
@@ -55,21 +55,21 @@ class SessionManager:
     ) -> str:
         """
         Create a new server session and store it in Redis.
-        
+
         Creates three Redis keys:
         1. session:<sid> - Session data (JSON)
         2. user_sessions:<sub> - Set of session IDs for this user
         3. device_session:<sub>:<device_id> - Device to session mapping
-        
+
         Args:
             sub: Auth0 user ID (subject claim from JWT)
             device_id: Device identifier (UUID from mobile app)
             device_name: Optional device name
             app_version: Optional app version
-            
+
         Returns:
             Server-generated session ID (sid)
-            
+
         Raises:
             RuntimeError: If Redis is unavailable (fail closed)
         """
@@ -97,9 +97,7 @@ class SessionManager:
             "status": "active",
             "device_name": device_name,
             "app_version": app_version,
-            "max_expires_at": (
-                datetime.now(timezone.utc).timestamp() + SESSION_ABSOLUTE_MAX_TTL
-            ),
+            "max_expires_at": (datetime.now(timezone.utc).timestamp() + SESSION_ABSOLUTE_MAX_TTL),
         }
 
         # Redis keys
@@ -124,10 +122,10 @@ class SessionManager:
     def get_session(self, sid: str) -> Optional[dict]:
         """
         Get session data from Redis.
-        
+
         Args:
             sid: Session ID
-            
+
         Returns:
             Session data dictionary if found, None otherwise
         """
@@ -156,14 +154,14 @@ class SessionManager:
     def update_last_seen(self, sid: str) -> bool:
         """
         Update last_seen_at timestamp for sliding TTL.
-        
+
         Only updates if:
         - SESSION_TTL_STRATEGY is "sliding"
         - Enough time has passed since last update (SESSION_SLIDING_REFRESH_INTERVAL)
-        
+
         Args:
             sid: Session ID
-            
+
         Returns:
             True if updated, False otherwise
         """
@@ -185,7 +183,7 @@ class SessionManager:
             try:
                 last_seen = datetime.fromisoformat(last_seen_str.replace("Z", "+00:00"))
                 time_since_last_seen = (datetime.now(timezone.utc) - last_seen).total_seconds()
-                
+
                 # Only update if enough time has passed (reduce Redis writes)
                 if time_since_last_seen < SESSION_SLIDING_REFRESH_INTERVAL:
                     return False
@@ -194,7 +192,7 @@ class SessionManager:
 
         # Update last_seen_at and refresh TTL
         session_data["last_seen_at"] = datetime.now(timezone.utc).isoformat()
-        
+
         # Refresh TTL by re-setting with same TTL
         if self.redis.set_json(session_key, session_data, ttl=SESSION_TTL):
             # Also refresh user_sessions index TTL
@@ -202,7 +200,7 @@ class SessionManager:
             if sub:
                 user_sessions_key = f"{USER_SESSIONS_KEY_PREFIX}{sub}"
                 self.redis.set(f"{user_sessions_key}:ttl", "1", ttl=SESSION_TTL)
-            
+
             return True
 
         return False
@@ -210,15 +208,15 @@ class SessionManager:
     def delete_session(self, sid: str) -> bool:
         """
         Delete a single session from Redis.
-        
+
         Removes:
         1. session:<sid>
         2. sid from user_sessions:<sub> Set
         3. device_session:<sub>:<device_id>
-        
+
         Args:
             sid: Session ID
-            
+
         Returns:
             True if session was deleted, False otherwise
         """
@@ -252,10 +250,10 @@ class SessionManager:
     def delete_user_sessions(self, sub: str) -> int:
         """
         Delete all sessions for a user (logout_all).
-        
+
         Args:
             sub: Auth0 user ID (subject claim)
-            
+
         Returns:
             Number of sessions deleted
         """
@@ -263,10 +261,10 @@ class SessionManager:
             return 0
 
         user_sessions_key = f"{USER_SESSIONS_KEY_PREFIX}{sub}"
-        
+
         # Get all session IDs for this user
         session_ids = self.redis.smembers(user_sessions_key)
-        
+
         if not session_ids:
             return 0
 
@@ -288,10 +286,10 @@ class SessionManager:
     def get_user_sessions(self, sub: str) -> set[str]:
         """
         Get all active session IDs for a user.
-        
+
         Args:
             sub: Auth0 user ID (subject claim)
-            
+
         Returns:
             Set of session IDs
         """
@@ -304,22 +302,22 @@ class SessionManager:
     def is_session_valid(self, sid: str, expected_sub: str) -> bool:
         """
         Check if a session is valid for a given user.
-        
+
         Validates:
         1. Session exists
         2. Session is active
         3. Session belongs to expected user (sub matches)
         4. Session hasn't exceeded absolute max TTL
-        
+
         Args:
             sid: Session ID
             expected_sub: Expected Auth0 user ID
-            
+
         Returns:
             True if session is valid, False otherwise
         """
         session_data = self.get_session(sid)
-        
+
         if not session_data:
             return False
 
@@ -337,7 +335,7 @@ _session_manager: Optional[SessionManager] = None
 def get_session_manager() -> SessionManager:
     """
     Get singleton SessionManager instance.
-    
+
     Returns:
         SessionManager instance
     """
@@ -345,4 +343,3 @@ def get_session_manager() -> SessionManager:
     if _session_manager is None:
         _session_manager = SessionManager()
     return _session_manager
-
