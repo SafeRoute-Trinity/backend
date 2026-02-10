@@ -215,11 +215,6 @@ async def root():
     return {"service": "feedback", "status": "running"}
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "feedback"}
-
-
 @app.post("/v1/feedback/submit", response_model=FeedbackSubmitResponse)
 async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)):
     # Business metric

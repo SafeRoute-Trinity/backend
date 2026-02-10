@@ -146,11 +146,6 @@ async def root():
     return {"service": "sos", "status": "running"}
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "sos"}
-
-
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
 async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
     # Validate sos_id is UUID

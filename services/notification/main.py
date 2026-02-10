@@ -16,6 +16,8 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+
+from manager import NotificationManager
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
@@ -26,8 +28,7 @@ from libs.fastapi_service import (
     ServiceAppConfig,
 )
 from libs.twilio_client import get_twilio_client
-from services.notification.manager import NotificationManager
-from services.notification.models import (
+from models import (
     CreateResp,
     EmergencyCallRequest,
     EmergencyCallResponse,
@@ -106,11 +107,6 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.get("/")
 async def root():
     return {"service": "notification", "status": "running"}
-
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "notification"}
 
 
 @app.post("/v1/notifications/sos", response_model=CreateResp)

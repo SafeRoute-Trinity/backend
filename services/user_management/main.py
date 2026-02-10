@@ -35,13 +35,20 @@ from models.audit import Audit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from common.constants import AUTH_TOKEN_TTL
-from libs.db import get_db
+from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
 from models.user_models import User
+
+# Initialize database connections
+initialize_databases([DatabaseType.POSTGRES])
+
+# Get database session dependency
+db_factory = get_database_factory()
+get_db = db_factory.get_session_dependency(DatabaseType.POSTGRES)
 
 # Create service configuration
 service_config = ServiceAppConfig(
@@ -277,12 +284,18 @@ async def root():
 @app.get("/health")
 async def health():
     """
-    Health check endpoint.
+    Health check endpoint with database status.
 
     Returns:
-        Dict with status and service name
+        Dict with status, service name, and database health
     """
-    return {"status": "ok", "service": "user_management"}
+    db_ok, db_error = await db_factory.check_health(DatabaseType.POSTGRES, timeout=2.0)
+
+    return {
+        "status": "ok" if db_ok else "degraded",
+        "service": "user_management",
+        "database": {"healthy": db_ok, "error": db_error},
+    }
 
 
 @app.post(
