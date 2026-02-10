@@ -72,7 +72,27 @@ data_batches = {}
 emergency_status = {}
 
 
-# ========= Shared Models =========
+# ========= Helper Functions =========
+
+
+def extract_user_id_from_auth(auth: dict) -> str:
+    """
+    Extract user_id from Auth0 authentication token.
+
+    Auth0 'sub' claim format can be:
+    - "auth0|user_id" (with provider prefix)
+    - "user_id" (without prefix)
+
+    Args:
+        auth: Authentication dictionary containing JWT claims
+
+    Returns:
+        Extracted user_id string
+    """
+    auth_sub = auth.get("sub")
+    return auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+
+
 # ========= Metrics =========
 
 SERVICE_NAME = "user_management"
@@ -451,8 +471,7 @@ async def save_preferences(
         HTTPException: 403 if user tries to modify another user's preferences
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth.get("sub")
-    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+    auth_user_id = extract_user_id_from_auth(auth)
 
     # Verify user can only modify their own preferences
     if auth_user_id != user_id:
@@ -513,8 +532,7 @@ async def upsert_trusted_contact(
         HTTPException: 403 if user tries to modify another user's contacts
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth.get("sub")
-    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+    auth_user_id = extract_user_id_from_auth(auth)
 
     # Verify user can only modify their own contacts
     if auth_user_id != user_id:
@@ -574,8 +592,7 @@ async def get_user(
         HTTPException: 404 if user not found
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth.get("sub")
-    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+    auth_user_id = extract_user_id_from_auth(auth)
 
     # Verify user can only access their own data
     if auth_user_id != user_id:
@@ -645,8 +662,7 @@ async def list_trusted_contacts(
         HTTPException: 403 if user tries to access another user's contacts
     """
     # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
-    auth_sub = auth.get("sub")
-    auth_user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+    auth_user_id = extract_user_id_from_auth(auth)
 
     # Verify user can only access their own contacts
     if auth_user_id != user_id:
@@ -716,6 +732,7 @@ async def metrics_endpoint():
 )
 async def get_current_user(
     auth: dict = Depends(verify_token),
+    db=Depends(get_db),
 ):
     """
     Get current user information (protected endpoint example).
@@ -730,27 +747,35 @@ async def get_current_user(
     Args:
         auth: Enhanced auth object from verify_token dependency
             Contains JWT claims
+        db: Database session dependency
 
     Returns:
         UserResponse with user information
 
     Raises:
         HTTPException: 401 if JWT is invalid
+        HTTPException: 404 if user not found in database
     """
-    auth_sub = auth.get("sub")
-
     # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
-    user_id = auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+    user_id = extract_user_id_from_auth(auth)
 
     print(f"[UserMgmt] get_current_user called for: {user_id}")
 
-    # In a real implementation, you would query the database
-    # For now, return mock data based on token
+    # Query PostgreSQL database for user
+    result = await db.execute(select(User).where(User.user_id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found in database",
+        )
+
     return UserResponse(
-        user_id=user_id,
-        name=None,  # Name not in token usually
-        email=f"{user_id}@example.com",  # Mock email
-        phone=None,
-        created_at=datetime.utcnow(),
-        last_login=None,
+        user_id=user.user_id,
+        name=user.name,
+        email=user.email,
+        phone=user.phone,
+        created_at=user.created_at,
+        last_login=user.last_login,
     )
