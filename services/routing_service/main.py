@@ -22,7 +22,16 @@ from prometheus_client import (
 from pydantic import BaseModel
 
 from libs.db import get_db
-from libs.postgis_db import get_postgis_db
+
+# Prefer the centralized DB factory if available on newer branches; fall back to
+# the legacy postgis_db dependency for this branch. This allows the service to
+# work both when the global database factory exists (in main) and when it does
+# not (in older branches).
+try:
+    # newer main branch may expose a unified postgis/session factory inside libs.db
+    from libs.db import get_postgis_db  # type: ignore
+except Exception:
+    from libs.postgis_db import get_postgis_db
 from models.audit import Audit
 
 # Add parent directory to path for imports
