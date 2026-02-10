@@ -305,10 +305,17 @@ async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
     # Business metric
     FEEDBACK_STATUS_CHECKS_TOTAL.inc()
 
+    # TODO: when the Feedback schema finished, add the line below and get user_id
+    # result = await db.execute(select(Feedback).where(Feedback.feedback_id == feedback_id))
+
     # Validate feedback_id is a UUID (feedback records should be UUIDs)
     parsed_feedback_id = _maybe_uuid(feedback_id)
     if parsed_feedback_id is None:
         raise HTTPException(status_code=400, detail="feedback_id must be a valid UUID")
+
+    # TODO: when the Feedback schema finished, add the line below and get user_id
+    # user_id = result.user_id
+    user_id = None
 
     fb = FEEDBACK.get(feedback_id)
     now = datetime.utcnow()
@@ -328,7 +335,7 @@ async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
         await write_audit(
             db=db,
             event_type="feedback",
-            user_id=None,
+            user_id=user_id,
             event_id=parsed_feedback_id,
             message=f"feedback.status_check feedback_id={feedback_id} ticket={fb.get('ticket_number')} status={fb.get('status')}",
             commit=True,
