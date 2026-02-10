@@ -7,7 +7,7 @@ import sys
 import traceback
 
 from dotenv import load_dotenv
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 # Load environment variables from .env file
@@ -16,8 +16,12 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from manager import NotificationManager
 
+from manager import NotificationManager
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from libs.audit_logger import write_audit
+from libs.db import get_db
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
     FastAPIServiceFactory,
@@ -62,6 +66,25 @@ NOTIFICATION_STATUS_CHECKS_TOTAL = factory.add_business_metric(
 NOTIFICATIONS = {}
 manager = NotificationManager(NOTIFICATIONS)
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _maybe_uuid(val):
+    try:
+        import uuid as _uuid
+
+        if val is None:
+            return None
+        if isinstance(val, _uuid.UUID):
+            return val
+        if isinstance(val, str):
+            return _uuid.UUID(val)
+    except Exception:
+        return None
+    return None
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -87,40 +110,133 @@ async def root():
 
 
 @app.post("/v1/notifications/sos", response_model=CreateResp)
-async def create_sos(body: SOSNotificationRequest):
+async def create_sos(body: SOSNotificationRequest, db: AsyncSession = Depends(get_db)):
     """
     Create SOS notification - coordinates push/SMS/call from Notification service.
     """
     # Business metric: count new SOS notifications
     NOTIFICATION_SOS_CREATED_TOTAL.inc()
-    return await manager.send_sos_notification(body)
+    try:
+        resp = await manager.send_sos_notification(body)
+        # Audit success
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=_maybe_uuid(body.user_id) if hasattr(body, "user_id") else None,
+                event_id=None,
+                message=f"notification.create sos_id={body.sos_id} notification_id={getattr(resp,'notification_id', None)} status={getattr(resp,'status', None)}",
+                commit=True,
+            )
+        except Exception:
+            logger.exception("Failed to write audit for notification.create")
+        return resp
+    except Exception as e:
+        # Audit failure
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=_maybe_uuid(body.user_id) if hasattr(body, "user_id") else None,
+                event_id=None,
+                message=f"notification.create_failed sos_id={body.sos_id} error={str(e)}",
+                commit=True,
+            )
+        except Exception:
+            logger.exception("Failed to write audit for notification.create_failed")
+        raise
 
 
 @app.post("/v1/notifications/sos/sms", response_model=EmergencySMSResponse)
-async def send_emergency_sms(body: EmergencySMSRequest):
+async def send_emergency_sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     """
     SMS-only SOS sender for SOS service to proxy.
     """
-    return await manager.send_emergency_sms(body)
+    try:
+        resp = await manager.send_emergency_sms(body)
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=_maybe_uuid(body.user_id) if hasattr(body, "user_id") else None,
+                event_id=None,
+                message=f"notification.sms_sent sos_id={body.sos_id} sms_id={resp.sms_id} recipient={resp.recipient} status={resp.status}",
+                commit=True,
+            )
+        except Exception:
+            logger.exception("Failed to write audit for notification.sms_sent")
+        return resp
+    except Exception as e:
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=_maybe_uuid(body.user_id) if hasattr(body, "user_id") else None,
+                event_id=None,
+                message=f"notification.sms_failed sos_id={body.sos_id} error={str(e)}",
+                commit=True,
+            )
+        except Exception:
+            logger.exception("Failed to write audit for notification.sms_failed")
+        raise
 
 
 @app.post("/v1/notifications/sos/call", response_model=EmergencyCallResponse)
-async def send_emergency_call(body: EmergencyCallRequest):
+async def send_emergency_call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
     """
     Call-only SOS sender for SOS service to proxy.
     """
-    return await manager.send_emergency_call(body)
+    try:
+        resp = await manager.send_emergency_call(body)
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=_maybe_uuid(body.user_id) if hasattr(body, "user_id") else None,
+                event_id=None,
+                message=f"notification.call_initiated sos_id={body.sos_id} call_id={resp.call_id} status={resp.status}",
+                commit=True,
+            )
+        except Exception:
+            logger.exception("Failed to write audit for notification.call_initiated")
+        return resp
+    except Exception as e:
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=_maybe_uuid(body.user_id) if hasattr(body, "user_id") else None,
+                event_id=None,
+                message=f"notification.call_failed sos_id={body.sos_id} error={str(e)}",
+                commit=True,
+            )
+        except Exception:
+            logger.exception("Failed to write audit for notification.call_failed")
+        raise
 
 
 @app.get("/v1/notifications/{notification_id}", response_model=StatusResp)
-async def get_status(notification_id: str):
+async def get_status(notification_id: str, db: AsyncSession = Depends(get_db)):
     # Business metric: count status lookups
     NOTIFICATION_STATUS_CHECKS_TOTAL.inc()
-    return manager.get_status(notification_id)
+    res = manager.get_status(notification_id)
+    # Audit status check
+    try:
+        await write_audit(
+            db=db,
+            event_type="notification",
+            user_id=None,
+            event_id=None,
+            message=f"notification.status_check notification_id={notification_id} status={getattr(res,'status', None)}",
+            commit=True,
+        )
+    except Exception:
+        logger.exception("Failed to write audit for notification.status_check")
+    return res
 
 
 @app.post("/v1/test/sms", response_model=TestSMSResponse)
-async def test_sms(body: TestSMSRequest):
+async def test_sms(body: TestSMSRequest, db: AsyncSession = Depends(get_db)):
     """
     Test endpoint to send an SMS to a phone number using Twilio.
 
@@ -130,15 +246,49 @@ async def test_sms(body: TestSMSRequest):
         twilio = get_twilio_client()
         result = twilio.send_sms(to_phone=body.to_phone, message=body.message)
 
-        return TestSMSResponse(
+        resp = TestSMSResponse(
             status=result["status"],
             sid=result["sid"],
             to=result["to"],
             message=body.message,
             error=result.get("error"),
         )
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=None,
+                event_id=None,
+                message=f"notification.test_sms to={body.to_phone} status={resp.status} sid={resp.sid}",
+                commit=True,
+            )
+        except Exception:
+            logger.exception("Failed to write audit for notification.test_sms")
+        return resp
     except ValueError as e:
         # Twilio not configured
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=None,
+                event_id=None,
+                message=f"notification.test_sms_config_error to={body.to_phone} error={str(e)}",
+                commit=True,
+            )
+        except Exception:
+            logger.exception("Failed to write audit for notification.test_sms_config_error")
         raise HTTPException(status_code=500, detail=f"Twilio configuration error: {str(e)}")
     except Exception as e:
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=None,
+                event_id=None,
+                message=f"notification.test_sms_failed to={body.to_phone} error={str(e)}",
+                commit=True,
+            )
+        except Exception:
+            logger.exception("Failed to write audit for notification.test_sms_failed")
         raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")

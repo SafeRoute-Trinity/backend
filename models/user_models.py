@@ -4,10 +4,12 @@ User-related database models for SafeRoute backend.
 Defines SQLAlchemy ORM models for users, preferences, and trusted contacts.
 """
 
+import uuid
 from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -25,7 +27,6 @@ class User(Base):
         user_id: Unique identifier for the user (primary key)
         email: User's email address (unique, required)
         password_hash: Hashed password (required)
-        device_id: Device identifier (required)
         phone: User's phone number (optional)
         name: User's display name (optional)
         created_at: Timestamp when user account was created
@@ -36,10 +37,13 @@ class User(Base):
 
     __tablename__ = "users"
 
-    user_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
     email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
-    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    password: Mapped[str] = mapped_column(Text, nullable=False)
 
     phone: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

@@ -1,3 +1,7 @@
+# Run:
+# uvicorn services.user_management.main:app --host 0.0.0.0 --port 20000 --reload
+# Docs: http://127.0.0.1:20000/docs
+
 """
 User Management Service for SafeRoute backend.
 
@@ -23,6 +27,8 @@ from prometheus_client import (
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+
+from models.audit import Audit
 
 # Add parent directory to path to import libs and models
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
@@ -155,8 +161,7 @@ class RegisterRequest(BaseModel):
     """Request model for user registration."""
 
     email: str
-    password_hash: str
-    device_id: str
+    password: str
     phone: Optional[str] = None
     name: Optional[str] = None
 
@@ -171,13 +176,12 @@ class AuthInfo(BaseModel):
 class RegisterResponse(BaseModel):
     """Response model for user registration."""
 
-    user_id: str
+    user_id: uuid.UUID
     status: Literal["created"]
     auth: AuthInfo
     email: str
     phone: Optional[str] = None
     name: Optional[str] = None
-    device_id: str
     created_at: datetime
 
 
@@ -185,18 +189,16 @@ class LoginRequest(BaseModel):
     """Request model for user login."""
 
     email: str
-    password_hash: str
-    device_id: str
+    password: str
 
 
 class LoginResponse(BaseModel):
     """Response model for user login."""
 
-    user_id: str
+    user_id: uuid.UUID
     status: Literal["authenticated"]
     auth: AuthInfo
     email: str
-    device_id: str
     last_login: datetime
 
 
@@ -211,7 +213,7 @@ class PreferencesRequest(BaseModel):
 class PreferencesResponse(BaseModel):
     """Response model for saved preferences."""
 
-    user_id: str
+    user_id: uuid.UUID
     status: Literal["preferences_saved"]
     preferences: PreferencesRequest
     updated_at: datetime
@@ -220,7 +222,7 @@ class PreferencesResponse(BaseModel):
 class TrustedContactUpsertRequest(BaseModel):
     """Request model for creating/updating trusted contacts."""
 
-    contact_id: Optional[str] = None
+    contact_id: Optional[uuid.UUID] = None
     name: str
     phone: str
     relationship: Optional[str] = None
@@ -230,7 +232,7 @@ class TrustedContactUpsertRequest(BaseModel):
 class TrustedContact(BaseModel):
     """Model representing a trusted contact."""
 
-    contact_id: str
+    contact_id: uuid.UUID
     name: str
     phone: str
     relationship: Optional[str] = None
@@ -240,8 +242,8 @@ class TrustedContact(BaseModel):
 class TrustedContactUpsertResponse(BaseModel):
     """Response model for trusted contact upsert operation."""
 
-    user_id: str
-    contact_id: str
+    user_id: uuid.UUID
+    contact_id: uuid.UUID
     status: Literal["contact_upserted"]
     contact: TrustedContact
     updated_at: datetime
@@ -250,7 +252,7 @@ class TrustedContactUpsertResponse(BaseModel):
 class UserResponse(BaseModel):
     """Response model for user information."""
 
-    user_id: str
+    user_id: uuid.UUID
     name: Optional[str]
     email: str
     phone: Optional[str] = None
@@ -261,7 +263,7 @@ class UserResponse(BaseModel):
 class TrustedContactsListResponse(BaseModel):
     """Response model for listing trusted contacts."""
 
-    user_id: str
+    user_id: uuid.UUID
     contacts: List[TrustedContact]
 
 
@@ -303,14 +305,14 @@ async def health():
     summary="Register a new user",
 )
 async def register_user(
-    payload,
+    body: RegisterRequest,
     db=Depends(get_db),
 ):
     """
     Register a new user account.
 
     Args:
-        payload: Registration request containing user details
+        body: Registration request
         db: Database session dependency
 
     Returns:
@@ -319,12 +321,12 @@ async def register_user(
     Raises:
         HTTPException: 400 if email already registered or creation fails
     """
-    user_id = f"usr_{uuid.uuid4().hex[:8]}"
+    user_id = uuid.uuid4()
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Check if email already exists (prevent duplicate registration)
-    result = await db.execute(select(User).where(User.email == payload.email))
+    result = await db.execute(select(User).where(User.email == body.email))
     existing = result.scalar_one_or_none()
     if existing:
         raise HTTPException(
@@ -335,16 +337,29 @@ async def register_user(
     # Write to PostgreSQL database
     user = User(
         user_id=user_id,
-        email=payload.email,
-        password_hash=payload.password_hash,
-        device_id=payload.device_id,
-        phone=payload.phone,
-        name=payload.name,
+        email=body.email,
+        password=body.password,
+        phone=body.phone,
+        name=body.name,
         created_at=now,
         last_login=None,
     )
 
     db.add(user)
+
+    await db.flush()
+
+    audit = Audit(
+        log_id=uuid.uuid4(),
+        user_id=user_id,
+        event_type="authentication",
+        event_id=user_id,
+        message="Register",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
     try:
         await db.commit()
     except IntegrityError:
@@ -357,11 +372,10 @@ async def register_user(
     # Store in memory for backward compatibility (can be removed later)
     users[user_id] = {
         "user_id": user_id,
-        "email": payload.email,
-        "phone": payload.phone,
-        "name": payload.name,
-        "device_id": payload.device_id,
-        "password_hash": payload.password_hash,
+        "email": body.email,
+        "phone": body.phone,
+        "name": body.name,
+        "password": body.password,
         "created_at": now,
         "last_login": None,
     }
@@ -376,10 +390,9 @@ async def register_user(
         user_id=user_id,
         status="created",
         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-        email=payload.email,
-        phone=payload.phone,
-        name=payload.name,
-        device_id=payload.device_id,
+        email=body.email,
+        phone=body.phone,
+        name=body.name,
         created_at=now,
     )
 
@@ -390,14 +403,14 @@ async def register_user(
     tags=["User Management"],
 )
 async def login(
-    payload,
+    body: LoginRequest,
     db=Depends(get_db),
 ):
     """
     Authenticate a user and return auth token.
 
     Args:
-        payload: Login request with email and password hash
+        body: Login request with email and password
         db: Database session dependency
 
     Returns:
@@ -410,10 +423,10 @@ async def login(
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Query PostgreSQL database for user
-    result = await db.execute(select(User).where(User.email == payload.email))
+    result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
 
-    if not user or user.password_hash != payload.password_hash:
+    if not user or user.password != body.password:
         # Don't distinguish between "user not found" and "wrong password"
         # to prevent user enumeration
         raise HTTPException(
@@ -423,7 +436,26 @@ async def login(
 
     # Update last_login timestamp
     user.last_login = now
-    await db.commit()
+
+    audit = Audit(
+        log_id=uuid.uuid4(),
+        user_id=user.user_id,
+        event_type="authentication",
+        event_id=user.user_id,
+        message="Login",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not login",
+        )
 
     # Update in-memory cache (optional, can be removed later)
     users[user.user_id] = {
@@ -431,8 +463,7 @@ async def login(
         "email": user.email,
         "phone": user.phone,
         "name": user.name,
-        "device_id": user.device_id,
-        "password_hash": user.password_hash,
+        "password": user.password,
         "created_at": user.created_at,
         "last_login": now,
     }
@@ -442,7 +473,6 @@ async def login(
         status="authenticated",
         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
         email=user.email,
-        device_id=payload.device_id,
         last_login=now,
     )
 
@@ -452,7 +482,11 @@ async def login(
     response_model=PreferencesResponse,
     tags=["User Management"],
 )
-async def save_preferences(user_id, payload):
+async def save_preferences(
+    user_id: str,
+    body: PreferencesRequest,
+    db=Depends(get_db),
+):
     """
     Save user preferences.
 
@@ -465,12 +499,16 @@ async def save_preferences(user_id, payload):
     """
     now = datetime.utcnow()
 
+    user_id = body.user_id
+
+    # TODO: the user preference should be stored in DB, not in memory
+
     # Get user data from memory
     users.setdefault(user_id, {"user_id": user_id})
     user_data = users[user_id]
 
     # Update preferences
-    user_data["preferences"] = payload.dict()
+    user_data["preferences"] = body.dict()
     user_data["updated_at"] = now.isoformat()
 
     # Update in memory
@@ -482,10 +520,30 @@ async def save_preferences(user_id, payload):
             datetime.fromisoformat(user_data["last_login"]) if user_data.get("last_login") else None
         )
 
+    audit = Audit(
+        log_id=uuid.uuid4(),
+        user_id=uuid.uuid4(user_id),
+        event_type="authentication",
+        event_id=uuid.uuid4(user_id),
+        message="save_preference",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not update preference",
+        )
+
     return PreferencesResponse(
-        user_id=user_id,
+        user_id=uuid.uuid4(user_id),
         status="preferences_saved",
-        preferences=payload,
+        preferences=body,
         updated_at=now,
     )
 
@@ -495,35 +553,64 @@ async def save_preferences(user_id, payload):
     response_model=TrustedContactUpsertResponse,
     tags=["User Management"],
 )
-async def upsert_trusted_contact(user_id, payload):
+async def upsert_trusted_contact(
+    body: TrustedContactUpsertRequest,
+    db=Depends(get_db),
+):
     """
     Create or update a trusted contact for a user.
 
     Args:
         user_id: User identifier
-        payload: Contact information to create or update
+        body: Contact information to create or update
 
     Returns:
         TrustedContactUpsertResponse with contact details and timestamp
     """
+
+    user_id = body.user_id
+
     contacts = trusted_contacts.setdefault(user_id, [])
-    if payload.contact_id:
+    # TODO: contact_id should be UUID
+
+    if body.contact_id:
         for c in contacts:
-            if c["contact_id"] == payload.contact_id:
-                c.update(payload.dict(exclude_unset=True))
-                contact_id = payload.contact_id
+            if c["contact_id"] == body.contact_id:
+                c.update(body.dict(exclude_unset=True))
+                contact_id = body.contact_id
                 break
         else:
-            contact_id = payload.contact_id
-            contacts.append({**payload.dict(), "contact_id": contact_id})
+            contact_id = body.contact_id
+            contacts.append({**body.dict(), "contact_id": contact_id})
     else:
         contact_id = f"ctc_{uuid.uuid4().hex[:6]}"
-        contacts.append({**payload.dict(), "contact_id": contact_id})
+        contacts.append({**body.dict(), "contact_id": contact_id})
     now: datetime = datetime.utcnow()
     stored = [c for c in contacts if c["contact_id"] == contact_id][0]
     contact_obj = TrustedContact(**stored)
+
+    audit = Audit(
+        log_id=uuid.uuid4(),
+        user_id=uuid.uuid4(user_id),
+        event_type="authentication",
+        event_id=uuid.uuid4(user_id),
+        message="update trusted-contacts",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not update trusted contact",
+        )
+
     return TrustedContactUpsertResponse(
-        user_id=user_id,
+        user_id=uuid.uuid4(user_id),
         contact_id=contact_id,
         status="contact_upserted",
         contact=contact_obj,
