@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import Depends, Request, Response
+from fastapi import Depends, HTTPException, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -235,6 +235,14 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         "created_at": now,
         "updated_at": now,
     }
+    # Validate required UUIDs: feedback_id and user_id should be valid UUID strings
+    parsed_user_id = _maybe_uuid(getattr(body, "user_id", None))
+    parsed_feedback_id = _maybe_uuid(getattr(body, "feedback_id", None))
+    if parsed_feedback_id is None:
+        raise HTTPException(status_code=400, detail="feedback_id must be a valid UUID")
+    if parsed_user_id is None:
+        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
+
     resp = FeedbackSubmitResponse(
         feedback_id=body.feedback_id,
         status="received",
@@ -246,8 +254,8 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         await write_audit(
             db=db,
             event_type="feedback",
-            user_id=_maybe_uuid(getattr(body, "user_id", None)),
-            event_id=_maybe_uuid(getattr(body, "feedback_id", None)),
+            user_id=parsed_user_id,
+            event_id=parsed_feedback_id,
             message=f"feedback.submit feedback_id={body.feedback_id} ticket={ticket} type={body.type} severity={body.severity}",
             commit=True,
         )
@@ -261,6 +269,11 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
 async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get_db)):
     # Business metric
     FEEDBACK_VALIDATIONS_TOTAL.inc()
+
+    # Validate user_id is a UUID (required for feedback validation traces)
+    parsed_user_id = _maybe_uuid(getattr(body, "user_id", None))
+    if parsed_user_id is None:
+        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
 
     is_spam = body.recent_submissions_count > 10
     resp = FeedbackValidateResponse(
@@ -276,7 +289,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
         await write_audit(
             db=db,
             event_type="feedback",
-            user_id=_maybe_uuid(getattr(body, "user_id", None)),
+            user_id=parsed_user_id,
             event_id=None,
             message=f"feedback.validate user_id={body.user_id} is_spam={resp.is_spam} confidence={resp.confidence} allow_submission={resp.allow_submission}",
             commit=True,
@@ -291,6 +304,11 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
 async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
     # Business metric
     FEEDBACK_STATUS_CHECKS_TOTAL.inc()
+
+    # Validate feedback_id is a UUID (feedback records should be UUIDs)
+    parsed_feedback_id = _maybe_uuid(feedback_id)
+    if parsed_feedback_id is None:
+        raise HTTPException(status_code=400, detail="feedback_id must be a valid UUID")
 
     fb = FEEDBACK.get(feedback_id)
     now = datetime.utcnow()
@@ -311,7 +329,7 @@ async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
             db=db,
             event_type="feedback",
             user_id=None,
-            event_id=_maybe_uuid(feedback_id),
+            event_id=parsed_feedback_id,
             message=f"feedback.status_check feedback_id={feedback_id} ticket={fb.get('ticket_number')} status={fb.get('status')}",
             commit=True,
         )
