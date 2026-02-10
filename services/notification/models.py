@@ -1,9 +1,8 @@
 from datetime import datetime
 from typing import Dict, Literal, Optional
 
+from notification_types import NotificationChannel, NotificationType
 from pydantic import BaseModel
-
-from services.notification.types import NotificationChannel, NotificationType
 
 
 class Location(BaseModel):
