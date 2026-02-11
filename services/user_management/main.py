@@ -384,6 +384,10 @@ async def register_user(
 ):
     """
     Register a new user account.
+<<<<<<< HEAD
+=======
+
+>>>>>>> b5b51bd (feat: update user_models apis)
     DB schema (saferoute.users):
       - user_id UUID PK default gen_random_uuid()
       - created_at timestamptz not null default now()
