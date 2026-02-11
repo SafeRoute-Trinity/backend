@@ -1,22 +1,26 @@
+# Run:
+# uvicorn services.user_management.main:app --host 0.0.0.0 --port 20000 --reload
+# Docs: http://127.0.0.1:20000/docs
+
+
+import logging
 import os
 import sys
 import uuid
 from datetime import datetime
 from typing import Dict, List, Literal, Optional
 
-from fastapi import FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
-#for postgresql
-from sqlalchemy import select
+# for postgresql
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import Depends
 
 from libs.db import get_db
+from models.audit import Audit
 from models.user_models import User
-
 
 # Add parent directory to path to import libs
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -190,6 +194,7 @@ async def health():
     redis_status = "connected" if redis_client.is_connected() else "disconnected"
     return {"status": "ok", "service": "user_management", "redis": redis_status}
 
+
 #
 @app.post(
     "/v1/users/register", response_model=RegisterResponse, tags=["User Management"]
@@ -279,6 +284,7 @@ async def register_user(
         created_at=now,
     )
 
+
 # async def register_user(payload: RegisterRequest):
 #     user_id = f"usr_{uuid.uuid4().hex[:8]}"
 #     now = datetime.utcnow()
@@ -328,7 +334,6 @@ async def register_user(
 #         device_id=payload.device_id,
 #         created_at=now,
 #     )
-
 
 
 @app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
@@ -406,6 +411,7 @@ async def login(
         device_id=payload.device_id,
         last_login=now,
     )
+
 
 # async def login(payload: LoginRequest):
 #     existing_id = None
@@ -606,6 +612,92 @@ async def get_user(user_id: str):
             redis_client.set_json(_user_cache_key(user_id), user_data, ttl=CACHE_TTL)
 
     return UserResponse(**u)
+
+
+@app.get("/api/audit", tags=["Audit"])
+async def api_audit(
+    event_type: Optional[str] = Query(None, description="Filter by event_type"),
+    user_id: Optional[str] = Query(None, description="Filter by user_id (UUID)"),
+    event_id: Optional[str] = Query(None, description="Filter by event_id (UUID)"),
+    q: Optional[str] = Query(
+        None, description="Fulltext search over message (case-insensitive)"
+    ),
+    start: Optional[datetime] = Query(None, description="Start datetime (ISO)"),
+    end: Optional[datetime] = Query(None, description="End datetime (ISO)"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Simple audit query endpoint for admin/front-end use.
+    Returns paginated audit records from schema saferoute.audit.
+    """
+    # Build filters
+    filters = []
+    if event_type:
+        filters.append(Audit.event_type == event_type)
+
+    import uuid as _uuid
+
+    if user_id:
+        try:
+            uid = _uuid.UUID(user_id)
+            filters.append(Audit.user_id == uid)
+        except Exception:
+            raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
+
+    if event_id:
+        try:
+            eid = _uuid.UUID(event_id)
+            filters.append(Audit.event_id == eid)
+        except Exception:
+            raise HTTPException(status_code=400, detail="event_id must be a valid UUID")
+
+    if start:
+        filters.append(Audit.created_at >= start)
+    if end:
+        filters.append(Audit.created_at <= end)
+    if q:
+        filters.append(Audit.message.ilike(f"%{q}%"))
+
+    try:
+        # total count
+        count_stmt = (
+            select(func.count()).select_from(Audit).where(*filters)
+            if filters
+            else select(func.count()).select_from(Audit)
+        )
+        total_res = await db.execute(count_stmt)
+        total = int(total_res.scalar() or 0)
+
+        stmt = select(Audit).where(*filters) if filters else select(Audit)
+        stmt = (
+            stmt.order_by(Audit.created_at.desc())
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+        )
+        res = await db.execute(stmt)
+        rows = res.scalars().all()
+
+        items = []
+        for r in rows:
+            items.append(
+                {
+                    "log_id": str(r.log_id) if r.log_id else None,
+                    "user_id": str(r.user_id) if r.user_id else None,
+                    "event_type": r.event_type,
+                    "event_id": str(r.event_id) if r.event_id else None,
+                    "message": r.message,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+                }
+            )
+
+        return {"items": items, "page": page, "per_page": per_page, "total": total}
+    except Exception as exc:
+        logger = logging.getLogger(__name__)
+        logger.exception("Audit query failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Audit query failed")
 
 
 @app.get(
