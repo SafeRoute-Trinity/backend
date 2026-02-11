@@ -33,6 +33,8 @@ from libs.fastapi_service import (
     ServiceAppConfig,
 )
 
+from libs.db import DatabaseType, get_database_factory, initialize_databases
+
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
 

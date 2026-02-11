@@ -17,6 +17,18 @@ load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 
+from services.notification.manager import NotificationManager
+from services.notification.schemas import (
+    CreateResp,
+    EmergencyCallRequest,
+    EmergencyCallResponse,
+    EmergencySMSRequest,
+    EmergencySMSResponse,
+    SOSNotificationRequest,
+    StatusResp,
+    TestSMSRequest,
+    TestSMSResponse,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
