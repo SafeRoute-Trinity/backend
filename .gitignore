@@ -36,3 +36,5 @@ htmlcov/
 
 #python venv
 asebackend-env/
+run_safety_service.sh
+

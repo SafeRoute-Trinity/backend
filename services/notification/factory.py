@@ -2,7 +2,7 @@ import os
 from typing import Dict, Union
 
 from libs.twilio_client import get_twilio_client
-from services.notification.models import (
+from models import (
     CallNotificationResponse,
     PushNotificationResponse,
     SMSNotificationResponse,

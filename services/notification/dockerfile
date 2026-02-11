@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y \
 # 复制依赖文件并安装（从根目录）
 COPY requirements.txt .
 COPY libs/ ./libs/
+COPY common/ ./common/
 
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
