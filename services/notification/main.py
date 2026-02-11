@@ -32,13 +32,20 @@ from schemas import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
-from libs.db import get_db
+from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
 from libs.twilio_client import get_twilio_client
+
+# Initialize database connections
+initialize_databases([DatabaseType.POSTGRES])
+
+# Get database session dependency
+db_factory = get_database_factory()
+get_db = db_factory.get_session_dependency(DatabaseType.POSTGRES)
 
 # Create service configuration
 service_config = ServiceAppConfig(
