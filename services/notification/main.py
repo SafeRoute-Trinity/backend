@@ -18,18 +18,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 
 from manager import NotificationManager
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from libs.audit_logger import write_audit
-from libs.db import get_db
-from libs.fastapi_service import (
-    CORSMiddlewareConfig,
-    FastAPIServiceFactory,
-    ServiceAppConfig,
-)
-from libs.twilio_client import get_twilio_client
-
-from manager import NotificationManager
 from schemas import (
     CreateResp,
     EmergencyCallRequest,
@@ -41,6 +29,16 @@ from schemas import (
     TestSMSRequest,
     TestSMSResponse,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from libs.audit_logger import write_audit
+from libs.db import get_db
+from libs.fastapi_service import (
+    CORSMiddlewareConfig,
+    FastAPIServiceFactory,
+    ServiceAppConfig,
+)
+from libs.twilio_client import get_twilio_client
 
 # Create service configuration
 service_config = ServiceAppConfig(
