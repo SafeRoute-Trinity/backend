@@ -4,16 +4,7 @@ from typing import Dict, Iterable, Literal
 
 from factory import NotificationFactory
 from fastapi import HTTPException
-from templates import get_template
-
-from common.notification_status import (
-    CallStatus,
-    EmergencyStatus,
-    NotificationStatus,
-    PushStatus,
-    SMSStatus,
-)
-from models import (
+from schemas import (
     CreateResp,
     EmergencyCallRequest,
     EmergencyCallResponse,
@@ -22,6 +13,15 @@ from models import (
     SOSNotificationRequest,
     StatusResp,
     StatusResult,
+)
+from templates import get_template
+
+from common.notification_status import (
+    CallStatus,
+    EmergencyStatus,
+    NotificationStatus,
+    PushStatus,
+    SMSStatus,
 )
 
 DEFAULT_CHANNELS: list[Literal["push", "sms", "call"]] = ["push", "sms"]

@@ -28,7 +28,9 @@ from libs.fastapi_service import (
     ServiceAppConfig,
 )
 from libs.twilio_client import get_twilio_client
-from models import (
+
+from manager import NotificationManager
+from schemas import (
     CreateResp,
     EmergencyCallRequest,
     EmergencyCallResponse,
