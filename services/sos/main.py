@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
-from libs.db import get_db
+from libs.db import DatabaseType, get_database_factory, initialize_databases
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,13 @@ service_config = ServiceAppConfig(
     service_name="sos",
     cors_config=CORSMiddlewareConfig(),
 )
+
+# Initialize database connections
+initialize_databases([DatabaseType.POSTGRES])
+
+# Get database session dependency
+db_factory = get_database_factory()
+get_db = db_factory.get_session_dependency(DatabaseType.POSTGRES)
 
 # Create factory and build app
 factory = FastAPIServiceFactory(service_config)

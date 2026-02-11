@@ -34,3 +34,4 @@ htmlcov/
 .mypy_cache/
 run_safety_service.sh
 
+asebackend-env/
