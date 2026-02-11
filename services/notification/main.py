@@ -17,8 +17,8 @@ load_dotenv()
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 
-from manager import NotificationManager
-from schemas import (
+from services.notification.manager import NotificationManager
+from services.notification.schemas import (
     CreateResp,
     EmergencyCallRequest,
     EmergencyCallResponse,
