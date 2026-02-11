@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -20,42 +20,43 @@ class Base(DeclarativeBase):
 
 
 class User(Base):
-    """
-    User model representing a SafeRoute application user.
-
-    Attributes:
-        user_id: Unique identifier for the user (primary key)
-        email: User's email address (unique, required)
-        password_hash: Hashed password (required)
-        phone: User's phone number (optional)
-        name: User's display name (optional)
-        created_at: Timestamp when user account was created
-        last_login: Timestamp of last login (optional)
-        preferences: User preferences relationship
-        trusted_contacts: List of trusted contacts relationship
-    """
-
     __tablename__ = "users"
+    __table_args__ = (({"schema": "saferoute"}),)
 
+    # DB has gen_random_uuid, but I prefer create uuid in backend because audit may use it
     user_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         primary_key=True,
-        default=uuid.uuid4,
+        nullable=False,
     )
-    email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    password: Mapped[str] = mapped_column(Text, nullable=False)
 
-    phone: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    name: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    password: Mapped[str] = mapped_column(String(255), nullable=False)
+    phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
 
-    last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    last_login: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
 
     preferences: Mapped[Optional["UserPreferences"]] = relationship(
         back_populates="user",
         uselist=False,
     )
+
     trusted_contacts: Mapped[List["TrustedContact"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
@@ -63,73 +64,103 @@ class User(Base):
 
 
 class UserPreferences(Base):
-    """
-    User preferences model for storing user settings.
-
-    Attributes:
-        user_id: Foreign key to users table (primary key)
-        voice_guidance: Voice guidance setting (on/off)
-        safety_bias: Route preference (safest/fastest, optional)
-        units: Measurement units (metric/imperial, optional)
-        updated_at: Timestamp when preferences were last updated
-        user: Relationship back to User model
-    """
-
     __tablename__ = "user_preferences"
-
-    user_id: Mapped[str] = mapped_column(
-        String(32),
-        ForeignKey("users.user_id", ondelete="CASCADE"),
-        primary_key=True,
+    __table_args__ = (
+        CheckConstraint(
+            "units IN ('metric', 'imperial')",
+            name="chk_user_preferences_units",
+        ),
+        {"schema": "saferoute"},
     )
 
-    voice_guidance: Mapped[str] = mapped_column(Text, nullable=False)
-    safety_bias: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    units: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("saferoute.users.user_id", ondelete="CASCADE"),
+        primary_key=True,
         nullable=False,
     )
 
-    user: Mapped["User"] = relationship(back_populates="preferences")
+    voice_guidance: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+    )
+
+    units: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default=text("'metric'"),
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    user: Mapped["User"] = relationship(
+        back_populates="preferences",
+        lazy="selectin",
+    )
 
 
 class TrustedContact(Base):
     """
-    Trusted contact model for emergency contacts.
-
-    Attributes:
-        contact_id: Unique identifier for the contact (primary key)
-        user_id: Foreign key to users table (indexed)
-        name: Contact's name (required)
-        phone: Contact's phone number (required)
-        relation: Relationship to user (e.g., "family", "friend", optional)
-        is_primary: Whether this is the primary emergency contact (optional)
-        created_at: Timestamp when contact was created
-        updated_at: Timestamp when contact was last updated
-        user: Relationship back to User model
+    ORM for DB table: saferoute.contacts
     """
 
-    __tablename__ = "trusted_contacts"
+    __tablename__ = "contacts"
+    __table_args__ = {"schema": "saferoute"}
 
-    contact_id: Mapped[str] = mapped_column(String(32), primary_key=True)
-
-    user_id: Mapped[str] = mapped_column(
-        String(32),
-        ForeignKey("users.user_id", ondelete="CASCADE"),
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
         nullable=False,
-        index=True,
+        server_default=text("gen_random_uuid()"),
     )
 
-    name: Mapped[str] = mapped_column(Text, nullable=False)
-    phone: Mapped[str] = mapped_column(Text, nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("saferoute.users.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,  # 對應 idx_contacts_user_id
+    )
 
-    # Python attribute name is 'relation', but database column is 'relationship'
-    relation: Mapped[Optional[str]] = mapped_column("relationship", Text, nullable=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    phone: Mapped[str] = mapped_column(String(20), nullable=False)
 
-    is_primary: Mapped[Optional[bool]] = mapped_column(Boolean, default=False)
+    # DB column is "relationship" varchar(50) nullable
+    relation: Mapped[Optional[str]] = mapped_column(
+        "relationship",
+        String(50),
+        nullable=True,
+    )
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+    )
 
-    user: Mapped["User"] = relationship(back_populates="trusted_contacts")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    user: Mapped["User"] = relationship(
+        back_populates="trusted_contacts",
+        lazy="selectin",
+    )

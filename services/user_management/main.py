@@ -41,7 +41,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-from models.user_models import User
+from models.user_models import User, UserPreferences
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -281,21 +281,53 @@ async def root():
     return {"service": "user_management", "status": "running"}
 
 
-@app.get("/health")
-async def health():
+@app.get(
+    "/v1/users/{user_id}",
+    response_model=UserResponse,
+    tags=["User Management"],
+)
+async def get_user(user_id: str, db=Depends(get_db)):
     """
-    Health check endpoint with database status.
+    Get user information by user ID (DB is the source of truth).
 
-    Returns:
-        Dict with status, service name, and database health
+    Raises:
+        HTTPException: 400 if user_id format invalid
+        HTTPException: 404 if user not found
     """
-    db_ok, db_error = await db_factory.check_health(DatabaseType.POSTGRES, timeout=2.0)
+    # Validate UUID
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user_id format",
+        )
 
-    return {
-        "status": "ok" if db_ok else "degraded",
-        "service": "user_management",
-        "database": {"healthy": db_ok, "error": db_error},
+    # Query PostgreSQL database
+    result = await db.execute(select(User).where(User.user_id == user_uuid))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found",
+        )
+
+    # Build response payload (only fields that exist in DB)
+    payload = {
+        "user_id": user.user_id,
+        "email": user.email,
+        "name": user.name,
+        "phone": user.phone,
+        "created_at": user.created_at,
+        "updated_at": getattr(user, "updated_at", None),
+        "last_login": user.last_login,
     }
+
+    # If your UserResponse doesn't include updated_at, remove it:
+    # payload.pop("updated_at", None)
+
+    return UserResponse(**payload)
 
 
 @app.post(
@@ -311,17 +343,13 @@ async def register_user(
     """
     Register a new user account.
 
-    Args:
-        body: Registration request
-        db: Database session dependency
-
-    Returns:
-        RegisterResponse with user ID, auth token, and user details
-
-    Raises:
-        HTTPException: 400 if email already registered or creation fails
+    DB schema (saferoute.users):
+      - user_id UUID PK default gen_random_uuid()
+      - created_at timestamptz not null default now()
+      - updated_at timestamptz not null default now()
+      - last_login timestamptz null
+      - email unique
     """
-    user_id = uuid.uuid4()
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
@@ -334,20 +362,23 @@ async def register_user(
             detail="Email already registered",
         )
 
-    # Write to PostgreSQL database
+    # Create user row.
+    # Let DB generate: user_id, created_at, updated_at (per DB defaults)
     user = User(
-        user_id=user_id,
         email=body.email,
-        password=body.password,
+        password=body.password,  # TODO: hash this
         phone=body.phone,
         name=body.name,
-        created_at=now,
         last_login=None,
     )
 
     db.add(user)
 
+    # Flush so DB defaults (user_id, created_at, updated_at) are available on `user`
     await db.flush()
+
+    # Now we can safely use DB-generated UUID
+    user_id = user.user_id
 
     audit = Audit(
         log_id=uuid.uuid4(),
@@ -364,36 +395,37 @@ async def register_user(
         await db.commit()
     except IntegrityError:
         await db.rollback()
+        # Most common: unique violation on email
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not create user",
         )
 
-    # Store in memory for backward compatibility (can be removed later)
+    # Backward compatibility: in-memory store
+    # Use DB values for created_at/updated_at if your ORM model includes them;
+    # fall back to `now` otherwise.
+    created_at_val = getattr(user, "created_at", now)
     users[user_id] = {
         "user_id": user_id,
-        "email": body.email,
-        "phone": body.phone,
-        "name": body.name,
-        "password": body.password,
-        "created_at": now,
+        "email": user.email,
+        "phone": user.phone,
+        "name": user.name,
+        "password": user.password,
+        "created_at": created_at_val,
         "last_login": None,
     }
 
-    # Business metric: increment registrations counter
-    USER_REGISTRATION_TOTAL.inc()
-
-    # Business metric: bump registrations counter
+    # Business metric: increment registrations counter (only once)
     USER_REGISTRATION_TOTAL.inc()
 
     return RegisterResponse(
         user_id=user_id,
         status="created",
         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-        email=body.email,
-        phone=body.phone,
-        name=body.name,
-        created_at=now,
+        email=user.email,
+        phone=user.phone,
+        name=user.name,
+        created_at=created_at_val,
     )
 
 
@@ -409,15 +441,9 @@ async def login(
     """
     Authenticate a user and return auth token.
 
-    Args:
-        body: Login request with email and password
-        db: Database session dependency
-
-    Returns:
-        LoginResponse with user ID, auth token, and user details
-
-    Raises:
-        HTTPException: 401 if email or password is invalid
+    DB schema (saferoute.users):
+      - last_login timestamptz NULL
+      - updated_at timestamptz NOT NULL default now()
     """
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"
@@ -426,16 +452,18 @@ async def login(
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
 
+    # Don't distinguish between "user not found" and "wrong password"
     if not user or user.password != body.password:
-        # Don't distinguish between "user not found" and "wrong password"
-        # to prevent user enumeration
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
         )
 
-    # Update last_login timestamp
+    # Update timestamps
     user.last_login = now
+    # If your User ORM includes updated_at (it should, per DB schema), update it too
+    if hasattr(user, "updated_at"):
+        user.updated_at = now
 
     audit = Audit(
         log_id=uuid.uuid4(),
@@ -477,6 +505,62 @@ async def login(
     )
 
 
+@app.get(
+    "/v1/users/{user_id}/preferences",
+    response_model=PreferencesResponse,
+    tags=["User Management"],
+)
+async def get_preferences(
+    user_id: str,
+    db=Depends(get_db),
+):
+    """
+    Get user preferences from PostgreSQL (saferoute.user_preferences).
+
+    Raises:
+      - 400 if user_id invalid
+      - 404 if user not found or preferences not set
+    """
+    # ---- (0) Parse user_id from path ----
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user_id format",
+        )
+
+    # ---- (1) Ensure user exists (recommended) ----
+    result = await db.execute(select(User).where(User.user_id == user_uuid))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # ---- (2) Fetch preferences ----
+    result = await db.execute(select(UserPreferences).where(UserPreferences.user_id == user_uuid))
+    pref = result.scalar_one_or_none()
+
+    if not pref:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Preferences not found",
+        )
+
+    return PreferencesResponse(
+        user_id=user_uuid,
+        status="preferences_loaded",
+        preferences=PreferencesRequest(
+            user_id=user_uuid,
+            voice_guidance=pref.voice_guidance,
+            units=pref.units,
+        ),
+        updated_at=pref.updated_at,
+    )
+
+
 @app.post(
     "/v1/users/{user_id}/preferences",
     response_model=PreferencesResponse,
@@ -488,49 +572,67 @@ async def save_preferences(
     db=Depends(get_db),
 ):
     """
-    Save user preferences.
+    Save user preferences into PostgreSQL (saferoute.user_preferences).
 
-    Args:
-        user_id: User identifier
-        payload: Preferences to save
-
-    Returns:
-        PreferencesResponse with saved preferences and timestamp
+    DB schema:
+      - user_id uuid PK/FK
+      - voice_guidance boolean not null default true
+      - units varchar(20) not null default 'metric' (metric|imperial)
+      - created_at/updated_at timestamptz not null default now()
     """
     now = datetime.utcnow()
 
-    user_id = body.user_id
-
-    # TODO: the user preference should be stored in DB, not in memory
-
-    # Get user data from memory
-    users.setdefault(user_id, {"user_id": user_id})
-    user_data = users[user_id]
-
-    # Update preferences
-    user_data["preferences"] = body.dict()
-    user_data["updated_at"] = now.isoformat()
-
-    # Update in memory
-    users[user_id] = user_data.copy()
-    if isinstance(user_data.get("created_at"), str):
-        users[user_id]["created_at"] = datetime.fromisoformat(user_data["created_at"])
-    if isinstance(user_data.get("last_login"), str):
-        users[user_id]["last_login"] = (
-            datetime.fromisoformat(user_data["last_login"]) if user_data.get("last_login") else None
+    # ---- (0) Parse user_id from path ----
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user_id format",
         )
 
+    # Optional but recommended: ensure user exists
+    result = await db.execute(select(User).where(User.user_id == user_uuid))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # ---- (1) Upsert into user_preferences ----
+    result = await db.execute(select(UserPreferences).where(UserPreferences.user_id == user_uuid))
+    pref = result.scalar_one_or_none()
+
+    if pref:
+        pref.voice_guidance = body.voice_guidance
+        pref.units = body.units
+        pref.updated_at = now
+    else:
+        pref = UserPreferences(
+            user_id=user_uuid,
+            voice_guidance=body.voice_guidance,
+            units=body.units,
+            # created_at has DB default now(); can omit, but ok to set explicitly if you want:
+            # created_at=now,
+            updated_at=now,
+        )
+        db.add(pref)
+        await db.flush()
+
+    # ---- (2) Audit ----
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=uuid.uuid4(user_id),
+        user_id=user_uuid,
         event_type="authentication",
-        event_id=uuid.uuid4(user_id),
+        event_id=user_uuid,
         message="save_preference",
         created_at=now,
         updated_at=now,
     )
     db.add(audit)
 
+    # ---- (3) Commit ----
     try:
         await db.commit()
     except IntegrityError:
@@ -541,135 +643,14 @@ async def save_preferences(
         )
 
     return PreferencesResponse(
-        user_id=uuid.uuid4(user_id),
+        user_id=user_uuid,
         status="preferences_saved",
-        preferences=body,
+        preferences=PreferencesRequest(
+            user_id=user_uuid,
+            voice_guidance=pref.voice_guidance,
+            units=pref.units,
+        ),
         updated_at=now,
-    )
-
-
-@app.post(
-    "/v1/users/{user_id}/trusted-contacts",
-    response_model=TrustedContactUpsertResponse,
-    tags=["User Management"],
-)
-async def upsert_trusted_contact(
-    body: TrustedContactUpsertRequest,
-    db=Depends(get_db),
-):
-    """
-    Create or update a trusted contact for a user.
-
-    Args:
-        user_id: User identifier
-        body: Contact information to create or update
-
-    Returns:
-        TrustedContactUpsertResponse with contact details and timestamp
-    """
-
-    user_id = body.user_id
-
-    contacts = trusted_contacts.setdefault(user_id, [])
-    # TODO: contact_id should be UUID
-
-    if body.contact_id:
-        for c in contacts:
-            if c["contact_id"] == body.contact_id:
-                c.update(body.dict(exclude_unset=True))
-                contact_id = body.contact_id
-                break
-        else:
-            contact_id = body.contact_id
-            contacts.append({**body.dict(), "contact_id": contact_id})
-    else:
-        contact_id = f"ctc_{uuid.uuid4().hex[:6]}"
-        contacts.append({**body.dict(), "contact_id": contact_id})
-    now: datetime = datetime.utcnow()
-    stored = [c for c in contacts if c["contact_id"] == contact_id][0]
-    contact_obj = TrustedContact(**stored)
-
-    audit = Audit(
-        log_id=uuid.uuid4(),
-        user_id=uuid.uuid4(user_id),
-        event_type="authentication",
-        event_id=uuid.uuid4(user_id),
-        message="update trusted-contacts",
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(audit)
-
-    try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Could not update trusted contact",
-        )
-
-    return TrustedContactUpsertResponse(
-        user_id=uuid.uuid4(user_id),
-        contact_id=contact_id,
-        status="contact_upserted",
-        contact=contact_obj,
-        updated_at=now,
-    )
-
-
-@app.get(
-    "/v1/users/{user_id}",
-    response_model=UserResponse,
-    tags=["User Management"],
-)
-async def get_user(user_id, db=Depends(get_db)):
-    """
-    Get user information by user ID.
-
-    Args:
-        user_id: User identifier
-        db: Database session dependency
-
-    Returns:
-        UserResponse with user details
-
-    Raises:
-        HTTPException: 404 if user not found
-    """
-    # Query PostgreSQL database (primary source of truth)
-    result = await db.execute(select(User).where(User.user_id == user_id))
-    db_user = result.scalar_one_or_none()
-
-    if db_user:
-        # Convert database user to dict format
-        u = {
-            "user_id": db_user.user_id,
-            "email": db_user.email,
-            "name": db_user.name,
-            "phone": db_user.phone,
-            "device_id": db_user.device_id,
-            "created_at": db_user.created_at,
-            "last_login": db_user.last_login,
-        }
-
-        # Also update in-memory cache (for backward compatibility)
-        users[user_id] = u.copy()
-
-        return UserResponse(**u)
-
-    # Fallback to in-memory storage (legacy compatibility)
-    u = users.get(user_id)
-    if u:
-        # Remove password_hash from response
-        u = u.copy()
-        u.pop("password_hash", None)
-        return UserResponse(**u)
-
-    # User not found - return 404
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail=f"User {user_id} not found",
     )
 
 
@@ -679,23 +660,162 @@ async def get_user(user_id, db=Depends(get_db)):
     tags=["User Management"],
 )
 async def list_trusted_contacts(
-    user_id,
-    include_inactive=Query(False, description="Mock flag; no effect in stub"),
+    user_id: str,
+    include_inactive: bool = Query(
+        False, description="Mock flag; no effect in DB-backed implementation"
+    ),
+    db=Depends(get_db),
 ):
     """
-    List all trusted contacts for a user.
-
-    Args:
-        user_id: User identifier
-        include_inactive: Flag to include inactive contacts (not implemented)
-
-    Returns:
-        TrustedContactsListResponse with list of contacts
+    List all trusted contacts for a user from PostgreSQL (saferoute.contacts).
     """
-    contacts = trusted_contacts.get(user_id, [])
+    # Validate UUID
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user_id format",
+        )
+
+    # Ensure user exists (recommended)
+    result = await db.execute(select(User).where(User.user_id == user_uuid))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found",
+        )
+
+    # Query contacts
+    result = await db.execute(select(TrustedContact).where(TrustedContact.user_id == user_uuid))
+    contacts = result.scalars().all()
+
     return TrustedContactsListResponse(
-        user_id=user_id,
-        contacts=[TrustedContact(**c) for c in contacts],
+        user_id=user_uuid,
+        contacts=contacts,  # requires Pydantic from_attributes/orm_mode
+    )
+
+
+@app.post(
+    "/v1/users/{user_id}/trusted-contacts",
+    response_model=TrustedContactUpsertResponse,
+    tags=["User Management"],
+)
+async def upsert_trusted_contact(
+    user_id: str,
+    body: TrustedContactUpsertRequest,
+    db=Depends(get_db),
+):
+    """
+    Create or update a trusted contact for a user.
+    Data is stored in saferoute.contacts.
+    """
+    now = datetime.utcnow()
+
+    # ---- (1) Validate user_id ----
+    try:
+        user_uuid = uuid.UUID(user_id)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid user_id format",
+        )
+
+    # Ensure user exists
+    result = await db.execute(select(User).where(User.user_id == user_uuid))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+
+    # ---- (2) Update existing contact ----
+    if body.contact_id:
+        try:
+            contact_uuid = uuid.UUID(str(body.contact_id))
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid contact_id format",
+            )
+
+        result = await db.execute(
+            select(TrustedContact).where(
+                TrustedContact.contact_id == contact_uuid,
+                TrustedContact.user_id == user_uuid,
+            )
+        )
+        contact = result.scalar_one_or_none()
+
+        if not contact:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Trusted contact not found",
+            )
+
+        # Partial update
+        patch = body.model_dump(exclude_unset=True)
+        patch.pop("contact_id", None)
+        patch.pop("user_id", None)
+
+        if "name" in patch:
+            contact.name = patch["name"]
+        if "phone" in patch:
+            contact.phone = patch["phone"]
+        if "relation" in patch:
+            contact.relation = patch["relation"]
+        if "is_primary" in patch:
+            contact.is_primary = patch["is_primary"]
+
+        contact.updated_at = now
+        contact_id_out = contact.contact_id
+
+    # ---- (3) Create new contact ----
+    else:
+        contact = TrustedContact(
+            user_id=user_uuid,
+            name=body.name,
+            phone=body.phone,
+            relation=getattr(body, "relation", None),
+            is_primary=body.is_primary if body.is_primary is not None else False,
+            updated_at=now,  # created_at uses DB default
+        )
+
+        db.add(contact)
+        await db.flush()  # get generated UUID
+        contact_id_out = contact.contact_id
+
+    # ---- (4) Audit ----
+    audit = Audit(
+        log_id=uuid.uuid4(),
+        user_id=user_uuid,
+        event_type="authentication",
+        event_id=user_uuid,
+        message="update trusted-contacts",
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(audit)
+
+    # ---- (5) Commit ----
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not upsert trusted contact",
+        )
+
+    # ---- (6) Response ----
+    return TrustedContactUpsertResponse(
+        user_id=user_uuid,
+        contact_id=contact_id_out,
+        status="contact_upserted",
+        contact=contact,  # 若 Pydantic 有 orm_mode=True
+        updated_at=now,
     )
 
 

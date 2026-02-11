@@ -1,13 +1,12 @@
 import os
 from typing import Dict, Union
 
+from libs.twilio_client import get_twilio_client
 from services.notification.schemas import (
     CallNotificationResponse,
     PushNotificationResponse,
     SMSNotificationResponse,
 )
-
-from libs.twilio_client import get_twilio_client
 
 
 class BaseSender:
