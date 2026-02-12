@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 # for postgresql
 from sqlalchemy import func, select
+from sqlalchemy import func 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -85,6 +86,25 @@ emergency_status: Dict[str, dict] = {}
 class Point(BaseModel):
     lat: float
     lon: float
+
+
+# ========= Audit Log Models =========
+class AuditLogResponse(BaseModel):
+    log_id: uuid.UUID
+    user_id: Optional[uuid.UUID] = None
+    event_type: str
+    event_id: Optional[uuid.UUID] = None
+    message: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuditListResponse(BaseModel):
+    data: List[AuditLogResponse]
+    total: int
+    page: int
+    page_size: int
+
 
 
 # ========= User Management Models =========
@@ -337,7 +357,6 @@ async def register_user(
 
 
 @app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
-@app.post("/v1/auth/login", response_model=LoginResponse, tags=["User Management"])
 async def login(
     payload: LoginRequest,
     db: AsyncSession = Depends(get_db),
@@ -413,83 +432,65 @@ async def login(
     )
 
 
-# async def login(payload: LoginRequest):
-#     existing_id = None
-#     user_data = None
-#     user_found = False  # Track if user exists (regardless of password)
 
-#     # Try to get user from Redis cache first
-#     if redis_client.is_connected():
-#         # Look up user_id by email
-#         cached_user_id = redis_client.get(_user_email_cache_key(payload.email))
-#         if cached_user_id:
-#             user_found = True  # User exists
-#             # Get user data from cache
-#             cached_user = redis_client.get_json(_user_cache_key(cached_user_id))
-#             if cached_user:
-#                 # Verify password hash
-#                 if cached_user.get("password_hash") == payload.password_hash:
-#                     existing_id = cached_user_id
-#                     user_data = cached_user
+@app.get(
+    "/api/audit",
+    response_model=AuditListResponse,
+    tags=["Audit"],
+    summary="List audit logs (paginated)",
+)
+async def list_audit_logs(
+    user_id: Optional[uuid.UUID] = Query(None),
+    event_type: Optional[str] = Query(None),
+    start: Optional[datetime] = Query(None, description="Filter created_at >= start"),
+    end: Optional[datetime] = Query(None, description="Filter created_at <= end"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    db=Depends(get_db),
+):
+    # 1) build filters
+    filters = []
+    if user_id is not None:
+        filters.append(Audit.user_id == user_id)
+    if event_type is not None and event_type != "":
+        filters.append(Audit.event_type == event_type)
+    if start is not None:
+        filters.append(Audit.created_at >= start)
+    if end is not None:
+        filters.append(Audit.created_at <= end)
 
-#     # Fallback to in-memory storage
-#     if not existing_id:
-#         for uid, u in users.items():
-#             if u["email"] == payload.email:
-#                 user_found = True  # User exists
-#                 # Verify password hash if stored
-#                 if u.get("password_hash") == payload.password_hash:
-#                     existing_id = uid
-#                     user_data = u
-#                     break
+    # 2) total count
+    count_stmt = select(func.count()).select_from(Audit)
+    if filters:
+        count_stmt = count_stmt.where(*filters)
+    total = (await db.execute(count_stmt)).scalar_one()
 
-#     # If user found but password doesn't match, return error
-#     if user_found and not existing_id:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Invalid email or password",
-#         )
+    # 3) page query
+    offset = (page - 1) * page_size
+    stmt = select(Audit).order_by(Audit.created_at.desc()).offset(offset).limit(page_size)
+    if filters:
+        stmt = stmt.where(*filters)
 
-#     # If user not found, return error (don't auto-register for security)
-#     if not user_found:
-#         raise HTTPException(
-#             status_code=status.HTTP_401_UNAUTHORIZED,
-#             detail="Invalid email or password",  # Same message to prevent user enumeration
-#         )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
 
-#     now = datetime.utcnow()
-#     token = f"atk_{uuid.uuid4().hex[:6]}"
+    # 4) map to response
+    data = [
+        AuditLogResponse(
+            log_id=r.log_id,
+            user_id=r.user_id,
+            event_type=r.event_type,
+            event_id=r.event_id,
+            message=r.message,
+            created_at=r.created_at,
+            updated_at=r.updated_at,
+        )
+        for r in rows
+    ]
 
-#     # Update last_login
-#     if user_data:
-#         user_data["last_login"] = now.isoformat()
-#         # Update in memory
-#         if existing_id in users:
-#             users[existing_id]["last_login"] = now
-#         # Update in Redis cache
-#         if redis_client.is_connected():
-#             redis_client.set_json(
-#                 _user_cache_key(existing_id), user_data, ttl=CACHE_TTL
-#             )
-#             # Cache auth token
-#             auth_data = {
-#                 "user_id": existing_id,
-#                 "email": payload.email,
-#                 "expires_in": AUTH_TOKEN_TTL,
-#                 "created_at": now.isoformat(),
-#             }
-#             redis_client.set_json(
-#                 _auth_token_cache_key(token), auth_data, ttl=AUTH_TOKEN_TTL
-#             )
+    return AuditListResponse(data=data, total=total, page=page, page_size=page_size)
 
-#     return LoginResponse(
-#         user_id=existing_id,
-#         status="authenticated",
-#         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-#         email=payload.email,
-#         device_id=payload.device_id,
-#         last_login=now,
-#     )
+
 
 
 @app.post(
