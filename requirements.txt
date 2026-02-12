@@ -26,5 +26,9 @@ ruff>=0.14.5 # Formatter
 # --- Lint & Formatting Helper ---
 pre-commit>=3.8.0
 
-# --- 环境管理（可选）---
+# --- environment setting (Optional)---
 python-dotenv>=1.0.1
+
+# --- testing ---
+pytest>=9.0.2
+aiosqlite>=0.22.1

@@ -235,7 +235,6 @@ class TrustedContactUpsertRequest(BaseModel):
 
     name: str
     phone: str
-    # ✅ 跟 DB 欄位語意一致：request 叫 relationship
     relationship: Optional[str] = None
     is_primary: Optional[bool] = None
 
