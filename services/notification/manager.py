@@ -2,8 +2,16 @@ import uuid
 from datetime import datetime
 from typing import Dict, Iterable, Literal
 
-from services.notification.factory import NotificationFactory
 from fastapi import HTTPException
+
+from common.notification_status import (
+    CallStatus,
+    EmergencyStatus,
+    NotificationStatus,
+    PushStatus,
+    SMSStatus,
+)
+from services.notification.factory import NotificationFactory
 from services.notification.schemas import (
     CreateResp,
     EmergencyCallRequest,
@@ -15,14 +23,6 @@ from services.notification.schemas import (
     StatusResult,
 )
 from services.notification.templates import get_template
-
-from common.notification_status import (
-    CallStatus,
-    EmergencyStatus,
-    NotificationStatus,
-    PushStatus,
-    SMSStatus,
-)
 
 DEFAULT_CHANNELS: list[Literal["push", "sms", "call"]] = ["push", "sms"]
 SUCCESS_STATUSES = {
