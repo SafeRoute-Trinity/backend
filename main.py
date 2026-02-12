@@ -4,6 +4,7 @@ SafeRoute Backend - Service Orchestrator.
 
 Starts all microservices in the services folder.
 """
+
 import argparse
 import multiprocessing
 import os

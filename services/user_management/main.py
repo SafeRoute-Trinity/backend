@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import Depends, Header, HTTPException, Query, Request, Response, status
+from fastapi import Depends, HTTPException, Query, Request, Response, status
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -35,6 +35,7 @@ from models.audit import Audit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from common.constants import AUTH_TOKEN_TTL
+from libs.auth.auth0_verify import verify_token
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -332,7 +333,7 @@ async def register_user(
     Register a new user account.
 
     Args:
-        body: Registration request
+        payload: Registration request
         db: Database session dependency
 
     Returns:
@@ -346,7 +347,7 @@ async def register_user(
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Check if email already exists (prevent duplicate registration)
-    result = await db.execute(select(User).where(User.email == body.email))
+    result = await db.execute(select(User).where(User.email == payload.email))
     existing = result.scalar_one_or_none()
     if existing:
         raise HTTPException(
@@ -357,10 +358,10 @@ async def register_user(
     # Write to PostgreSQL database
     user = User(
         user_id=user_id,
-        email=body.email,
-        password=body.password,
-        phone=body.phone,
-        name=body.name,
+        email=payload.email,
+        password=payload.password,
+        phone=payload.phone,
+        name=payload.name,
         created_at=now,
         last_login=None,
     )
@@ -393,10 +394,10 @@ async def register_user(
     # Store in memory for backward compatibility (can be removed later)
     users[user_id] = {
         "user_id": user_id,
-        "email": body.email,
-        "phone": body.phone,
-        "name": body.name,
-        "password": body.password,
+        "email": payload.email,
+        "phone": payload.phone,
+        "name": payload.name,
+        "password": payload.password,
         "created_at": now,
         "last_login": None,
     }
@@ -411,9 +412,9 @@ async def register_user(
         user_id=user_id,
         status="created",
         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-        email=body.email,
-        phone=body.phone,
-        name=body.name,
+        email=payload.email,
+        phone=payload.phone,
+        name=payload.name,
         created_at=now,
     )
 
@@ -431,7 +432,7 @@ async def login(
     Authenticate a user and return auth token.
 
     Args:
-        body: Login request with email and password
+        payload: Login request with email and password
         db: Database session dependency
 
     Returns:
@@ -444,10 +445,10 @@ async def login(
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Query PostgreSQL database for user
-    result = await db.execute(select(User).where(User.email == body.email))
+    result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
-    if not user or user.password != body.password:
+    if not user or user.password != payload.password:
         # Don't distinguish between "user not found" and "wrong password"
         # to prevent user enumeration
         raise HTTPException(
@@ -507,6 +508,7 @@ async def save_preferences(
     user_id: str,
     payload: PreferencesRequest,
     auth: dict = Depends(verify_token),
+    db=Depends(get_db),
 ):
     """
     Save user preferences (protected endpoint).
@@ -515,6 +517,7 @@ async def save_preferences(
         user_id: User identifier (must match authenticated user)
         payload: Preferences to save
         auth: Enhanced auth object from verify_token dependency
+        db: Database session dependency
 
     Returns:
         PreferencesResponse with saved preferences and timestamp
@@ -534,8 +537,6 @@ async def save_preferences(
         )
     now = datetime.utcnow()
 
-    user_id = body.user_id
-
     # TODO: the user preference should be stored in DB, not in memory
 
     # Get user data from memory
@@ -543,7 +544,7 @@ async def save_preferences(
     user_data = users[user_id]
 
     # Update preferences
-    user_data["preferences"] = body.dict()
+    user_data["preferences"] = payload.dict()
     user_data["updated_at"] = now.isoformat()
 
     # Update in memory
@@ -557,9 +558,9 @@ async def save_preferences(
 
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=uuid.uuid4(user_id),
+        user_id=uuid.UUID(user_id),
         event_type="authentication",
-        event_id=uuid.uuid4(user_id),
+        event_id=uuid.UUID(user_id),
         message="save_preference",
         created_at=now,
         updated_at=now,
@@ -576,9 +577,9 @@ async def save_preferences(
         )
 
     return PreferencesResponse(
-        user_id=uuid.uuid4(user_id),
+        user_id=uuid.UUID(user_id),
         status="preferences_saved",
-        preferences=body,
+        preferences=payload,
         updated_at=now,
     )
 
@@ -592,6 +593,7 @@ async def upsert_trusted_contact(
     user_id: str,
     payload: TrustedContactUpsertRequest,
     auth: dict = Depends(verify_token),
+    db=Depends(get_db),
 ):
     """
     Create or update a trusted contact for a user (protected endpoint).
@@ -600,6 +602,7 @@ async def upsert_trusted_contact(
         user_id: User identifier (must match authenticated user)
         payload: Contact information to create or update
         auth: Enhanced auth object from verify_token dependency
+        db: Database session dependency
 
     Returns:
         TrustedContactUpsertResponse with contact details and timestamp
@@ -620,27 +623,27 @@ async def upsert_trusted_contact(
     contacts = trusted_contacts.setdefault(user_id, [])
     # TODO: contact_id should be UUID
 
-    if body.contact_id:
+    if payload.contact_id:
         for c in contacts:
-            if c["contact_id"] == body.contact_id:
-                c.update(body.dict(exclude_unset=True))
-                contact_id = body.contact_id
+            if c["contact_id"] == payload.contact_id:
+                c.update(payload.dict(exclude_unset=True))
+                contact_id = payload.contact_id
                 break
         else:
-            contact_id = body.contact_id
-            contacts.append({**body.dict(), "contact_id": contact_id})
+            contact_id = payload.contact_id
+            contacts.append({**payload.dict(), "contact_id": contact_id})
     else:
         contact_id = f"ctc_{uuid.uuid4().hex[:6]}"
-        contacts.append({**body.dict(), "contact_id": contact_id})
+        contacts.append({**payload.dict(), "contact_id": contact_id})
     now: datetime = datetime.utcnow()
     stored = [c for c in contacts if c["contact_id"] == contact_id][0]
     contact_obj = TrustedContact(**stored)
 
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=uuid.uuid4(user_id),
+        user_id=uuid.UUID(user_id),
         event_type="authentication",
-        event_id=uuid.uuid4(user_id),
+        event_id=uuid.UUID(user_id),
         message="update trusted-contacts",
         created_at=now,
         updated_at=now,
@@ -657,7 +660,7 @@ async def upsert_trusted_contact(
         )
 
     return TrustedContactUpsertResponse(
-        user_id=uuid.uuid4(user_id),
+        user_id=uuid.UUID(user_id),
         contact_id=contact_id,
         status="contact_upserted",
         contact=contact_obj,

@@ -11,12 +11,11 @@ Environment variables (with safe defaults for local dev):
 
 import json
 import os
-from typing import Optional
 
 import certifi
 import jwt
 import requests
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer
 from jwt.algorithms import RSAAlgorithm
 
