@@ -25,7 +25,7 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
 from models.audit import Audit
@@ -173,6 +173,24 @@ class Point(BaseModel):
 
     lat: float
     lon: float
+
+
+# ======== Audit Log Models ===========================
+class AuditLogResponse(BaseModel):
+    log_id: uuid.UUID
+    user_id: Optional[uuid.UUID] = None
+    event_type: str
+    event_id: Optional[uuid.UUID] = None
+    message: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuditListResponse(BaseModel):
+    data: List[AuditLogResponse]
+    total: int
+    page: int
+    page_size: int
 
 
 # ========= User Management Models =========
@@ -795,6 +813,64 @@ async def login_info(iss: Optional[str] = None):
         "mobile_callback": "saferouteapp://auth/callback",
         "note": "Mobile clients should use Auth0 native authentication",
     }
+
+
+@app.get(
+    "/api/audit",
+    response_model=AuditListResponse,
+    tags=["Audit"],
+    summary="List audit logs (paginated)",
+)
+async def list_audit_logs(
+    user_id: Optional[uuid.UUID] = Query(None),
+    event_type: Optional[str] = Query(None),
+    start: Optional[datetime] = Query(None, description="Filter created_at >= start"),
+    end: Optional[datetime] = Query(None, description="Filter created_at <= end"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    db=Depends(get_db),
+):
+    # 1) build filters
+    filters = []
+    if user_id is not None:
+        filters.append(Audit.user_id == user_id)
+    if event_type is not None and event_type != "":
+        filters.append(Audit.event_type == event_type)
+    if start is not None:
+        filters.append(Audit.created_at >= start)
+    if end is not None:
+        filters.append(Audit.created_at <= end)
+
+    # 2) total count
+    count_stmt = select(func.count()).select_from(Audit)
+    if filters:
+        count_stmt = count_stmt.where(*filters)
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    # 3) page query
+    offset = (page - 1) * page_size
+    stmt = select(Audit).order_by(Audit.created_at.desc()).offset(offset).limit(page_size)
+    if filters:
+        stmt = stmt.where(*filters)
+
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    # 4) map to response
+    data = [
+        AuditLogResponse(
+            log_id=r.log_id,
+            user_id=r.user_id,
+            event_type=r.event_type,
+            event_id=r.event_id,
+            message=r.message,
+            created_at=r.created_at,
+            updated_at=r.updated_at,
+        )
+        for r in rows
+    ]
+
+    return AuditListResponse(data=data, total=total, page=page, page_size=page_size)
 
 
 @app.get("/auth0/callback", tags=["Auth"])
