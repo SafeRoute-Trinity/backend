@@ -13,8 +13,6 @@ Unlike unit tests, these tests:
 Run with: pytest -m "integration" -v
 """
 
-import json
-
 import pytest
 import requests
 from fastapi.security import HTTPAuthorizationCredentials
@@ -66,7 +64,7 @@ def test_fetch_real_jwks_from_auth0(skip_if_integration_disabled, real_jwks_url)
     assert first_key["kty"] == "RSA", "Expected RSA key type"
     assert first_key["use"] == "sig", "Expected signature use"
 
-    print(f"[PASS] Key Format: Valid RSA signature keys")
+    print("[PASS] Key Format: Valid RSA signature keys")
     print(f"  - Key ID (kid): {first_key.get('kid')}")
     print(f"  - Algorithm: {first_key.get('alg', 'RS256')}")
     print(f"  - Key Type: {first_key.get('kty')}")
@@ -185,7 +183,7 @@ def test_verify_real_auth0_jwt(skip_if_integration_disabled, real_auth0_jwt):
     assert "iss" in payload, "JWT payload should contain 'iss' claim"
     assert "exp" in payload, "JWT payload should contain 'exp' claim"
 
-    print(f"[PASS] JWT Signature: Valid (verified against real Auth0 JWKS)")
+    print("[PASS] JWT Signature: Valid (verified against real Auth0 JWKS)")
     print(f"[PASS] User (sub): {payload.get('sub')}")
     print(f"[PASS] Audience: {payload.get('aud')}")
     print(f"[PASS] Issuer: {payload.get('iss')}")
@@ -213,7 +211,7 @@ def test_real_jwt_claims_structure(skip_if_integration_disabled, real_auth0_jwt)
     assert isinstance(payload["iat"], int), "'iat' should be Unix timestamp"
     assert isinstance(payload["exp"], int), "'exp' should be Unix timestamp"
 
-    print(f"✓ Real JWT has valid claims structure")
+    print("✓ Real JWT has valid claims structure")
     print(f"  Issued: {payload.get('iat')}")
     print(f"  Expires: {payload.get('exp')}")
     print(f"  Lifetime: {payload.get('exp') - payload.get('iat')}s")
@@ -242,12 +240,12 @@ def test_multiple_keys_in_jwks(skip_if_integration_disabled, real_jwks_url):
         # Auth0 may have multiple keys during rotation
         kids = [key["kid"] for key in keys]
         assert len(kids) == len(set(kids)), "All keys should have unique kid"
-        print(f"[PASS] Multiple keys found (supports key rotation)")
-        print(f"  Key IDs:")
+        print("[PASS] Multiple keys found (supports key rotation)")
+        print("  Key IDs:")
         for idx, kid in enumerate(kids, 1):
             print(f"    {idx}. {kid}")
     else:
-        print(f"[PASS] Single active key")
+        print("[PASS] Single active key")
         print(f"  Key ID: {keys[0]['kid']}")
 
     print("\n[SUCCESS] Key rotation capability verified!")

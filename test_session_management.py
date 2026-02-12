@@ -19,8 +19,8 @@ import sys
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from common.redis_client import get_redis_client
 from common.auth.session import get_session_manager
+from common.redis_client import get_redis_client
 
 
 def test_redis_connection():
@@ -107,7 +107,7 @@ def test_session_creation():
     # Verify session exists
     session = sm.get_session(sid)
     if session:
-        print(f"✅ Session retrieved:")
+        print("✅ Session retrieved:")
         print(f"   - sub: {session['sub']}")
         print(f"   - device_id: {session['device_id']}")
         print(f"   - status: {session['status']}")
@@ -160,7 +160,7 @@ def test_logout_all():
     sid1 = sm.create_session("auth0|user123", "device1", "Device 1")
     sid2 = sm.create_session("auth0|user123", "device2", "Device 2")
     sid3 = sm.create_session("auth0|user123", "device3", "Device 3")
-    print(f"✅ Created 3 sessions")
+    print("✅ Created 3 sessions")
 
     # Verify sessions exist
     sessions = sm.get_user_sessions("auth0|user123")
@@ -211,7 +211,7 @@ def test_complete_lifecycle():
     user_sessions_key = "user_sessions:auth0|lifecycle"
     device_session_key = "device_session:auth0|lifecycle:device_lifecycle"
 
-    print(f"\nChecking Redis keys...")
+    print("\nChecking Redis keys...")
     print(f"  ✅ session:<sid> exists: {redis.exists(session_key)}")
     print(f"  ✅ user_sessions:<sub> exists: {redis.exists(user_sessions_key)}")
     print(f"  ✅ device_session:<sub>:<device_id> exists: {redis.exists(device_session_key)}")
@@ -220,19 +220,19 @@ def test_complete_lifecycle():
     session_data = redis.get_json(session_key)
     if session_data:
         required_fields = ["sub", "device_id", "created_at", "last_seen_at", "status"]
-        print(f"\nChecking session data structure...")
+        print("\nChecking session data structure...")
         for field in required_fields:
             exists = field in session_data
             print(f"  {'✅' if exists else '❌'} {field}: {exists}")
 
     # Test update_last_seen
-    print(f"\nTesting update_last_seen...")
+    print("\nTesting update_last_seen...")
     updated = sm.update_last_seen(sid)
     print(f"  ✅ Last seen updated: {updated}")
 
     # Cleanup
     sm.delete_session(sid)
-    print(f"\n✅ Session lifecycle test passed!")
+    print("\n✅ Session lifecycle test passed!")
     return True
 
 

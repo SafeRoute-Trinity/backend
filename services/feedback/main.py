@@ -26,13 +26,12 @@ from libs.audit_logger import write_audit
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-
-from libs.db import DatabaseType, get_database_factory, initialize_databases
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])

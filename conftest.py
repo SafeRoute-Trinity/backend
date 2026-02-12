@@ -9,10 +9,7 @@ This module provides reusable fixtures for:
 - Creating authenticated TestClient instances
 """
 
-import json
 import time
-from datetime import datetime, timedelta
-from typing import Any, Dict
 
 import pytest
 from cryptography.hazmat.backends import default_backend
@@ -358,8 +355,9 @@ def authenticated_client(create_valid_jwt):
         Function that creates authenticated TestClient
     """
     from fastapi.testclient import TestClient
-    from services.user_management.main import app
+
     from libs.auth.auth0_verify import verify_token
+    from services.user_management.main import app
 
     def _create_client(user_id: str = "test-user-123", **jwt_claims) -> TestClient:
         """
@@ -391,7 +389,9 @@ def authenticated_client(create_valid_jwt):
 # ============================================================================
 
 import os
+
 from dotenv import load_dotenv
+
 from common.constants import JWKS_URL
 
 # Load test environment variables
