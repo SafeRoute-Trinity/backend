@@ -57,6 +57,8 @@ def setup_test_db():
 # Override dependency with test database session
 async def override_get_db():
     async with AsyncTestingSessionLocal() as session:
+        bind = session.get_bind()
+        print("TEST DB URL =", str(bind.url))
         yield session
 
 
@@ -224,14 +226,14 @@ def test_save_preferences():
     ).json()
     user_id = reg["user_id"]
 
-    payload = {"voice_guidance": "on", "safety_bias": "safest", "units": "metric"}
+    payload = {"voice_guidance": True, "safety_bias": "safest", "units": "metric"}
 
     response = client.post(f"/v1/users/{user_id}/preferences", json=payload)
     assert response.status_code == 200
 
     data = response.json()
     assert data["status"] == "preferences_saved"
-    assert data["preferences"]["voice_guidance"] == "on"
+    assert data["preferences"]["voice_guidance"]
     assert data["preferences"]["safety_bias"] == "safest"
     assert "updated_at" in data
 

@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import Depends, HTTPException, Query, Request, Response, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -24,8 +24,8 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import desc, select
 from sqlalchemy.exc import IntegrityError
 
 from models.audit import Audit
@@ -41,7 +41,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-from models.user_models import User, UserPreferences
+from models.user_models import TrustedContact, User, UserPreferences
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -202,53 +202,6 @@ class LoginResponse(BaseModel):
     last_login: datetime
 
 
-class PreferencesRequest(BaseModel):
-    """Request model for user preferences."""
-
-    voice_guidance: Literal["on", "off"]
-    safety_bias: Optional[Literal["safest", "fastest"]] = None
-    units: Optional[Literal["metric", "imperial"]] = None
-
-
-class PreferencesResponse(BaseModel):
-    """Response model for saved preferences."""
-
-    user_id: uuid.UUID
-    status: Literal["preferences_saved"]
-    preferences: PreferencesRequest
-    updated_at: datetime
-
-
-class TrustedContactUpsertRequest(BaseModel):
-    """Request model for creating/updating trusted contacts."""
-
-    contact_id: Optional[uuid.UUID] = None
-    name: str
-    phone: str
-    relationship: Optional[str] = None
-    is_primary: Optional[bool] = None
-
-
-class TrustedContact(BaseModel):
-    """Model representing a trusted contact."""
-
-    contact_id: uuid.UUID
-    name: str
-    phone: str
-    relationship: Optional[str] = None
-    is_primary: Optional[bool] = None
-
-
-class TrustedContactUpsertResponse(BaseModel):
-    """Response model for trusted contact upsert operation."""
-
-    user_id: uuid.UUID
-    contact_id: uuid.UUID
-    status: Literal["contact_upserted"]
-    contact: TrustedContact
-    updated_at: datetime
-
-
 class UserResponse(BaseModel):
     """Response model for user information."""
 
@@ -260,11 +213,58 @@ class UserResponse(BaseModel):
     last_login: Optional[datetime] = None
 
 
-class TrustedContactsListResponse(BaseModel):
-    """Response model for listing trusted contacts."""
+class PreferencesRequest(BaseModel):
+    """Request model for user preferences."""
+
+    voice_guidance: bool
+    safety_bias: Optional[Literal["safest", "fastest"]] = None
+    units: Optional[Literal["metric", "imperial"]] = None
+
+
+class PreferencesResponse(BaseModel):
+    """Response model for saved/loaded preferences."""
 
     user_id: uuid.UUID
-    contacts: List[TrustedContact]
+    status: Literal["preferences_saved", "preferences_loaded"]
+    preferences: PreferencesRequest
+    updated_at: datetime
+
+
+class TrustedContactUpsertRequest(BaseModel):
+    """Request model for creating/updating trusted contacts."""
+
+    name: str
+    phone: str
+    # ✅ 跟 DB 欄位語意一致：request 叫 relationship
+    relationship: Optional[str] = None
+    is_primary: Optional[bool] = None
+
+
+class TrustedContactDTO(BaseModel):
+    """Pure contact item for API responses (NOT ORM)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    contact_id: uuid.UUID
+    user_id: uuid.UUID
+    name: str
+    phone: str
+    relationship: Optional[str] = Field(default=None, alias="relation")
+    is_primary: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class TrustedContactUpsertResponse(BaseModel):
+    user_id: uuid.UUID
+    status: Literal["contact_upserted"]
+    contact: TrustedContactDTO
+    updated_at: datetime
+
+
+class TrustedContactsListResponse(BaseModel):
+    user_id: uuid.UUID
+    contacts: List[TrustedContactDTO]
 
 
 # ========= User Management Endpoints =========
@@ -362,9 +362,11 @@ async def register_user(
             detail="Email already registered",
         )
 
+    user_id = uuid.uuid4()
     # Create user row.
     # Let DB generate: user_id, created_at, updated_at (per DB defaults)
     user = User(
+        user_id=user_id,
         email=body.email,
         password=body.password,  # TODO: hash this
         phone=body.phone,
@@ -378,7 +380,6 @@ async def register_user(
     await db.flush()
 
     # Now we can safely use DB-generated UUID
-    user_id = user.user_id
 
     audit = Audit(
         log_id=uuid.uuid4(),
@@ -661,15 +662,13 @@ async def save_preferences(
 )
 async def list_trusted_contacts(
     user_id: str,
-    include_inactive: bool = Query(
-        False, description="Mock flag; no effect in DB-backed implementation"
-    ),
     db=Depends(get_db),
 ):
     """
     List all trusted contacts for a user from PostgreSQL (saferoute.contacts).
     """
-    # Validate UUID
+
+    # ---- (1) Validate UUID ----
     try:
         user_uuid = uuid.UUID(user_id)
     except ValueError:
@@ -678,22 +677,32 @@ async def list_trusted_contacts(
             detail="Invalid user_id format",
         )
 
-    # Ensure user exists (recommended)
-    result = await db.execute(select(User).where(User.user_id == user_uuid))
-    user = result.scalar_one_or_none()
+    # ---- (2) Ensure user exists ----
+    user = await db.scalar(select(User).where(User.user_id == user_uuid))
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User {user_id} not found",
+            detail="User not found",
         )
 
-    # Query contacts
-    result = await db.execute(select(TrustedContact).where(TrustedContact.user_id == user_uuid))
-    contacts = result.scalars().all()
+    # ---- (3) Query contacts ----
+    stmt = (
+        select(TrustedContact)
+        .where(TrustedContact.user_id == user_uuid)
+        .order_by(
+            desc(TrustedContact.is_primary),
+            TrustedContact.created_at.asc(),
+        )
+    )
+
+    contacts = (await db.scalars(stmt)).all()
+
+    # ---- (4) ORM → DTO (不要直接回 ORM!) ----
+    items = [TrustedContactDTO.model_validate(c) for c in contacts]
 
     return TrustedContactsListResponse(
         user_id=user_uuid,
-        contacts=contacts,  # requires Pydantic from_attributes/orm_mode
+        contacts=items,
     )
 
 
@@ -708,8 +717,8 @@ async def upsert_trusted_contact(
     db=Depends(get_db),
 ):
     """
-    Create or update a trusted contact for a user.
-    Data is stored in saferoute.contacts.
+    If a contact with same (user_id + phone) exists -> update.
+    Otherwise -> create new contact with new UUID.
     """
     now = datetime.utcnow()
 
@@ -722,84 +731,58 @@ async def upsert_trusted_contact(
             detail="Invalid user_id format",
         )
 
-    # Ensure user exists
-    result = await db.execute(select(User).where(User.user_id == user_uuid))
-    user = result.scalar_one_or_none()
+    # ---- (2) Ensure user exists ----
+    user = await db.scalar(select(User).where(User.user_id == user_uuid))
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
 
-    # ---- (2) Update existing contact ----
-    if body.contact_id:
-        try:
-            contact_uuid = uuid.UUID(str(body.contact_id))
-        except ValueError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid contact_id format",
-            )
-
-        result = await db.execute(
-            select(TrustedContact).where(
-                TrustedContact.contact_id == contact_uuid,
-                TrustedContact.user_id == user_uuid,
-            )
+    # ---- (3) Try find existing contact (by phone) ----
+    contact = await db.scalar(
+        select(TrustedContact).where(
+            TrustedContact.user_id == user_uuid,
+            TrustedContact.phone == body.phone,
         )
-        contact = result.scalar_one_or_none()
+    )
 
-        if not contact:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Trusted contact not found",
-            )
-
-        # Partial update
-        patch = body.model_dump(exclude_unset=True)
-        patch.pop("contact_id", None)
-        patch.pop("user_id", None)
-
-        if "name" in patch:
-            contact.name = patch["name"]
-        if "phone" in patch:
-            contact.phone = patch["phone"]
-        if "relation" in patch:
-            contact.relation = patch["relation"]
-        if "is_primary" in patch:
-            contact.is_primary = patch["is_primary"]
-
+    # ---- (4) Update if exists ----
+    if contact:
+        contact.name = body.name
+        contact.relation = body.relationship
+        if body.is_primary is not None:
+            contact.is_primary = body.is_primary
         contact.updated_at = now
-        contact_id_out = contact.contact_id
 
-    # ---- (3) Create new contact ----
+    # ---- (5) Otherwise create new contact ----
     else:
         contact = TrustedContact(
+            contact_id=uuid.uuid4(),  # ← 明確產生新 UUID
             user_id=user_uuid,
             name=body.name,
             phone=body.phone,
-            relation=getattr(body, "relation", None),
+            relation=body.relationship,
             is_primary=body.is_primary if body.is_primary is not None else False,
-            updated_at=now,  # created_at uses DB default
+            created_at=now,
+            updated_at=now,
         )
-
         db.add(contact)
-        await db.flush()  # get generated UUID
-        contact_id_out = contact.contact_id
+        await db.flush()
 
-    # ---- (4) Audit ----
+    # ---- (6) Audit ----
     audit = Audit(
         log_id=uuid.uuid4(),
         user_id=user_uuid,
         event_type="authentication",
         event_id=user_uuid,
-        message="update trusted-contacts",
+        message="upsert trusted contact",
         created_at=now,
         updated_at=now,
     )
     db.add(audit)
 
-    # ---- (5) Commit ----
+    # ---- (7) Commit ----
     try:
         await db.commit()
     except IntegrityError:
@@ -809,12 +792,11 @@ async def upsert_trusted_contact(
             detail="Could not upsert trusted contact",
         )
 
-    # ---- (6) Response ----
+    # ---- (8) Response ----
     return TrustedContactUpsertResponse(
         user_id=user_uuid,
-        contact_id=contact_id_out,
         status="contact_upserted",
-        contact=contact,  # 若 Pydantic 有 orm_mode=True
+        contact=TrustedContactDTO.model_validate(contact),
         updated_at=now,
     )
 
