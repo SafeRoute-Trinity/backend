@@ -22,7 +22,6 @@ from pydantic import BaseModel, HttpUrl
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
-from libs.db import get_db
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -32,6 +31,15 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
+
+from libs.db import DatabaseType, get_database_factory, initialize_databases
+
+# Initialize database connections
+initialize_databases([DatabaseType.POSTGRES])
+
+# Get database session dependency
+db_factory = get_database_factory()
+get_db = db_factory.get_session_dependency(DatabaseType.POSTGRES)
 
 # Create service configuration
 service_config = ServiceAppConfig(

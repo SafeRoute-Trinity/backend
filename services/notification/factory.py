@@ -1,7 +1,7 @@
 import os
 from typing import Dict, Union
 
-from schemas import (
+from services.notification.schemas import (
     CallNotificationResponse,
     PushNotificationResponse,
     SMSNotificationResponse,

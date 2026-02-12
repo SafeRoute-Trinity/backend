@@ -2,9 +2,9 @@ import uuid
 from datetime import datetime
 from typing import Dict, Iterable, Literal
 
-from factory import NotificationFactory
+from services.notification.factory import NotificationFactory
 from fastapi import HTTPException
-from schemas import (
+from services.notification.schemas import (
     CreateResp,
     EmergencyCallRequest,
     EmergencyCallResponse,
@@ -14,7 +14,7 @@ from schemas import (
     StatusResp,
     StatusResult,
 )
-from templates import get_template
+from services.notification.templates import get_template
 
 from common.notification_status import (
     CallStatus,

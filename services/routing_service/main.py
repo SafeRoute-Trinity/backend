@@ -21,17 +21,15 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
-from libs.db import get_db
-
 # Prefer the centralized DB factory if available on newer branches; fall back to
 # the legacy postgis_db dependency for this branch. This allows the service to
 # work both when the global database factory exists (in main) and when it does
 # not (in older branches).
-try:
-    # newer main branch may expose a unified postgis/session factory inside libs.db
-    from libs.db import get_postgis_db  # type: ignore
-except Exception:
-    from libs.postgis_db import get_postgis_db
+# try:
+#     # newer main branch may expose a unified postgis/session factory inside libs.db
+#     from libs.db import get_postgis_db  # type: ignore
+# except Exception:
+#     from libs.postgis_db import get_postgis_db
 from models.audit import Audit
 
 # Add parent directory to path for imports
@@ -87,6 +85,16 @@ service_config = ServiceAppConfig(
     service_name="routing_service",
     cors_config=CORSMiddlewareConfig(),
 )
+
+from libs.db import DatabaseType, get_database_factory, initialize_databases
+
+# Initialize database connections
+initialize_databases([DatabaseType.POSTGRES, DatabaseType.POSTGIS])
+
+# Get database session dependency
+db_factory = get_database_factory()
+get_db = db_factory.get_session_dependency(DatabaseType.POSTGRES)
+get_postgis_db = db_factory.get_session_dependency(DatabaseType.POSTGIS)
 
 # Create factory and build app
 factory = FastAPIServiceFactory(service_config)
