@@ -121,7 +121,6 @@ def verify_token(
         ) from e
 
 
-
 # Router for Auth0 verification endpoints
 router = APIRouter(prefix="/auth0", tags=["auth"])
 
