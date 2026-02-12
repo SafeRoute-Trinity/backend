@@ -816,7 +816,7 @@ async def login_info(iss: Optional[str] = None):
 
 
 @app.get(
-    "/api/audit",
+    "/v1/users/audit",
     response_model=AuditListResponse,
     tags=["Audit"],
     summary="List audit logs (paginated)",
