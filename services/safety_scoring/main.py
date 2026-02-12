@@ -562,7 +562,7 @@ async def score_route(body: ScoreRouteRequest):
 
     segs = [
         SafetySegmentScore(
-            segment_id=f"seg_{i+1:03d}",
+            segment_id=f"seg_{i + 1:03d}",
             start_lat=s.start_lat,
             start_lon=s.start_lon,
             end_lat=s.end_lat,

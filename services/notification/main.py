@@ -132,7 +132,7 @@ async def create_sos(body: SOSNotificationRequest, db: AsyncSession = Depends(ge
                 event_type="notification",
                 user_id=_maybe_uuid(body.user_id) if hasattr(body, "user_id") else None,
                 event_id=None,
-                message=f"notification.create sos_id={body.sos_id} notification_id={getattr(resp,'notification_id', None)} status={getattr(resp,'status', None)}",
+                message=f"notification.create sos_id={body.sos_id} notification_id={getattr(resp, 'notification_id', None)} status={getattr(resp, 'status', None)}",
                 commit=True,
             )
         except Exception:
@@ -234,7 +234,7 @@ async def get_status(notification_id: str, db: AsyncSession = Depends(get_db)):
             event_type="notification",
             user_id=None,
             event_id=None,
-            message=f"notification.status_check notification_id={notification_id} status={getattr(res,'status', None)}",
+            message=f"notification.status_check notification_id={notification_id} status={getattr(res, 'status', None)}",
             commit=True,
         )
     except Exception:

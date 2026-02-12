@@ -35,6 +35,7 @@ from models.audit import Audit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from common.constants import AUTH_TOKEN_TTL
+from libs.auth.auth0_verify import verify_token
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -84,7 +85,27 @@ data_batches = {}
 emergency_status = {}
 
 
-# ========= Shared Models =========
+# ========= Helper Functions =========
+
+
+def extract_user_id_from_auth(auth: dict) -> str:
+    """
+    Extract user_id from Auth0 authentication token.
+
+    Auth0 'sub' claim format can be:
+    - "auth0|user_id" (with provider prefix)
+    - "user_id" (without prefix)
+
+    Args:
+        auth: Authentication dictionary containing JWT claims
+
+    Returns:
+        Extracted user_id string
+    """
+    auth_sub = auth.get("sub")
+    return auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+
+
 # ========= Metrics =========
 
 SERVICE_NAME = "user_management"
@@ -305,14 +326,14 @@ async def health():
     summary="Register a new user",
 )
 async def register_user(
-    body: RegisterRequest,
+    payload: RegisterRequest,
     db=Depends(get_db),
 ):
     """
     Register a new user account.
 
     Args:
-        body: Registration request
+        payload: Registration request
         db: Database session dependency
 
     Returns:
@@ -326,7 +347,7 @@ async def register_user(
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Check if email already exists (prevent duplicate registration)
-    result = await db.execute(select(User).where(User.email == body.email))
+    result = await db.execute(select(User).where(User.email == payload.email))
     existing = result.scalar_one_or_none()
     if existing:
         raise HTTPException(
@@ -337,10 +358,10 @@ async def register_user(
     # Write to PostgreSQL database
     user = User(
         user_id=user_id,
-        email=body.email,
-        password=body.password,
-        phone=body.phone,
-        name=body.name,
+        email=payload.email,
+        password=payload.password,
+        phone=payload.phone,
+        name=payload.name,
         created_at=now,
         last_login=None,
     )
@@ -362,20 +383,21 @@ async def register_user(
 
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         await db.rollback()
+        print(f"[UserMgmt] Database integrity error during user registration: {e}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Could not create user",
+            detail=f"Could not create user: {e}",
         )
 
     # Store in memory for backward compatibility (can be removed later)
     users[user_id] = {
         "user_id": user_id,
-        "email": body.email,
-        "phone": body.phone,
-        "name": body.name,
-        "password": body.password,
+        "email": payload.email,
+        "phone": payload.phone,
+        "name": payload.name,
+        "password": payload.password,
         "created_at": now,
         "last_login": None,
     }
@@ -390,9 +412,9 @@ async def register_user(
         user_id=user_id,
         status="created",
         auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-        email=body.email,
-        phone=body.phone,
-        name=body.name,
+        email=payload.email,
+        phone=payload.phone,
+        name=payload.name,
         created_at=now,
     )
 
@@ -403,14 +425,14 @@ async def register_user(
     tags=["User Management"],
 )
 async def login(
-    body: LoginRequest,
+    payload: LoginRequest,
     db=Depends(get_db),
 ):
     """
     Authenticate a user and return auth token.
 
     Args:
-        body: Login request with email and password
+        payload: Login request with email and password
         db: Database session dependency
 
     Returns:
@@ -423,10 +445,10 @@ async def login(
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Query PostgreSQL database for user
-    result = await db.execute(select(User).where(User.email == body.email))
+    result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
-    if not user or user.password != body.password:
+    if not user or user.password != payload.password:
         # Don't distinguish between "user not found" and "wrong password"
         # to prevent user enumeration
         raise HTTPException(
@@ -484,22 +506,36 @@ async def login(
 )
 async def save_preferences(
     user_id: str,
-    body: PreferencesRequest,
+    payload: PreferencesRequest,
+    auth: dict = Depends(verify_token),
     db=Depends(get_db),
 ):
     """
-    Save user preferences.
+    Save user preferences (protected endpoint).
 
     Args:
-        user_id: User identifier
+        user_id: User identifier (must match authenticated user)
         payload: Preferences to save
+        auth: Enhanced auth object from verify_token dependency
+        db: Database session dependency
 
     Returns:
         PreferencesResponse with saved preferences and timestamp
-    """
-    now = datetime.utcnow()
 
-    user_id = body.user_id
+    Raises:
+        HTTPException: 401 if not authenticated or user_id mismatch
+        HTTPException: 403 if user tries to modify another user's preferences
+    """
+    # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
+    auth_user_id = extract_user_id_from_auth(auth)
+
+    # Verify user can only modify their own preferences
+    if auth_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only modify your own preferences",
+        )
+    now = datetime.utcnow()
 
     # TODO: the user preference should be stored in DB, not in memory
 
@@ -508,7 +544,7 @@ async def save_preferences(
     user_data = users[user_id]
 
     # Update preferences
-    user_data["preferences"] = body.dict()
+    user_data["preferences"] = payload.dict()
     user_data["updated_at"] = now.isoformat()
 
     # Update in memory
@@ -522,9 +558,9 @@ async def save_preferences(
 
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=uuid.uuid4(user_id),
+        user_id=uuid.UUID(user_id),
         event_type="authentication",
-        event_id=uuid.uuid4(user_id),
+        event_id=uuid.UUID(user_id),
         message="save_preference",
         created_at=now,
         updated_at=now,
@@ -541,9 +577,9 @@ async def save_preferences(
         )
 
     return PreferencesResponse(
-        user_id=uuid.uuid4(user_id),
+        user_id=uuid.UUID(user_id),
         status="preferences_saved",
-        preferences=body,
+        preferences=payload,
         updated_at=now,
     )
 
@@ -554,46 +590,60 @@ async def save_preferences(
     tags=["User Management"],
 )
 async def upsert_trusted_contact(
-    body: TrustedContactUpsertRequest,
+    user_id: str,
+    payload: TrustedContactUpsertRequest,
+    auth: dict = Depends(verify_token),
     db=Depends(get_db),
 ):
     """
-    Create or update a trusted contact for a user.
+    Create or update a trusted contact for a user (protected endpoint).
 
     Args:
-        user_id: User identifier
-        body: Contact information to create or update
+        user_id: User identifier (must match authenticated user)
+        payload: Contact information to create or update
+        auth: Enhanced auth object from verify_token dependency
+        db: Database session dependency
 
     Returns:
         TrustedContactUpsertResponse with contact details and timestamp
+
+    Raises:
+        HTTPException: 401 if not authenticated
+        HTTPException: 403 if user tries to modify another user's contacts
     """
+    # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
+    auth_user_id = extract_user_id_from_auth(auth)
 
-    user_id = body.user_id
-
+    # Verify user can only modify their own contacts
+    if auth_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only modify your own trusted contacts",
+        )
     contacts = trusted_contacts.setdefault(user_id, [])
     # TODO: contact_id should be UUID
 
-    if body.contact_id:
+    if payload.contact_id:
         for c in contacts:
-            if c["contact_id"] == body.contact_id:
-                c.update(body.dict(exclude_unset=True))
-                contact_id = body.contact_id
+            if c["contact_id"] == payload.contact_id:
+                c.update(payload.dict(exclude_unset=True))
+                contact_id = payload.contact_id
                 break
         else:
-            contact_id = body.contact_id
-            contacts.append({**body.dict(), "contact_id": contact_id})
+            contact_id = payload.contact_id
+            contacts.append({**payload.dict(), "contact_id": contact_id})
     else:
         contact_id = f"ctc_{uuid.uuid4().hex[:6]}"
-        contacts.append({**body.dict(), "contact_id": contact_id})
+        contacts.append({**payload.dict(), "contact_id": contact_id})
     now: datetime = datetime.utcnow()
     stored = [c for c in contacts if c["contact_id"] == contact_id][0]
     contact_obj = TrustedContact(**stored)
 
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=uuid.uuid4(user_id),
+        user_id=uuid.UUID(user_id),
         event_type="authentication",
-        event_id=uuid.uuid4(user_id),
+        event_id=uuid.UUID(user_id),
         message="update trusted-contacts",
         created_at=now,
         updated_at=now,
@@ -610,7 +660,7 @@ async def upsert_trusted_contact(
         )
 
     return TrustedContactUpsertResponse(
-        user_id=uuid.uuid4(user_id),
+        user_id=uuid.UUID(user_id),
         contact_id=contact_id,
         status="contact_upserted",
         contact=contact_obj,
@@ -623,20 +673,36 @@ async def upsert_trusted_contact(
     response_model=UserResponse,
     tags=["User Management"],
 )
-async def get_user(user_id, db=Depends(get_db)):
+async def get_user(
+    user_id: str,
+    auth: dict = Depends(verify_token),
+    db=Depends(get_db),
+):
     """
-    Get user information by user ID.
+    Get user information by user ID (protected endpoint).
 
     Args:
-        user_id: User identifier
+        user_id: User identifier (must match authenticated user)
+        auth: Enhanced auth object from verify_token dependency
         db: Database session dependency
 
     Returns:
         UserResponse with user details
 
     Raises:
+        HTTPException: 401 if not authenticated
+        HTTPException: 403 if user tries to access another user's data
         HTTPException: 404 if user not found
     """
+    # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
+    auth_user_id = extract_user_id_from_auth(auth)
+
+    # Verify user can only access their own data
+    if auth_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only access your own user information",
+        )
     # Query PostgreSQL database (primary source of truth)
     result = await db.execute(select(User).where(User.user_id == user_id))
     db_user = result.scalar_one_or_none()
@@ -679,19 +745,34 @@ async def get_user(user_id, db=Depends(get_db)):
     tags=["User Management"],
 )
 async def list_trusted_contacts(
-    user_id,
+    user_id: str,
+    auth: dict = Depends(verify_token),
     include_inactive=Query(False, description="Mock flag; no effect in stub"),
 ):
     """
-    List all trusted contacts for a user.
+    List all trusted contacts for a user (protected endpoint).
 
     Args:
-        user_id: User identifier
+        user_id: User identifier (must match authenticated user)
+        auth: Enhanced auth object from verify_token dependency
         include_inactive: Flag to include inactive contacts (not implemented)
 
     Returns:
         TrustedContactsListResponse with list of contacts
+
+    Raises:
+        HTTPException: 401 if not authenticated
+        HTTPException: 403 if user tries to access another user's contacts
     """
+    # Extract user ID from auth sub (format: "auth0|user_id" or just "user_id")
+    auth_user_id = extract_user_id_from_auth(auth)
+
+    # Verify user can only access their own contacts
+    if auth_user_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only access your own trusted contacts",
+        )
     contacts = trusted_contacts.get(user_id, [])
     return TrustedContactsListResponse(
         user_id=user_id,
@@ -731,10 +812,10 @@ async def auth0_callback(code=None, state=None):
     Returns:
         Dict with callback message and received parameters
     """
+
     return {"message": "Auth0 callback received", "code": code, "state": state}
 
-
-# ========= Metrics endpoint for Prometheus =========
+    # ========= Metrics endpoint for Prometheus =========
 
 
 @app.get("/metrics")
@@ -744,3 +825,60 @@ async def metrics_endpoint():
     Prometheus will scrape this endpoint inside the cluster.
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get(
+    "/v1/users/me",
+    response_model=UserResponse,
+    tags=["User Management"],
+    summary="Get current user information (protected)",
+)
+async def get_current_user(
+    auth: dict = Depends(verify_token),
+    db=Depends(get_db),
+):
+    """
+    Get current user information (protected endpoint example).
+
+    This endpoint demonstrates how to use verify_token for stateless auth:
+    - Requires valid JWT token
+    - Validates token against Auth0 JWKS
+
+    Mobile app must send:
+    - Authorization: Bearer <access_token>
+
+    Args:
+        auth: Enhanced auth object from verify_token dependency
+            Contains JWT claims
+        db: Database session dependency
+
+    Returns:
+        UserResponse with user information
+
+    Raises:
+        HTTPException: 401 if JWT is invalid
+        HTTPException: 404 if user not found in database
+    """
+    # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
+    user_id = extract_user_id_from_auth(auth)
+
+    print(f"[UserMgmt] get_current_user called for: {user_id}")
+
+    # Query PostgreSQL database for user
+    result = await db.execute(select(User).where(User.user_id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found in database",
+        )
+
+    return UserResponse(
+        user_id=user.user_id,
+        name=user.name,
+        email=user.email,
+        phone=user.phone,
+        created_at=user.created_at,
+        last_login=user.last_login,
+    )

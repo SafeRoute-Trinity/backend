@@ -75,6 +75,7 @@ def verify_token(
 
         # Build public key and decode token
         public_key = RSAAlgorithm.from_jwk(json.dumps(key_dict))
+        print("[Auth0] Attempting to decode token...")
         payload = jwt.decode(
             token,
             public_key,
@@ -82,27 +83,35 @@ def verify_token(
             audience=API_AUDIENCE,
             issuer=ISSUER,
         )
+        print(f"[Auth0] Token verified successfully for user: {payload.get('sub')}")
         return payload
 
     except requests.exceptions.SSLError as e:
+        print(f"[Auth0] Token verification failed (SSL error fetching JWKS): {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"SSL error fetching JWKS: {e}",
         ) from e
     except requests.RequestException as e:
+        print(f"[Auth0] Token verification failed (HTTP error fetching JWKS): {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"HTTP error fetching JWKS: {e}",
         ) from e
     except jwt.ExpiredSignatureError as e:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired") from e
-    except jwt.InvalidAudienceError as e:
+        print(f"[Auth0] Token expired: {e}")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid audience"
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Token expired: {e}"
+        ) from e
+    except jwt.InvalidAudienceError as e:
+        print(f"[Auth0] Invalid audience: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid audience: {e}"
         ) from e
     except jwt.InvalidIssuerError as e:
+        print(f"[Auth0] Invalid issuer: {e}")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid issuer"
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid issuer: {e}"
         ) from e
     except Exception as e:
         raise HTTPException(
@@ -126,7 +135,7 @@ def verify(payload=Depends(verify_token)):
     Returns:
         Dict containing validation message and user ID from token
     """
-    return {"message": "Token valid ✅", "user": payload.get("sub")}
+    return {"message": "Token valid", "user": payload.get("sub")}
 
 
 # Minimal standalone app for local testing

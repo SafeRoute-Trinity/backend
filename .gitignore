@@ -32,5 +32,9 @@ htmlcov/
 .python-version
 .ruff_cache/
 .mypy_cache/
+
+
+#python venv
+asebackend-env/
 run_safety_service.sh
 
