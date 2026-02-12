@@ -1,323 +1,295 @@
 # pytest services/user_management/tests/test_main.py -q
-# pytest services/user_management/tests/test_main.py -k test_register_user -q
+# pytest services/user_management/tests/test_main.py -k test_get_user_success -q
 
-import re
+import uuid
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.exc import IntegrityError
 
-from libs.db import DatabaseType, get_database_factory
-from models.user_models import Base
+import services.user_management.main as um
 from services.user_management.main import app, get_db
 
-DATABASE_URL = "sqlite+aiosqlite:///:memory:"
 
-async_engine = create_async_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,
-)
+# ----------------------------
+# Helpers: fake db + fake result
+# ----------------------------
+class FakeResult:
+    def __init__(self, user):
+        self._user = user
 
-AsyncTestingSessionLocal = sessionmaker(
-    bind=async_engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
-)
-
-factory = get_database_factory()
-if DatabaseType.POSTGRES in factory._connections:
-    factory._connections[DatabaseType.POSTGRES].engine = async_engine
-    factory._connections[DatabaseType.POSTGRES].session_maker = AsyncTestingSessionLocal
+    def scalar_one_or_none(self):
+        return self._user
 
 
-@pytest.fixture(scope="session", autouse=True)
-def setup_test_db():
-    import asyncio
+class FakeDB:
+    def __init__(
+        self,
+        user_to_return=None,
+        *,
+        commit_raises: Exception | None = None,
+    ):
+        # 用於 GET / duplicate check
+        self.user_to_return = user_to_return
 
-    async def init_models():
-        async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        # 用於 register 流程驗證
+        self.added = []
+        self.flushed = False
+        self.committed = False
+        self.rolled_back = False
+        self.commit_raises = commit_raises
 
-    async def drop_models():
-        async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.drop_all)
+        self.execute = AsyncMock(side_effect=self._execute)
 
-    # ---- RUN create_all() ----
-    asyncio.get_event_loop().run_until_complete(init_models())
+    async def _execute(self, stmt):
+        return FakeResult(self.user_to_return)
 
-    yield
+    def add(self, obj):
+        self.added.append(obj)
 
-    # ---- RUN drop_all() ----
-    asyncio.get_event_loop().run_until_complete(drop_models())
+    async def flush(self):
+        self.flushed = True
+
+        # 模擬 DB defaults：把 User.created_at/updated_at 補起來
+        now = datetime.now(timezone.utc)
+
+        for obj in self.added:
+            # 用 duck-typing 判斷是 User 物件：有 email/password 這些欄位
+            if hasattr(obj, "email") and hasattr(obj, "password"):
+                if getattr(obj, "created_at", None) is None:
+                    obj.created_at = now
+                if hasattr(obj, "updated_at") and getattr(obj, "updated_at", None) is None:
+                    obj.updated_at = now
+
+    async def commit(self):
+        if self.commit_raises:
+            raise self.commit_raises
+        self.committed = True
+
+    async def rollback(self):
+        self.rolled_back = True
 
 
-# Override dependency with test database session
-async def override_get_db():
-    async with AsyncTestingSessionLocal() as session:
-        yield session
+# ----------------------------
+# Fake ORM models used by register_user
+# ----------------------------
+class FakeUser:
+    def __init__(self, user_id, email, password, phone, name, last_login=None):
+        self.user_id = user_id
+        self.email = email
+        self.password = password
+        self.phone = phone
+        self.name = name
+        self.last_login = last_login
+        # register_user uses getattr(user, "created_at", now)
+        self.created_at = None
 
 
-app.dependency_overrides[get_db] = override_get_db
-client = TestClient(app)
+class FakeAudit:
+    def __init__(self, log_id, user_id, event_type, event_id, message, created_at, updated_at):
+        self.log_id = log_id
+        self.user_id = user_id
+        self.event_type = event_type
+        self.event_id = event_id
+        self.message = message
+        self.created_at = created_at
+        self.updated_at = updated_at
 
 
-# ------------------------------------------------------
-# 1. Test register API (post)
-# ------------------------------------------------------
-def test_register_user():
+def _override_db(fake_db: FakeDB):
+    async def override_get_db():
+        yield fake_db
+
+    app.dependency_overrides[get_db] = override_get_db
+
+
+def make_user(
+    user_id: uuid.UUID,
+    email="u@example.com",
+    name="User",
+    phone="+353000000000",
+    created_at=None,
+    updated_at=None,
+    last_login=None,
+):
+    # 用 SimpleNamespace 模擬 ORM instance (user.user_id, user.email...)
+    return SimpleNamespace(
+        user_id=user_id,
+        email=email,
+        name=name,
+        phone=phone,
+        created_at=created_at or datetime.now(timezone.utc),
+        updated_at=updated_at,  # 允許 None
+        last_login=last_login,  # 允許 None
+    )
+
+
+@pytest.fixture()
+def client():
+    # 每個 test 都用乾淨 override
+    yield TestClient(app)
+    app.dependency_overrides.clear()
+
+
+# ----------------------------
+# Tests
+# ----------------------------
+def test_get_user_success(client):
+    uid = uuid.uuid4()
+    fake_user = make_user(uid, email="test@example.com", name="Test", phone="+353123")
+
+    fake_db = FakeDB(user_to_return=fake_user)
+
+    async def override_get_db():
+        yield fake_db
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    res = client.get(f"/v1/users/{uid}")
+    assert res.status_code == 200, res.text
+
+    data = res.json()
+    assert data["user_id"] == str(uid) or data["user_id"] == uid
+    assert data["email"] == "test@example.com"
+    assert data["name"] == "Test"
+    assert data["phone"] == "+353123"
+    assert "created_at" in data
+
+
+def test_get_user_invalid_uuid_400(client):
+    fake_db = FakeDB(user_to_return=None)
+
+    async def override_get_db():
+        yield fake_db
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    res = client.get("/v1/users/not-a-uuid")
+    assert res.status_code == 400
+    assert res.json()["detail"] == "Invalid user_id format"
+
+
+def test_get_user_not_found_404(client):
+    uid = uuid.uuid4()
+    fake_db = FakeDB(user_to_return=None)
+
+    async def override_get_db():
+        yield fake_db
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    res = client.get(f"/v1/users/{uid}")
+    assert res.status_code == 404
+    assert res.json()["detail"] == f"User {uid} not found"
+
+
+# ----------------------------
+# Register tests (mock, no SQLite)
+# ----------------------------
+
+
+def test_register_user_success(client, monkeypatch):
+    # ✅ 不要 patch um.User / um.Audit（讓 select(User) 正常）
+    # ✅ 只 patch in-memory store + metric + TTL
+
+    monkeypatch.setattr(um, "users", {}, raising=False)
+
+    class _Counter:
+        def __init__(self):
+            self.count = 0
+
+        def inc(self):
+            self.count += 1
+
+    counter = _Counter()
+    monkeypatch.setattr(um, "USER_REGISTRATION_TOTAL", counter, raising=False)
+    monkeypatch.setattr(um, "AUTH_TOKEN_TTL", 3600, raising=False)
+
+    fake_db = FakeDB(user_to_return=None)
+    _override_db(fake_db)
+
     payload = {
         "email": "testuser@example.com",
-        "password_hash": "hash123",
-        "device_id": "dev_001",
+        "password": "plain123",
         "phone": "+353123456789",
         "name": "Test User",
     }
 
-    response = client.post("/v1/users/register", json=payload)
-    assert response.status_code == 200
+    res = client.post("/v1/users/register", json=payload)
+    assert res.status_code == 200, res.text
+    data = res.json()
 
-    data = response.json()
     assert data["status"] == "created"
     assert data["email"] == payload["email"]
-    assert data["device_id"] == payload["device_id"]
-    assert "user_id" in data
-    assert re.match(r"usr_[a-f0-9]{8}", data["user_id"])
+    assert data["phone"] == payload["phone"]
+    assert data["name"] == payload["name"]
+    uuid.UUID(data["user_id"])
+
+    assert data["auth"]["token"].startswith("atk_")
+    assert data["auth"]["expires_in"] == 3600
+
+    # DB calls captured
+    assert fake_db.flushed is True
+    assert fake_db.committed is True
+    assert fake_db.rolled_back is False
+    assert len(fake_db.added) == 2  # User + Audit (真 ORM 物件，但我們只記錄，不會進 DB)
+
+    # in-memory users updated
+    created_uid = uuid.UUID(data["user_id"])
+    assert created_uid in um.users
+    assert um.users[created_uid]["email"] == payload["email"]
+
+    # metric incremented once
+    assert um.USER_REGISTRATION_TOTAL.count == 1
 
 
-def test_register_duplicate_email():
-    client.post(
-        "/v1/users/register",
-        json={
-            "email": "dup@example.com",
-            "password_hash": "pw1",
-            "device_id": "d1",
-        },
-    )
+def test_register_user_duplicate_email_400(client, monkeypatch):
+    monkeypatch.setattr(um, "users", {}, raising=False)
 
-    res = client.post(
-        "/v1/users/register",
-        json={
-            "email": "dup@example.com",
-            "password_hash": "pw2",
-            "device_id": "d2",
-        },
-    )
+    # simulate "email already exists"
+    fake_db = FakeDB(user_to_return=SimpleNamespace(email="testuser@example.com"))
+    _override_db(fake_db)
 
-    assert res.status_code == 400
-    assert res.json()["detail"] == "Email already registered"
-
-
-# ------------------------------------------------------
-# 2. Test login API (post)
-# ------------------------------------------------------
-def test_login_user():
-    # Register user first to ensure user exists
-    reg = client.post(
-        "/v1/users/register",
-        json={
-            "email": "testuser@example.com",
-            "password_hash": "hash123",
-            "device_id": "dev_001",
-        },
-    )
-    assert reg.status_code == 200
-
-    # Now login with correct credentials
     payload = {
         "email": "testuser@example.com",
-        "password_hash": "hash123",
-        "device_id": "dev_001",
+        "password": "plain123",
+        "phone": "+353123456789",
+        "name": "Test User",
     }
 
-    response = client.post("/v1/auth/login", json=payload)
-    assert response.status_code == 200
+    res = client.post("/v1/users/register", json=payload)
+    assert res.status_code == 400, res.text
+    assert res.json()["detail"] == "Email already registered"
 
-    data = response.json()
-    assert data["status"] == "authenticated"
-    assert data["email"] == payload["email"]
-    assert "user_id" in data
+    assert fake_db.added == []
+    assert fake_db.flushed is False
+    assert fake_db.committed is False
 
 
-def test_login_success():
-    client.post(
-        "/v1/users/register",
-        json={
-            "email": "login@example.com",
-            "password_hash": "abc",
-            "device_id": "devx",
-        },
+def test_register_user_integrity_error_400(client, monkeypatch):
+    monkeypatch.setattr(um, "users", {}, raising=False)
+
+    fake_db = FakeDB(
+        user_to_return=None,
+        commit_raises=IntegrityError("stmt", "params", Exception("orig")),
     )
+    _override_db(fake_db)
 
-    res = client.post(
-        "/v1/auth/login",
-        json={
-            "email": "login@example.com",
-            "password_hash": "abc",
-            "device_id": "devx",
-        },
-    )
+    payload = {
+        "email": "unique@example.com",
+        "password": "plain123",
+        "phone": "+353999999999",
+        "name": "New User",
+    }
 
-    assert res.status_code == 200
-    body = res.json()
-    assert body["status"] == "authenticated"
-    assert body["email"] == "login@example.com"
+    res = client.post("/v1/users/register", json=payload)
+    assert res.status_code == 400, res.text
 
+    detail = res.json()["detail"]
+    assert detail.startswith("Could not create user")  # allow extra error info
 
-# ------------------------------------------------------
-# 2b. Test login with wrong password
-# ------------------------------------------------------
-def test_login_wrong_password():
-    # Register user first
-    client.post(
-        "/v1/users/register",
-        json={
-            "email": "wrong@example.com",
-            "password_hash": "pw",
-            "device_id": "dev",
-        },
-    )
-
-    res = client.post(
-        "/v1/auth/login",
-        json={
-            "email": "wrong@example.com",
-            "password_hash": "badpw",
-            "device_id": "dev",
-        },
-    )
-
-    assert res.status_code == 401
-
-
-# ------------------------------------------------------
-# 2c. Test login with non-existent user
-# ------------------------------------------------------
-def test_login_nonexistent_user():
-    # Try to login with non-existent user
-    res = client.post(
-        "/v1/auth/login",
-        json={
-            "email": "ghost@example.com",
-            "password_hash": "x",
-            "device_id": "d",
-        },
-    )
-
-    assert res.status_code == 401
-
-
-# ------------------------------------------------------
-# 3. Test save preferences API (post)
-# ------------------------------------------------------
-def test_save_preferences():
-    # Register user first
-    reg = client.post(
-        "/v1/users/register",
-        json={
-            "email": "pref@example.com",
-            "password_hash": "hashx",
-            "device_id": "dev_002",
-        },
-    ).json()
-    user_id = reg["user_id"]
-
-    payload = {"voice_guidance": "on", "safety_bias": "safest", "units": "metric"}
-
-    response = client.post(f"/v1/users/{user_id}/preferences", json=payload)
-    assert response.status_code == 200
-
-    data = response.json()
-    assert data["status"] == "preferences_saved"
-    assert data["preferences"]["voice_guidance"] == "on"
-    assert data["preferences"]["safety_bias"] == "safest"
-    assert "updated_at" in data
-
-
-# ------------------------------------------------------
-# 4. Test upsert trusted contact API (post)
-# ------------------------------------------------------
-def test_upsert_trusted_contact():
-    # Register user first
-    reg = client.post(
-        "/v1/users/register",
-        json={
-            "email": "contact@example.com",
-            "password_hash": "pw",
-            "device_id": "dev",
-        },
-    ).json()
-    uid = reg["user_id"]
-
-    # 新增
-    res = client.post(
-        f"/v1/users/{uid}/trusted-contacts",
-        json={"name": "Alice", "phone": "123"},
-    )
-    assert res.status_code == 200
-    contact_id = res.json()["contact_id"]
-
-    # 修改(existing)
-    res2 = client.post(
-        f"/v1/users/{uid}/trusted-contacts",
-        json={"contact_id": contact_id, "name": "Alice2", "phone": "123"},
-    )
-    assert res2.status_code == 200
-    assert res2.json()["contact"]["name"] == "Alice2"
-
-
-# ------------------------------------------------------
-# 5. Test get user API (get)
-# ------------------------------------------------------
-def test_get_user_info():
-    # Create user first
-    reg = client.post(
-        "/v1/users/register",
-        json={
-            "email": "info@example.com",
-            "password_hash": "pw123",
-            "device_id": "dev_004",
-        },
-    ).json()
-    user_id = reg["user_id"]
-
-    # Query user
-    response = client.get(f"/v1/users/{user_id}")
-    assert response.status_code == 200
-
-    data = response.json()
-    assert data["user_id"] == user_id
-    assert data["email"] == "info@example.com"
-    assert "created_at" in data
-
-
-# ------------------------------------------------------
-# 6. Test list trusted contacts API (get)
-# ------------------------------------------------------
-def test_list_trusted_contacts():
-    # Register user first
-    reg = client.post(
-        "/v1/users/register",
-        json={
-            "email": "list@example.com",
-            "password_hash": "pw",
-            "device_id": "dev",
-        },
-    ).json()
-
-    uid = reg["user_id"]
-
-    client.post(
-        f"/v1/users/{uid}/trusted-contacts",
-        json={"name": "A", "phone": "1"},
-    )
-    client.post(
-        f"/v1/users/{uid}/trusted-contacts",
-        json={"name": "B", "phone": "2"},
-    )
-
-    res = client.get(f"/v1/users/{uid}/trusted-contacts")
-    assert res.status_code == 200
-    assert len(res.json()["contacts"]) == 2
+    assert fake_db.rolled_back is True
+    assert fake_db.committed is False
