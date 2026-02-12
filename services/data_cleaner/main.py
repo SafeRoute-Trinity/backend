@@ -118,11 +118,6 @@ async def root():
     return {"service": "data_cleaner", "status": "running"}
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "data_cleaner"}
-
-
 @app.post("/v1/data/collect", response_model=DataCollectResponse)
 async def collect(body: DataCollectRequest):
     now = datetime.utcnow()
@@ -160,7 +155,7 @@ async def sanitize(body: DataSanitizeRequest):
 
 @app.post("/v1/audit/log", response_model=AuditLogResponse)
 async def audit_log(body: AuditLogRequest):
-    log_id = f"log_{len(AUDIT)+1:06d}"
+    log_id = f"log_{len(AUDIT) + 1:06d}"
     AUDIT.append({**body.dict(), "log_id": log_id})
     return AuditLogResponse(log_id=log_id, status="recorded", created_at=datetime.utcnow())
 

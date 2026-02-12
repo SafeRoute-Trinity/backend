@@ -2,15 +2,24 @@
 # uvicorn services.sos.main:app --host 0.0.0.0 --port 20006 --reload
 # Docs: http://127.0.0.1:20006/docs
 
+import logging
 import os
 import sys
 import uuid
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
+import httpx
 from dotenv import load_dotenv
-from fastapi import HTTPException, Path
+from fastapi import Depends, HTTPException, Path
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from libs.audit_logger import write_audit
+from libs.db import DatabaseType, get_database_factory, initialize_databases
+
+logger = logging.getLogger(__name__)
+
 
 # Load environment variables from .env file
 load_dotenv()
@@ -23,7 +32,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-from libs.twilio_client import get_twilio_client
+from libs.service_urls import NOTIFICATION_SERVICE_URL
 
 # Create service configuration
 service_config = ServiceAppConfig(
@@ -32,6 +41,13 @@ service_config = ServiceAppConfig(
     service_name="sos",
     cors_config=CORSMiddlewareConfig(),
 )
+
+# Initialize database connections
+initialize_databases([DatabaseType.POSTGRES])
+
+# Get database session dependency
+db_factory = get_database_factory()
+get_db = db_factory.get_session_dependency(DatabaseType.POSTGRES)
 
 # Create factory and build app
 factory = FastAPIServiceFactory(service_config)
@@ -49,6 +65,19 @@ SOS_SMS_TOTAL = factory.add_business_metric(
 )
 
 STATUS = {}
+
+
+def _uuid_or_none(val: Optional[Union[str, uuid.UUID]]):
+    if val is None:
+        return None
+    if isinstance(val, uuid.UUID):
+        return val
+    if isinstance(val, str):
+        try:
+            return uuid.UUID(val)
+        except Exception:
+            return None
+    return None
 
 
 class Point(BaseModel):
@@ -85,8 +114,10 @@ class EmergencySMSRequest(BaseModel):
     user_id: str
     location: Optional[Location] = None
     emergency_contact: SOSContact
-    message_template: str
+    message_template: Optional[str] = None
     variables: dict[str, str]
+    notification_type: Optional[str] = "sos"
+    locale: Optional[str] = "en"
 
 
 class EmergencySMSResponse(BaseModel):
@@ -122,72 +153,119 @@ async def root():
     return {"service": "sos", "status": "running"}
 
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "sos"}
-
-
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
-async def call(body: EmergencyCallRequest):
-    cid = f"CALL-{uuid.uuid4().hex[:6]}"
+async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
+    # Validate sos_id is UUID
+    parsed_sos_id = _uuid_or_none(body.sos_id)
+    if parsed_sos_id is None:
+        raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/call",
+                json=body.model_dump(),
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as e:
+        # Log the httpx error details for easier debugging
+        logger.exception(
+            "Notification service call failed for sos_id=%s phone=%s: %s",
+            body.sos_id,
+            body.phone_number,
+            repr(e),
+        )
+
+        await write_audit(
+            db=db,
+            event_type="emergency",
+            user_id=None,  # call request 没 user_id 字段
+            event_id=parsed_sos_id,
+            message=f"sos_call_failed sos_id={body.sos_id} phone={body.phone_number} reason={body.call_reason} error={str(e)}",
+            commit=True,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to dispatch SOS call via notification service: {str(e)}",
+        )
+
     now = datetime.utcnow()
     STATUS[body.sos_id] = {
         "sos_id": body.sos_id,
-        "call_status": "initiated",
+        "call_status": data.get("status", "failed"),
         "sms_status": "not_sent",
         "last_update": now,
     }
 
-    # Business metric: count SOS calls
     SOS_CALLS_TOTAL.inc()
-
-    return EmergencyCallResponse(status="initiated", call_id=cid, timestamp=now)
+    # Audit call success
+    try:
+        await write_audit(
+            db=db,
+            event_type="emergency",
+            user_id=None,
+            event_id=parsed_sos_id,
+            message=f"sos_call_initiated sos_id={body.sos_id} phone={body.phone_number} status={data.get('status')}",
+            commit=True,
+        )
+    except Exception:
+        pass
+    return EmergencyCallResponse(**data)
 
 
 @app.post("/v1/emergency/sms", response_model=EmergencySMSResponse)
-async def sms(body: EmergencySMSRequest):
+async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     """
     Send emergency SMS with rich details (templates, variables, location).
-    This is the production SMS sender using Twilio.
+    Delegates delivery to the Notification service.
     """
-    now = datetime.utcnow()
+    # Validate required UUIDs: sos_id and user_id
+    parsed_sos_id = _uuid_or_none(body.sos_id)
+    parsed_user_id = _uuid_or_none(body.user_id)
+    if parsed_sos_id is None:
+        raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
+    if parsed_user_id is None:
+        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
 
-    # Format the message with variables
-    message = body.message_template
-    for key, value in body.variables.items():
-        message = message.replace(f"{{{key}}}", value)
-
-    # Add location if provided
-    if body.location:
-        location_text = (
-            f"\n\nLocation: https://maps.google.com/?q={body.location.lat},{body.location.lon}"
-        )
-        if body.location.accuracy_m:
-            location_text += f" (±{body.location.accuracy_m}m)"
-        message += location_text
-
-    # Send SMS via Twilio
     try:
-        twilio = get_twilio_client()
-        result = twilio.send_sms(to_phone=body.emergency_contact.phone, message=message)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
+                json=body.model_dump(),
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPError as e:
+        # Log and audit SMS failure
+        logger.exception(
+            "Notification service SMS call failed for sos_id=%s user_id=%s recipient=%s: %s",
+            body.sos_id,
+            body.user_id,
+            body.emergency_contact.phone,
+            repr(e),
+        )
 
-        if result["status"] == "sent":
-            sid = result["sid"]
-            sms_status = "sent"
-            status = "sent"
-        else:
-            sid = f"SMS-{uuid.uuid4().hex[:6]}"
-            sms_status = "failed"
-            status = "failed"
-            print(f"SMS send failed: {result.get('error')}")
+        try:
+            await write_audit(
+                db=db,
+                event_type="emergency",
+                user_id=parsed_user_id,
+                event_id=parsed_sos_id,
+                message=f"sos_sms_failed sos_id={body.sos_id} user_id={body.user_id} recipient={body.emergency_contact.phone} error={str(e)}",
+                commit=True,
+            )
+        except Exception:
+            # Audit failures should not block the main error
+            pass
 
-    except Exception as e:
-        print(f"Error sending SMS: {e}")
-        sid = f"SMS-{uuid.uuid4().hex[:6]}"
-        sms_status = "failed"
-        status = "failed"
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to send SMS via notification service: {str(e)}",
+        )
 
     # Update status
+    now = datetime.utcnow()
     s = STATUS.setdefault(
         body.sos_id,
         {
@@ -197,24 +275,36 @@ async def sms(body: EmergencySMSRequest):
             "last_update": now,
         },
     )
-    s["sms_status"] = sms_status
+    s["sms_status"] = data.get("status", "failed")
     s["last_update"] = now
 
     # Business metric: count SOS SMS
     SOS_SMS_TOTAL.inc()
 
-    return EmergencySMSResponse(status="sent", sms_id=sid, timestamp=now)
-    return EmergencySMSResponse(
-        status=status,
-        sms_id=sid,
-        timestamp=now,
-        message_sent=message,
-        recipient=body.emergency_contact.phone,
-    )
+    # Audit SMS success
+    try:
+        await write_audit(
+            db=db,
+            event_type="emergency",
+            user_id=parsed_user_id,
+            event_id=parsed_sos_id,
+            message=f"sos_sms_sent sos_id={body.sos_id} user_id={body.user_id} sms_id={data.get('sms_id')} recipient={data.get('recipient')}",
+            commit=True,
+        )
+    except Exception:
+        # don't let audit failures affect response
+        pass
+
+    return EmergencySMSResponse(**data)
 
 
 @app.get("/v1/emergency/{sos_id}/status", response_model=EmergencyStatusResponse)
 async def get_status(sos_id: str = Path(..., description="SOS event to check")):
+    # Validate sos_id is UUID
+    parsed_sos_id = _uuid_or_none(sos_id)
+    if parsed_sos_id is None:
+        raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
+
     now = datetime.utcnow()
     s = STATUS.get(
         sos_id,
@@ -229,25 +319,36 @@ async def get_status(sos_id: str = Path(..., description="SOS event to check")):
 
 
 @app.post("/v1/test/sms", response_model=TestSMSResponse)
-async def test_sms(body: TestSMSRequest):
+async def test_sms(body: TestSMSRequest, db: AsyncSession = Depends(get_db)):
     """
     Test endpoint to send an SMS to a phone number using Twilio.
 
     Phone number must be in E.164 format (e.g., +1234567890)
     """
     try:
-        twilio = get_twilio_client()
-        result = twilio.send_sms(to_phone=body.to_phone, message=body.message)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{NOTIFICATION_SERVICE_URL}/v1/test/sms", json=body.model_dump()
+            )
+            response.raise_for_status()
+            return TestSMSResponse(**response.json())
+    except httpx.HTTPError as e:
+        # Log and audit test sms failure
+        logger.exception("Notification test SMS call failed to=%s: %s", body.to_phone, repr(e))
 
-        return TestSMSResponse(
-            status=result["status"],
-            sid=result["sid"],
-            to=result["to"],
-            message=body.message,
-            error=result.get("error"),
+        try:
+            await write_audit(
+                db=db,
+                event_type="notification",
+                user_id=None,
+                event_id=None,
+                message=f"test_sms_failed to={body.to_phone} error={str(e)}",
+                commit=True,
+            )
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to send SMS via notification service: {str(e)}",
         )
-    except ValueError as e:
-        # Twilio not configured
-        raise HTTPException(status_code=500, detail=f"Twilio configuration error: {str(e)}")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")

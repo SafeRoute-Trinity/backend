@@ -45,7 +45,7 @@ services:
     build:
       context: .
       dockerfile: services/safety_scoring/dockerfile
-    image: saferoute/safety_score:latest
+    image: saferoute/safety_scoring:latest
     container_name: saferoute-safety-scoring
     platform: linux/amd64
     ports:
@@ -53,6 +53,13 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      - POSTGIS_HOST=postgis
+      - POSTGIS_PORT=5432
+      - POSTGIS_USER=saferoute
+      - POSTGIS_PASSWORD=Owen1SL8te
+      - POSTGIS_DATABASE=saferoute_geo
+    depends_on:
+      - postgis
     restart: unless-stopped
 
   feedback-service:
@@ -82,3 +89,20 @@ services:
       - PYTHONUNBUFFERED=1
       - PORT=80
     restart: unless-stopped
+
+  postgis:
+    image: postgis/postgis:15-3.3
+    container_name: saferoute-postgis
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=saferoute
+      - POSTGRES_PASSWORD=Owen1SL8te
+      - POSTGRES_DB=saferoute_geo
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+
+volumes:
+  postgis_data:
