@@ -1,5 +1,5 @@
 # pytest services/user_management/tests/test_main.py -q
-# pytest services/user_management/tests/test_main.py -k test_register_user -q
+# pytest services/user_management/tests/test_main.py -k test_get_user_success -q
 
 import uuid
 from datetime import datetime, timezone
@@ -287,7 +287,9 @@ def test_register_user_integrity_error_400(client, monkeypatch):
 
     res = client.post("/v1/users/register", json=payload)
     assert res.status_code == 400, res.text
-    assert res.json()["detail"] == "Could not create user"
+
+    detail = res.json()["detail"]
+    assert detail.startswith("Could not create user")  # allow extra error info
 
     assert fake_db.rolled_back is True
     assert fake_db.committed is False

@@ -1,4 +1,6 @@
 # pytest services/user_management/tests/test_trusted_contacts.py -q
+# pytest services/user_management/tests/test_trusted_contacts.py -k test_list_trusted_contacts_success -q
+
 
 import uuid
 from datetime import datetime, timezone

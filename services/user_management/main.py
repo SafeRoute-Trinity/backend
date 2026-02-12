@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from fastapi import Depends, HTTPException, Request, Response, status
+from fastapi import Depends, HTTPException, Query, Request, Response, status
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -25,7 +25,7 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import desc, select
+from sqlalchemy import desc, func, select
 from sqlalchemy.exc import IntegrityError
 
 from models.audit import Audit
@@ -35,6 +35,7 @@ from models.audit import Audit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from common.constants import AUTH_TOKEN_TTL
+from libs.auth.auth0_verify import verify_token
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -84,7 +85,27 @@ data_batches = {}
 emergency_status = {}
 
 
-# ========= Shared Models =========
+# ========= Helper Functions =========
+
+
+def extract_user_id_from_auth(auth: dict) -> str:
+    """
+    Extract user_id from Auth0 authentication token.
+
+    Auth0 'sub' claim format can be:
+    - "auth0|user_id" (with provider prefix)
+    - "user_id" (without prefix)
+
+    Args:
+        auth: Authentication dictionary containing JWT claims
+
+    Returns:
+        Extracted user_id string
+    """
+    auth_sub = auth.get("sub")
+    return auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+
+
 # ========= Metrics =========
 
 SERVICE_NAME = "user_management"
@@ -152,6 +173,24 @@ class Point(BaseModel):
 
     lat: float
     lon: float
+
+
+# ======== Audit Log Models ===========================
+class AuditLogResponse(BaseModel):
+    log_id: uuid.UUID
+    user_id: Optional[uuid.UUID] = None
+    event_type: str
+    event_id: Optional[uuid.UUID] = None
+    message: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AuditListResponse(BaseModel):
+    data: List[AuditLogResponse]
+    total: int
+    page: int
+    page_size: int
 
 
 # ========= User Management Models =========
@@ -285,7 +324,11 @@ async def root():
     response_model=UserResponse,
     tags=["User Management"],
 )
-async def get_user(user_id: str, db=Depends(get_db)):
+async def get_user(
+    user_id: str,
+    # auth: dict = Depends(verify_token),
+    db=Depends(get_db),
+):
     """
     Get user information by user ID (DB is the source of truth).
 
@@ -336,12 +379,11 @@ async def get_user(user_id: str, db=Depends(get_db)):
     summary="Register a new user",
 )
 async def register_user(
-    body: RegisterRequest,
+    payload: RegisterRequest,
     db=Depends(get_db),
 ):
     """
     Register a new user account.
-
     DB schema (saferoute.users):
       - user_id UUID PK default gen_random_uuid()
       - created_at timestamptz not null default now()
@@ -353,7 +395,7 @@ async def register_user(
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Check if email already exists (prevent duplicate registration)
-    result = await db.execute(select(User).where(User.email == body.email))
+    result = await db.execute(select(User).where(User.email == payload.email))
     existing = result.scalar_one_or_none()
     if existing:
         raise HTTPException(
@@ -366,10 +408,10 @@ async def register_user(
     # Let DB generate: user_id, created_at, updated_at (per DB defaults)
     user = User(
         user_id=user_id,
-        email=body.email,
-        password=body.password,  # TODO: hash this
-        phone=body.phone,
-        name=body.name,
+        email=payload.email,
+        password=payload.password,  # TODO: hash this
+        phone=payload.phone,
+        name=payload.name,
         last_login=None,
     )
 
@@ -393,12 +435,12 @@ async def register_user(
 
     try:
         await db.commit()
-    except IntegrityError:
+    except IntegrityError as e:
         await db.rollback()
         # Most common: unique violation on email
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Could not create user",
+            detail=f"Could not create user: {e}",
         )
 
     # Backward compatibility: in-memory store
@@ -435,12 +477,11 @@ async def register_user(
     tags=["User Management"],
 )
 async def login(
-    body: LoginRequest,
+    payload: LoginRequest,
     db=Depends(get_db),
 ):
     """
     Authenticate a user and return auth token.
-
     DB schema (saferoute.users):
       - last_login timestamptz NULL
       - updated_at timestamptz NOT NULL default now()
@@ -449,11 +490,12 @@ async def login(
     token = f"atk_{uuid.uuid4().hex[:6]}"
 
     # Query PostgreSQL database for user
-    result = await db.execute(select(User).where(User.email == body.email))
+    result = await db.execute(select(User).where(User.email == payload.email))
     user = result.scalar_one_or_none()
 
-    # Don't distinguish between "user not found" and "wrong password"
-    if not user or user.password != body.password:
+    if not user or user.password != payload.password:
+        # Don't distinguish between "user not found" and "wrong password"
+        # to prevent user enumeration
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
@@ -568,7 +610,8 @@ async def get_preferences(
 )
 async def save_preferences(
     user_id: str,
-    body: PreferencesRequest,
+    payload: PreferencesRequest,
+    # auth: dict = Depends(verify_token), # Temporarily not use auth
     db=Depends(get_db),
 ):
     """
@@ -605,14 +648,14 @@ async def save_preferences(
     pref = result.scalar_one_or_none()
 
     if pref:
-        pref.voice_guidance = body.voice_guidance
-        pref.units = body.units
+        pref.voice_guidance = payload.voice_guidance
+        pref.units = payload.units
         pref.updated_at = now
     else:
         pref = UserPreferences(
             user_id=user_uuid,
-            voice_guidance=body.voice_guidance,
-            units=body.units,
+            voice_guidance=payload.voice_guidance,
+            units=payload.units,
             # created_at has DB default now(); can omit, but ok to set explicitly if you want:
             # created_at=now,
             updated_at=now,
@@ -705,6 +748,23 @@ async def list_trusted_contacts(
     )
 
 
+@app.get("/login", tags=["Auth"])
+async def login_info(iss: Optional[str] = None):
+    """
+    Auth0 login information endpoint.
+
+    This endpoint is called by Auth0 for validation purposes.
+    Returns information about the authentication configuration.
+    """
+    return {
+        "message": "Authentication is handled by Auth0",
+        "auth0_domain": "saferoute.eu.auth0.com",
+        "issuer": iss,
+        "mobile_callback": "saferouteapp://auth/callback",
+        "note": "Mobile clients should use Auth0 native authentication",
+    }
+
+
 @app.post(
     "/v1/users/{user_id}/trusted-contacts",
     response_model=TrustedContactUpsertResponse,
@@ -713,6 +773,7 @@ async def list_trusted_contacts(
 async def upsert_trusted_contact(
     user_id: str,
     body: TrustedContactUpsertRequest,
+    # auth: dict = Depends(verify_token), # Temporarily not use auth
     db=Depends(get_db),
 ):
     """
@@ -800,21 +861,62 @@ async def upsert_trusted_contact(
     )
 
 
-@app.get("/login", tags=["Auth"])
-async def login_info(iss: Optional[str] = None):
-    """
-    Auth0 login information endpoint.
+@app.get(
+    "/api/audit",
+    response_model=AuditListResponse,
+    tags=["Audit"],
+    summary="List audit logs (paginated)",
+)
+async def list_audit_logs(
+    user_id: Optional[uuid.UUID] = Query(None),
+    event_type: Optional[str] = Query(None),
+    start: Optional[datetime] = Query(None, description="Filter created_at >= start"),
+    end: Optional[datetime] = Query(None, description="Filter created_at <= end"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    db=Depends(get_db),
+):
+    # 1) build filters
+    filters = []
+    if user_id is not None:
+        filters.append(Audit.user_id == user_id)
+    if event_type is not None and event_type != "":
+        filters.append(Audit.event_type == event_type)
+    if start is not None:
+        filters.append(Audit.created_at >= start)
+    if end is not None:
+        filters.append(Audit.created_at <= end)
 
-    This endpoint is called by Auth0 for validation purposes.
-    Returns information about the authentication configuration.
-    """
-    return {
-        "message": "Authentication is handled by Auth0",
-        "auth0_domain": "saferoute.eu.auth0.com",
-        "issuer": iss,
-        "mobile_callback": "saferouteapp://auth/callback",
-        "note": "Mobile clients should use Auth0 native authentication",
-    }
+    # 2) total count
+    count_stmt = select(func.count()).select_from(Audit)
+    if filters:
+        count_stmt = count_stmt.where(*filters)
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    # 3) page query
+    offset = (page - 1) * page_size
+    stmt = select(Audit).order_by(Audit.created_at.desc()).offset(offset).limit(page_size)
+    if filters:
+        stmt = stmt.where(*filters)
+
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    # 4) map to response
+    data = [
+        AuditLogResponse(
+            log_id=r.log_id,
+            user_id=r.user_id,
+            event_type=r.event_type,
+            event_id=r.event_id,
+            message=r.message,
+            created_at=r.created_at,
+            updated_at=r.updated_at,
+        )
+        for r in rows
+    ]
+
+    return AuditListResponse(data=data, total=total, page=page, page_size=page_size)
 
 
 @app.get("/auth0/callback", tags=["Auth"])
@@ -832,10 +934,10 @@ async def auth0_callback(code=None, state=None):
     Returns:
         Dict with callback message and received parameters
     """
+
     return {"message": "Auth0 callback received", "code": code, "state": state}
 
-
-# ========= Metrics endpoint for Prometheus =========
+    # ========= Metrics endpoint for Prometheus =========
 
 
 @app.get("/metrics")
@@ -845,3 +947,60 @@ async def metrics_endpoint():
     Prometheus will scrape this endpoint inside the cluster.
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
+
+
+@app.get(
+    "/v1/users/me",
+    response_model=UserResponse,
+    tags=["User Management"],
+    summary="Get current user information (protected)",
+)
+async def get_current_user(
+    auth: dict = Depends(verify_token),
+    db=Depends(get_db),
+):
+    """
+    Get current user information (protected endpoint example).
+
+    This endpoint demonstrates how to use verify_token for stateless auth:
+    - Requires valid JWT token
+    - Validates token against Auth0 JWKS
+
+    Mobile app must send:
+    - Authorization: Bearer <access_token>
+
+    Args:
+        auth: Enhanced auth object from verify_token dependency
+            Contains JWT claims
+        db: Database session dependency
+
+    Returns:
+        UserResponse with user information
+
+    Raises:
+        HTTPException: 401 if JWT is invalid
+        HTTPException: 404 if user not found in database
+    """
+    # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
+    user_id = extract_user_id_from_auth(auth)
+
+    print(f"[UserMgmt] get_current_user called for: {user_id}")
+
+    # Query PostgreSQL database for user
+    result = await db.execute(select(User).where(User.user_id == user_id))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found in database",
+        )
+
+    return UserResponse(
+        user_id=user.user_id,
+        name=user.name,
+        email=user.email,
+        phone=user.phone,
+        created_at=user.created_at,
+        last_login=user.last_login,
+    )

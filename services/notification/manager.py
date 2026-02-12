@@ -126,7 +126,8 @@ class NotificationManager:
                     if push_result.status == "sent"
                     else PushStatus.FAILED.value
                 )
-            except Exception:
+            except Exception as e:
+                print(f"[Notification] Push notification failed: {e}")
                 results["push_status"] = PushStatus.FAILED.value
 
         if "sms" in channels:
@@ -141,7 +142,8 @@ class NotificationManager:
                 results["sms_status"] = (
                     SMSStatus.SENT.value if sms_result.status == "sent" else SMSStatus.FAILED.value
                 )
-            except Exception:
+            except Exception as e:
+                print(f"[Notification] SMS failed: {e}")
                 results["sms_status"] = SMSStatus.FAILED.value
 
         if "call" in channels:
@@ -158,7 +160,8 @@ class NotificationManager:
                     if call_result.status == "answered"
                     else CallStatus.FAILED.value
                 )
-            except Exception:
+            except Exception as e:
+                print(f"[Notification] Call failed: {e}")
                 results["call_status"] = CallStatus.FAILED.value
 
         notification_status = self._aggregate_status(

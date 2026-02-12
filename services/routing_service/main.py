@@ -49,20 +49,20 @@ try:
     env_path = Path(__file__).parent / ".env"
     if env_path.exists():
         load_dotenv(env_path)
-        print(f"✅ Loaded .env from {env_path}")
+        print(f"Loaded .env from {env_path}")
     else:
         # Try backend root directory
         env_path = Path(__file__).parent.parent.parent / ".env"
         if env_path.exists():
             load_dotenv(env_path)
-            print(f"✅ Loaded .env from {env_path}")
+            print(f"Loaded .env from {env_path}")
         else:
             load_dotenv()  # Load from default location
-            print("⚠️  Attempted to load .env from default location")
+            print("Attempted to load .env from default location")
 except ImportError:
-    print("⚠️  python-dotenv not installed, .env file will not be loaded")
+    print("python-dotenv not installed, .env file will not be loaded")
 except Exception as e:
-    print(f"⚠️  Failed to load .env file: {e}")
+    print(f"Failed to load .env file: {e}")
 
 try:
     # Try relative imports first (when run as module)

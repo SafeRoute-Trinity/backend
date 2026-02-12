@@ -16,21 +16,23 @@ The routing service now integrates with OpenRouteService (ORS) to provide route 
 
 - `LOG_LEVEL`: Logging level (default: `info`)
 - `DATABASE_HOST`, `DATABASE_PORT`, etc.: Database configuration (if needed)
-- `REDIS_HOST`, `REDIS_PORT`, etc.: Redis configuration (if needed)
 
 ## Local Development
 
 1. Create a `.env` file in the service directory:
+
 ```bash
 ORS_API_KEY=your_api_key_here
 ```
 
 2. Install dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
 
 3. Run the service:
+
 ```bash
 uvicorn services.routing_service.main:app --host 0.0.0.0 --port 20002 --reload
 ```
@@ -42,12 +44,14 @@ uvicorn services.routing_service.main:app --host 0.0.0.0 --port 20002 --reload
 Get route from OpenRouteService and convert to Mapbox-compatible format.
 
 **Query Parameters:**
+
 - `start` (required): Start coordinates as "lat,lon"
 - `end` (required): End coordinates as "lat,lon"
 - `profile` (optional): Routing profile (default: "driving-car")
   - Options: `driving-car`, `foot-walking`, `cycling-regular`, `cycling-road`, etc.
 
 **Example:**
+
 ```bash
 curl "http://localhost:20002/route?start=53.342,-6.256&end=53.345,-6.262&profile=driving-car"
 ```
@@ -60,12 +64,14 @@ GeoJSON FeatureCollection with LineString features compatible with Mapbox.
 Get isochrones from OpenRouteService and convert to Mapbox-compatible format.
 
 **Query Parameters:**
+
 - `location` (required): Location coordinates as "lat,lon"
 - `profile` (optional): Routing profile (default: "driving-car")
 - `range` (optional): Comma-separated list of ranges (default: "600,1200,1800")
 - `range_type` (optional): "time" or "distance" (default: "time")
 
 **Example:**
+
 ```bash
 curl "http://localhost:20002/isochrone?location=53.342,-6.256&range=600,1200,1800&range_type=time"
 ```
@@ -90,6 +96,7 @@ The ConfigMap has been updated with `ors.api.enabled: "true"`.
 ### 3. Update Deployment
 
 The deployment.yml has been updated to include:
+
 ```yaml
 - name: ORS_API_KEY
   valueFrom:
@@ -107,6 +114,7 @@ kubectl apply -f manifests/k8s/saferoute/routing-service/
 ## Testing
 
 Run unit tests:
+
 ```bash
 pytest services/routing_service/tests/test_openrouteservice.py -v
 ```
@@ -162,6 +170,7 @@ pytest services/routing_service/tests/test_openrouteservice.py -v
 ## Error Handling
 
 The service handles various error cases:
+
 - Missing API key: Returns 503 Service Unavailable
 - Invalid coordinates: Returns 400 Bad Request
 - OpenRouteService API failure: Returns 502 Bad Gateway
@@ -172,10 +181,10 @@ All errors are logged for debugging.
 ## Logging
 
 The service logs:
+
 - API requests to OpenRouteService
 - Successful responses
 - Errors and exceptions
 - Conversion operations
 
 Log level can be configured via `LOG_LEVEL` environment variable.
-

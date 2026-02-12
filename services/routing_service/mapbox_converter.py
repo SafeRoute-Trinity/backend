@@ -107,9 +107,7 @@ def convert_ors_route_to_mapbox(
 
         # Fallback: routes-style JSON (no "features" key)
         elif "routes" in ors_response:
-            logger.debug(
-                "Converting OpenRouteService 'routes' response " "(non-GeoJSON) to GeoJSON"
-            )
+            logger.debug("Converting OpenRouteService 'routes' response (non-GeoJSON) to GeoJSON")
             for idx, route in enumerate(ors_response.get("routes", [])):
                 geometry = route.get("geometry")
                 if not geometry:
@@ -141,9 +139,7 @@ def convert_ors_route_to_mapbox(
                 }
                 features.append(mapbox_feature)
         else:
-            logger.error(
-                "Invalid OpenRouteService response: missing both " "'features' and 'routes'"
-            )
+            logger.error("Invalid OpenRouteService response: missing both 'features' and 'routes'")
             return None
 
         if not features:
