@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -38,13 +38,13 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=Text("now()"),
+        server_default="now()",
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=Text("now()"),
+        server_default="now()",
     )
 
     last_login: Mapped[Optional[datetime]] = mapped_column(
@@ -83,25 +83,25 @@ class UserPreferences(Base):
     voice_guidance: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
-        server_default=Text("true"),
+        server_default="true",
     )
 
     units: Mapped[str] = mapped_column(
         String(20),
         nullable=False,
-        server_default=Text("'metric'"),
+        server_default="'metric'",
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=Text("now()"),
+        server_default="now()",
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=Text("now()"),
+        server_default="now()",
     )
 
     user: Mapped["User"] = relationship(
@@ -122,7 +122,7 @@ class TrustedContact(Base):
         PG_UUID(as_uuid=True),
         primary_key=True,
         nullable=False,
-        server_default=Text("gen_random_uuid()"),
+        server_default="gen_random_uuid()",
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -145,19 +145,19 @@ class TrustedContact(Base):
     is_primary: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
-        server_default=Text("false"),
+        server_default="false",
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=Text("now()"),
+        server_default="now()",
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=Text("now()"),
+        server_default="now()",
     )
 
     user: Mapped["User"] = relationship(
