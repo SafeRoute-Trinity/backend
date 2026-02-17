@@ -338,7 +338,7 @@ async def recalc(
         RouteCalculateRequest(
             origin=body.current_location,
             destination=body.current_location,
-            user_id="demo",
+            user_id=uuid.uuid4(),
             preferences=RoutePreferences(optimize_for="balanced", transport_mode="walking"),
         )
     )
