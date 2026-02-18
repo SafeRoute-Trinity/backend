@@ -36,6 +36,7 @@ app = FastAPI()
 # Get database session dependency
 db_factory = get_database_factory()
 get_db = db_factory.get_session_dependency(DatabaseType.POSTGIS)
+get_postgis_db = db_factory.get_session_dependency(DatabaseType.POSTGIS)
 
 # Create service configuration
 service_config = ServiceAppConfig(
@@ -139,7 +140,7 @@ class Coordinate(BaseModel):
 
 class WeightUpdateRequest(BaseModel):
     edge_id: int  # gid in ways table
-    weight: float
+    safety_factor: float
 
 
 class RouteRequest(BaseModel):
@@ -251,7 +252,7 @@ async def metrics():
 
 
 @app.get("/api/danger_zones")
-async def get_danger_zones(db: AsyncSession = Depends(get_db)):
+async def get_danger_zones(db: AsyncSession = Depends(get_postgis_db)):
     """
     Return edges that have custom weights.
     """
@@ -283,14 +284,18 @@ async def get_danger_zones(db: AsyncSession = Depends(get_db)):
 
 
 @app.post("/api/danger_zones")
-async def update_danger_zone(update: WeightUpdateRequest, db: AsyncSession = Depends(get_db)):
+async def update_danger_zone(
+    update: WeightUpdateRequest,
+    db=Depends(get_db),
+    postgisDb: AsyncSession = Depends(get_postgis_db),
+):
     """
     Update safety weight for a specific edge and its bidirectional counterpart.
     """
     try:
         # Find the geometry of the selected edge
         geom_query = text("SELECT geometry FROM ways WHERE gid = :id")
-        result = await db.execute(geom_query, {"id": update.edge_id})
+        result = await postgisDb.execute(geom_query, {"id": update.edge_id})
         geom_res = result.fetchone()
 
         if not geom_res:
@@ -305,8 +310,22 @@ async def update_danger_zone(update: WeightUpdateRequest, db: AsyncSession = Dep
         """
         )
 
-        await db.execute(update_query, {"w": update.weight, "geom": geom_res[0]})
-        await db.commit()
+        await postgisDb.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
+        await postgisDb.commit()
+
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
 
         # Metric
         SAFETY_WEIGHTS_UPDATES_TOTAL.inc()
@@ -314,32 +333,57 @@ async def update_danger_zone(update: WeightUpdateRequest, db: AsyncSession = Dep
         return {
             "status": "updated",
             "id": update.edge_id,
-            "weight": update.weight,
+            "safety_factor": update.safety_factor,
             "note": "Updated bidirectional edges",
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        await db.rollback()
-        print(f"Error updating weight: {e}")
+        await postgisDb.rollback()
+        print(f"Error updating safety_factor: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.delete("/api/danger_zones/{zone_id}")
-async def reset_danger_zone(zone_id: int, db: AsyncSession = Depends(get_db)):
+@app.patch("/api/danger_zones/{zone_id}")
+async def reset_danger_zone(
+    zone_id: int,
+    db: AsyncSession = Depends(get_db),
+    postgisDb: AsyncSession = Depends(get_postgis_db),
+):
     """
-    Reset safety info for a zone to default (1.0).
+    Reset safety_factor(weight) for a zone to default (1.0).
     """
     try:
         query = text("UPDATE ways SET safety_factor = 1.0 WHERE gid = :id")
-        await db.execute(query, {"id": zone_id})
-        await db.commit()
+        await postgisDb.execute(query, {"id": zone_id})
+        await postgisDb.commit()
+
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
+
         return {"status": "reset"}
     except Exception as e:
-        await db.rollback()
+        await postgisDb.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/route")
-async def get_route(request: RouteRequest, db: AsyncSession = Depends(get_db)):
+async def get_route(
+    request: RouteRequest,
+    db: AsyncSession = Depends(get_db),
+    postgisDb: AsyncSession = Depends(get_postgis_db),
+):
     """
     Calculate route using pgRouting (Dijkstra) with safety weights.
     """
@@ -364,12 +408,14 @@ async def get_route(request: RouteRequest, db: AsyncSession = Depends(get_db)):
         """
         )
 
-        start_res = await db.execute(
+        start_res = await postgisDb.execute(
             node_query, {"lng": request.start.lng, "lat": request.start.lat}
         )
         start_node_res = start_res.fetchone()
 
-        end_res = await db.execute(node_query, {"lng": request.end.lng, "lat": request.end.lat})
+        end_res = await postgisDb.execute(
+            node_query, {"lng": request.end.lng, "lat": request.end.lat}
+        )
         end_node_res = end_res.fetchone()
 
         if not start_node_res or not end_node_res:
@@ -414,7 +460,7 @@ async def get_route(request: RouteRequest, db: AsyncSession = Depends(get_db)):
         """
         )
 
-        route_res = await db.execute(
+        route_res = await postgisDb.execute(
             routing_query, {"sql": cost_sql, "start_node": start_node, "end_node": end_node}
         )
         routes = route_res.fetchall()
@@ -492,6 +538,20 @@ async def get_route(request: RouteRequest, db: AsyncSession = Depends(get_db)):
         walking_speed_mps = 1.39
         duration_seconds = total_distance / walking_speed_mps
 
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
+
         return {
             "type": "FeatureCollection",
             "features": features,
@@ -514,11 +574,11 @@ async def get_route(request: RouteRequest, db: AsyncSession = Depends(get_db)):
 
 @app.get("/api/graph")
 async def get_graph_geojson(
-    min_lng: float = Query(..., description="Minimum Longitude"),
-    min_lat: float = Query(..., description="Minimum Latitude"),
-    max_lng: float = Query(..., description="Maximum Longitude"),
-    max_lat: float = Query(..., description="Maximum Latitude"),
-    db: AsyncSession = Depends(get_db),
+    min_lng: float = Query(..., description="Minimum Longitude(-180 ~ 180)"),
+    min_lat: float = Query(..., description="Minimum Latitude(-90 ~ 90)"),
+    max_lng: float = Query(..., description="Maximum Longitude(-180 ~ 180)"),
+    max_lat: float = Query(..., description="Maximum Latitude(-90 ~ 90)"),
+    postgisDb: AsyncSession = Depends(get_postgis_db),
 ):
     try:
         # Filter by bounding box using PostGIS && operator (overlap)
@@ -532,7 +592,7 @@ async def get_graph_geojson(
         """
         )
 
-        result = await db.execute(
+        result = await postgisDb.execute(
             query, {"min_lng": min_lng, "min_lat": min_lat, "max_lng": max_lng, "max_lat": max_lat}
         )
         rows = result.fetchall()
@@ -553,6 +613,20 @@ async def get_graph_geojson(
 
 
 # --- Existing Validated Endpoints (Keep for backward compatibility) ---
+
+
+@app.get("/v1/safety/factors", response_model=SafetyFactorsResponse)
+async def get_factors(body: SafetyFactorsRequest):
+    # Business metric: count factors queries
+    SAFETY_FACTORS_QUERIES_TOTAL.inc()
+
+    return SafetyFactorsResponse(
+        location=PointModel(lat=body.lat, lon=body.lon),
+        radius_m=body.radius_m,
+        factors={"cctv_cameras": 3, "street_lights": 5, "foot_traffic_level": "medium"},
+        composite_score=88.0,
+        queried_at=datetime.utcnow(),
+    )
 
 
 @app.post("/v1/safety/score-route", response_model=ScoreRouteResponse)
@@ -581,20 +655,6 @@ async def score_route(body: ScoreRouteRequest):
         segments=segs,
         alerts=[],
         calculated_at=datetime.utcnow(),
-    )
-
-
-@app.post("/v1/safety/factors", response_model=SafetyFactorsResponse)
-async def get_factors(body: SafetyFactorsRequest):
-    # Business metric: count factors queries
-    SAFETY_FACTORS_QUERIES_TOTAL.inc()
-
-    return SafetyFactorsResponse(
-        location=PointModel(lat=body.lat, lon=body.lon),
-        radius_m=body.radius_m,
-        factors={"cctv_cameras": 3, "street_lights": 5, "foot_traffic_level": "medium"},
-        composite_score=88.0,
-        queried_at=datetime.utcnow(),
     )
 
 
