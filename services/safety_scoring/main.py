@@ -257,13 +257,11 @@ async def get_danger_zones(db: AsyncSession = Depends(get_postgis_db)):
     Return edges that have custom weights.
     """
     try:
-        query = text(
-            """
+        query = text("""
             SELECT gid, safety_factor, ST_AsGeoJSON(geometry) as geojson 
             FROM ways 
             WHERE safety_factor != 1.0
-        """
-        )
+        """)
         result = await db.execute(query)
         rows = result.fetchall()
 
@@ -302,13 +300,11 @@ async def update_danger_zone(
             raise HTTPException(status_code=404, detail="Edge not found")
 
         # Update ALL edges that share exactly the same geometry (spatial equality)
-        update_query = text(
-            """
+        update_query = text("""
             UPDATE ways 
             SET safety_factor = :w 
             WHERE ST_Equals(geometry, :geom)
-        """
-        )
+        """)
 
         await postgisDb.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
         await postgisDb.commit()
@@ -392,8 +388,7 @@ async def get_route(
         SAFETY_SCORE_ROUTE_REQUESTS_TOTAL.inc()
 
         # 1. Find Nearest Node (Source or Target)
-        node_query = text(
-            """
+        node_query = text("""
         WITH node_candidates AS (
             SELECT source as id, ST_StartPoint(geometry) as geom FROM ways
             WHERE geometry && ST_Buffer(ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), 0.01)
@@ -405,8 +400,7 @@ async def get_route(
         FROM node_candidates
         ORDER BY geom <-> ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)
         LIMIT 1;
-        """
-        )
+        """)
 
         start_res = await postgisDb.execute(
             node_query, {"lng": request.start.lng, "lat": request.start.lat}
@@ -436,8 +430,7 @@ async def get_route(
         """
 
         # 3. Execute pgRouting
-        routing_query = text(
-            """
+        routing_query = text("""
             SELECT 
                 d.seq,
                 d.path_seq,
@@ -457,8 +450,7 @@ async def get_route(
             ) as d
             LEFT JOIN ways w ON d.edge = w.gid
             ORDER BY d.seq;
-        """
-        )
+        """)
 
         route_res = await postgisDb.execute(
             routing_query, {"sql": cost_sql, "start_node": start_node, "end_node": end_node}
@@ -583,14 +575,12 @@ async def get_graph_geojson(
     try:
         # Filter by bounding box using PostGIS && operator (overlap)
         # Limit to 2000 to prevent overload if zoomed out too far
-        query = text(
-            """
+        query = text("""
             SELECT gid, source, target, ST_AsGeoJSON(geometry) as geojson, safety_factor 
             FROM ways 
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
             LIMIT 2000
-        """
-        )
+        """)
 
         result = await postgisDb.execute(
             query, {"min_lng": min_lng, "min_lat": min_lat, "max_lng": max_lng, "max_lat": max_lat}
