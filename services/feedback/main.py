@@ -32,6 +32,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
+from services.feedback.spam_validator import get_spam_validator_factory
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -69,6 +70,20 @@ FEEDBACK_STATUS_CHECKS_TOTAL = factory.add_business_metric(
 )
 
 FEEDBACK = {}
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize services on startup."""
+    try:
+        # Initialize spam validator factory
+        validator_factory = get_spam_validator_factory()
+        await validator_factory.initialize()
+        logger.info("Spam validator initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize spam validator: {e}")
+        # Continue startup even if spam validator fails
+
 
 # ========= PROMETHEUS METRICS =========
 
@@ -277,14 +292,37 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
     if parsed_user_id is None:
         raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
 
-    is_spam = body.recent_submissions_count > 10
-    resp = FeedbackValidateResponse(
-        is_spam=is_spam,
-        confidence=0.95 if is_spam else 0.9,
-        flags=["high_frequency"] if is_spam else [],
-        allow_submission=not is_spam,
-        reason="OK" if not is_spam else "Too many submissions",
-    )
+    # Get spam validator and validate content
+    try:
+        validator_factory = get_spam_validator_factory()
+        validator = validator_factory.get_validator()
+
+        # Perform comprehensive spam validation
+        validation_result = await validator.validate(
+            content=body.content,
+            recent_submissions_count=body.recent_submissions_count,
+            max_urls_threshold=3,
+            frequency_threshold=10,
+        )
+
+        resp = FeedbackValidateResponse(
+            is_spam=validation_result.is_spam,
+            confidence=validation_result.confidence,
+            flags=validation_result.flags,
+            allow_submission=validation_result.allow_submission,
+            reason=validation_result.reason,
+        )
+    except Exception:
+        logger.exception("Spam validation failed, falling back to basic check")
+        # Fallback to basic frequency check
+        is_spam = body.recent_submissions_count > 10
+        resp = FeedbackValidateResponse(
+            is_spam=is_spam,
+            confidence=0.95 if is_spam else 0.9,
+            flags=["high_frequency"] if is_spam else [],
+            allow_submission=not is_spam,
+            reason="OK" if not is_spam else "Too many submissions",
+        )
 
     # Audit validation attempt
     try:
@@ -293,7 +331,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
             event_type="feedback",
             user_id=parsed_user_id,
             event_id=None,
-            message=f"feedback.validate user_id={body.user_id} is_spam={resp.is_spam} confidence={resp.confidence} allow_submission={resp.allow_submission}",
+            message=f"feedback.validate user_id={body.user_id} is_spam={resp.is_spam} confidence={resp.confidence} allow_submission={resp.allow_submission} flags={','.join(resp.flags)}",
             commit=True,
         )
     except Exception:
