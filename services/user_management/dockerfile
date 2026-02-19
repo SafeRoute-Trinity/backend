@@ -21,12 +21,13 @@ COPY requirements.txt .
 COPY libs/ ./libs/
 COPY models/ ./models/
 COPY common/ ./common/
+COPY services/__init__.py ./services/
 
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 # Copy service code
-COPY services/user_management/ .
+COPY services/user_management/ ./services/user_management/
 
 # Use PORT environment variable, default to 80 (matches K8s Service port)
 # PORT can be set at runtime via environment variable
@@ -37,4 +38,4 @@ EXPOSE 80
 
 # Start command (production recommends --workers 4)
 # Use $PORT environment variable at runtime
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-80}"]
+CMD ["sh", "-c", "uvicorn services.user_management.main:app --host 0.0.0.0 --port ${PORT:-80}"]

@@ -1,5 +1,3 @@
-# pytest services/safety_scoring/tests/test_main.py -q
-
 import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -9,7 +7,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import services.safety_scoring.main as sm
-from services.safety_scoring.main import app, get_db, get_postgis_db
+from services.safety_scoring import main
+from services.safety_scoring.main import app
 
 
 # ----------------------------
@@ -28,13 +27,17 @@ class FakeResult:
 
 
 class FakeDB:
+    """
+    Minimal AsyncSession-like fake:
+    - execute() returns FakeResult objects from plan
+    - commit()/rollback() toggle flags
+    """
+
     def __init__(self, plan=None, *, execute_raises: Exception | None = None):
         self.plan = list(plan or [])
         self.execute_raises = execute_raises
-
         self.committed = False
         self.rolled_back = False
-
         self.execute = AsyncMock(side_effect=self._execute)
 
     async def _execute(self, stmt, params=None):
@@ -51,17 +54,19 @@ class FakeDB:
         self.rolled_back = True
 
 
-def _override_db(fake_db: FakeDB):
-    async def override_get_db():
+def _override_safety_db(fake_db: FakeDB):
+    """
+    Override the ONLY db dependency used by this service: get_safety_scoring_db
+    """
+
+    async def override_dep():
         yield fake_db
 
-    # safety_scoring code has dependency：get_db / get_postgis_db
-    app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_postgis_db] = override_get_db
+    app.dependency_overrides[sm.get_safety_scoring_db] = override_dep
 
 
 @pytest.fixture()
-def client():
+def api_client():
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -69,23 +74,22 @@ def client():
 # ----------------------------
 # Basic endpoints
 # ----------------------------
-def test_root(client):
-    r = client.get("/")
+def test_root(api_client):
+    r = api_client.get("/")
     assert r.status_code == 200
     assert r.json()["service"] == "safety_scoring"
     assert r.json()["status"] == "running"
 
 
-def test_health(client):
-    r = client.get("/health")
+def test_health(api_client):
+    r = api_client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok", "service": "safety_scoring"}
 
 
-def test_metrics(client):
-    r = client.get("/metrics")
+def test_metrics(api_client):
+    r = api_client.get("/metrics")
     assert r.status_code == 200
-    # Prometheus text format
     assert "service_requests_total" in r.text
     assert "service_request_duration_seconds" in r.text
 
@@ -93,7 +97,7 @@ def test_metrics(client):
 # ----------------------------
 # v1 endpoints (pure stubs)
 # ----------------------------
-def test_v1_score_route_stub(client, monkeypatch):
+def test_v1_score_route_stub(api_client, monkeypatch):
     class _Counter:
         def __init__(self):
             self.count = 0
@@ -113,7 +117,7 @@ def test_v1_score_route_stub(client, monkeypatch):
         "time_of_day": datetime.now(timezone.utc).isoformat(),
         "weather_conditions": "clear",
     }
-    r = client.post("/v1/safety/score-route", json=payload)
+    r = api_client.post("/v1/safety/score-route", json=payload)
     assert r.status_code == 200, r.text
 
     data = r.json()
@@ -123,7 +127,7 @@ def test_v1_score_route_stub(client, monkeypatch):
     assert counter.count == 1
 
 
-def test_v1_update_weights_stub(client, monkeypatch):
+def test_v1_update_weights_stub(api_client, monkeypatch):
     class _Counter:
         def __init__(self):
             self.count = 0
@@ -144,7 +148,7 @@ def test_v1_update_weights_stub(client, monkeypatch):
             "pedestrian_traffic": 5.0,
         },
     }
-    r = client.put("/v1/safety/weights", json=payload)
+    r = api_client.put("/v1/safety/weights", json=payload)
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["status"] == "updated"
@@ -152,7 +156,7 @@ def test_v1_update_weights_stub(client, monkeypatch):
     assert counter.count == 1
 
 
-def test_v1_safety_factors_stub_get_with_body(client, monkeypatch):
+def test_v1_safety_factors_stub_get_with_body(api_client, monkeypatch):
     class _Counter:
         def __init__(self):
             self.count = 0
@@ -164,7 +168,7 @@ def test_v1_safety_factors_stub_get_with_body(client, monkeypatch):
     monkeypatch.setattr(sm, "SAFETY_FACTORS_QUERIES_TOTAL", counter, raising=False)
 
     payload = {"lat": 53.3498, "lon": -6.2603, "radius_m": 80}
-    r = client.request("GET", "/v1/safety/factors", json=payload)
+    r = api_client.request("GET", "/v1/safety/factors", json=payload)
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["radius_m"] == 80
@@ -175,7 +179,7 @@ def test_v1_safety_factors_stub_get_with_body(client, monkeypatch):
 # ----------------------------
 # /api/danger_zones
 # ----------------------------
-def test_get_danger_zones_success(client):
+def test_get_danger_zones_success(api_client):
     fake_rows = [
         SimpleNamespace(
             gid=1,
@@ -189,9 +193,9 @@ def test_get_danger_zones_success(client):
         ),
     ]
     fake_db = FakeDB(plan=[FakeResult(fetchall=fake_rows)])
-    _override_db(fake_db)
+    _override_safety_db(fake_db)
 
-    r = client.get("/api/danger_zones")
+    r = api_client.get("/api/danger_zones")
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["type"] == "FeatureCollection"
@@ -199,18 +203,16 @@ def test_get_danger_zones_success(client):
     assert data["features"][0]["properties"]["weight"] == 1.5
 
 
-def test_update_danger_zone_not_found_404(client):
-    # SELECT geometry -> None
-    fake_db = FakeDB(plan=[FakeResult(fetchone=None)])
-    _override_db(fake_db)
+def test_update_danger_zone_not_found_404(api_client):
+    fake_db = FakeDB(plan=[FakeResult(fetchone=None)])  # SELECT geometry returns None
+    _override_safety_db(fake_db)
 
-    r = client.post("/api/danger_zones", json={"edge_id": 999, "safety_factor": 2.0})
+    r = api_client.post("/api/danger_zones", json={"edge_id": 999, "safety_factor": 2.0})
     assert r.status_code == 404
     assert r.json()["detail"] == "Edge not found"
 
 
-def test_update_danger_zone_success(client, monkeypatch):
-    # mock metric counter
+def test_update_danger_zone_success(api_client, monkeypatch):
     class _Counter:
         def __init__(self):
             self.count = 0
@@ -221,17 +223,11 @@ def test_update_danger_zone_success(client, monkeypatch):
     counter = _Counter()
     monkeypatch.setattr(sm, "SAFETY_WEIGHTS_UPDATES_TOTAL", counter, raising=False)
 
-    # SELECT geometry -> (geom,)
     fake_geom = object()
-    fake_db = FakeDB(
-        plan=[
-            FakeResult(fetchone=(fake_geom,)),
-            FakeResult(fetchall=[]),
-        ]
-    )
-    _override_db(fake_db)
+    fake_db = FakeDB(plan=[FakeResult(fetchone=(fake_geom,)), FakeResult(fetchall=[])])
+    _override_safety_db(fake_db)
 
-    r = client.post("/api/danger_zones", json={"edge_id": 123, "safety_factor": 1.7})
+    r = api_client.post("/api/danger_zones", json={"edge_id": 123, "safety_factor": 1.7})
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["status"] == "updated"
@@ -239,11 +235,11 @@ def test_update_danger_zone_success(client, monkeypatch):
     assert counter.count == 1
 
 
-def test_reset_danger_zone_success(client):
+def test_reset_danger_zone_success(api_client):
     fake_db = FakeDB(plan=[FakeResult(fetchall=[])])
-    _override_db(fake_db)
+    _override_safety_db(fake_db)
 
-    r = client.patch("/api/danger_zones/321")
+    r = api_client.delete("/api/danger_zones/321")
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "reset"
     assert fake_db.committed is True
@@ -252,7 +248,7 @@ def test_reset_danger_zone_success(client):
 # ----------------------------
 # /api/graph
 # ----------------------------
-def test_get_graph_geojson_success(client):
+def test_get_graph_geojson_success(api_client):
     fake_rows = [
         SimpleNamespace(
             gid=10,
@@ -265,9 +261,9 @@ def test_get_graph_geojson_success(client):
         )
     ]
     fake_db = FakeDB(plan=[FakeResult(fetchall=fake_rows)])
-    _override_db(fake_db)
+    _override_safety_db(fake_db)
 
-    r = client.get(
+    r = api_client.get(
         "/api/graph",
         params={"min_lng": -6.3, "min_lat": 53.3, "max_lng": -6.2, "max_lat": 53.4},
     )
@@ -280,8 +276,7 @@ def test_get_graph_geojson_success(client):
 # ----------------------------
 # /api/route (mock pgRouting)
 # ----------------------------
-def test_get_route_success(client, monkeypatch):
-    # mock metric counter
+def test_get_route_success(api_client, monkeypatch):
     class _Counter:
         def __init__(self):
             self.count = 0
@@ -292,11 +287,7 @@ def test_get_route_success(client, monkeypatch):
     counter = _Counter()
     monkeypatch.setattr(sm, "SAFETY_SCORE_ROUTE_REQUESTS_TOTAL", counter, raising=False)
 
-    # 1) nearest start node
-    # 2) nearest end node
-    # 3) routing results
     routes = [
-        # row shape: r.edge, r.node, r.target, r.geojson, r.length, r.source
         SimpleNamespace(
             seq=0,
             path_seq=0,
@@ -329,18 +320,49 @@ def test_get_route_success(client, monkeypatch):
 
     fake_db = FakeDB(
         plan=[
-            FakeResult(fetchone=(1001,)),  # start node
-            FakeResult(fetchone=(2002,)),  # end node
-            FakeResult(fetchall=routes),  # routing rows
+            FakeResult(fetchone=(1001,)),  # start nearest node
+            FakeResult(fetchone=(2002,)),  # end nearest node
+            FakeResult(fetchall=routes),  # first expansion returns a route
         ]
     )
-    _override_db(fake_db)
+    _override_safety_db(fake_db)
 
     payload = {"start": {"lat": 53.3498, "lng": -6.2603}, "end": {"lat": 53.3601, "lng": -6.2502}}
-    r = client.post("/api/route", json=payload)
-
+    r = api_client.post("/api/route?algorithm=dijkstra", json=payload)
     assert r.status_code == 200, r.text
+
     data = r.json()
     assert data["type"] == "FeatureCollection"
     assert data["properties"]["summary"]["distance_meters"] == 250.0
     assert counter.count == 1
+
+
+def test_api_route_ch_success(api_client, monkeypatch):
+    async def _fake_ch(_req):
+        return {
+            "type": "FeatureCollection",
+            "features": [],
+            "properties": {
+                "summary": {"distance_meters": 10.0, "distance_km": 0.01, "duration": 5.0}
+            },
+        }
+
+    monkeypatch.setattr(main, "get_ch_route_geojson", _fake_ch)
+
+    # even for CH, dependency is resolved first; override it anyway
+    fake_db = FakeDB(plan=[])
+    _override_safety_db(fake_db)
+
+    req = {"start": {"lat": 53.34, "lng": -6.26}, "end": {"lat": 53.35, "lng": -6.25}}
+    r = api_client.post("/api/route?algorithm=ch", json=req)
+    assert r.status_code == 200, r.text
+    assert r.json()["type"] == "FeatureCollection"
+
+
+def test_api_route_invalid_algorithm(api_client):
+    fake_db = FakeDB(plan=[])
+    _override_safety_db(fake_db)
+
+    req = {"start": {"lat": 53.34, "lng": -6.26}, "end": {"lat": 53.35, "lng": -6.25}}
+    r = api_client.post("/api/route?algorithm=bad_algo", json=req)
+    assert r.status_code == 422

@@ -7,8 +7,11 @@ import os
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Literal, Optional
 
+import httpx
+from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import (
@@ -20,10 +23,16 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+# Load backend .env for local development convenience.
+backend_env_path = Path(__file__).resolve().parents[2] / ".env"
+if backend_env_path.exists():
+    load_dotenv(backend_env_path)
 
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import ServiceAppConfig
@@ -36,7 +45,77 @@ app = FastAPI()
 # Get database session dependency
 db_factory = get_database_factory()
 get_db = db_factory.get_session_dependency(DatabaseType.POSTGIS)
-get_postgis_db = db_factory.get_session_dependency(DatabaseType.POSTGIS)
+# Routing tuning knobs (can be overridden by env vars)
+ROUTE_SUBGRAPH_EXPAND_DEGREES = float(os.getenv("ROUTE_SUBGRAPH_EXPAND_DEGREES", "0.01"))
+ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES = float(os.getenv("ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES", "0.08"))
+ROUTE_DEBUG_LOG = os.getenv("ROUTE_DEBUG_LOG", "false").lower() == "true"
+GRAPHHOPPER_PROXY_SERVICE_URL = os.getenv(
+    "GRAPHHOPPER_PROXY_SERVICE_URL",
+    os.getenv("CH_ROUTING_SERVICE_URL", "http://127.0.0.1:20007"),
+)
+GRAPHHOPPER_PROXY_TIMEOUT_SECONDS = float(
+    os.getenv("GRAPHHOPPER_PROXY_TIMEOUT_SECONDS", os.getenv("CH_ROUTING_TIMEOUT_SECONDS", "8"))
+)
+CH_FALLBACK_TO_DIJKSTRA = os.getenv("CH_FALLBACK_TO_DIJKSTRA", "true").lower() == "true"
+
+# Safety scoring dedicated database URL
+# Priority: SAFETY_SCORING_DATABASE_URL > POSTGIS_DATABASE_URL > shared get_db fallback
+SAFETY_SCORING_DATABASE_URL = os.getenv("SAFETY_SCORING_DATABASE_URL") or os.getenv(
+    "POSTGIS_DATABASE_URL"
+)
+
+_SafetyScoringSessionLocal = None
+if SAFETY_SCORING_DATABASE_URL:
+    _safety_scoring_engine = create_async_engine(
+        SAFETY_SCORING_DATABASE_URL,
+        echo=False,
+        future=True,
+    )
+    _SafetyScoringSessionLocal = sessionmaker(
+        bind=_safety_scoring_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+
+async def get_safety_scoring_db():
+    if _SafetyScoringSessionLocal is not None:
+        async with _SafetyScoringSessionLocal() as session:
+            yield session
+        return
+
+    async for shared_session in get_db():
+        yield shared_session
+
+
+async def get_ch_route_geojson(route_request: "RouteRequest") -> dict:
+    """
+    Fetch route from GraphHopper proxy and return GeoJSON-compatible payload.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=GRAPHHOPPER_PROXY_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{GRAPHHOPPER_PROXY_SERVICE_URL}/api/route",
+                params={"algorithm": "ch"},
+                json={
+                    "start": {"lat": route_request.start.lat, "lng": route_request.start.lng},
+                    "end": {"lat": route_request.end.lat, "lng": route_request.end.lng},
+                },
+            )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"GraphHopper proxy request failed: {e}") from e
+
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"GraphHopper proxy error: status={response.status_code}, body={response.text[:200]}",
+        )
+
+    body = response.json()
+    if not isinstance(body, dict) or body.get("type") != "FeatureCollection":
+        raise HTTPException(status_code=502, detail="Invalid CH response format.")
+    return body
+
 
 # Create service configuration
 service_config = ServiceAppConfig(
@@ -252,7 +331,7 @@ async def metrics():
 
 
 @app.get("/api/danger_zones")
-async def get_danger_zones(db: AsyncSession = Depends(get_postgis_db)):
+async def get_danger_zones(db: AsyncSession = Depends(get_safety_scoring_db)):
     """
     Return edges that have custom weights.
     """
@@ -285,9 +364,7 @@ async def get_danger_zones(db: AsyncSession = Depends(get_postgis_db)):
 
 @app.post("/api/danger_zones")
 async def update_danger_zone(
-    update: WeightUpdateRequest,
-    db=Depends(get_db),
-    postgisDb: AsyncSession = Depends(get_postgis_db),
+    update: WeightUpdateRequest, db: AsyncSession = Depends(get_safety_scoring_db)
 ):
     """
     Update safety weight for a specific edge and its bidirectional counterpart.
@@ -295,7 +372,7 @@ async def update_danger_zone(
     try:
         # Find the geometry of the selected edge
         geom_query = text("SELECT geometry FROM ways WHERE gid = :id")
-        result = await postgisDb.execute(geom_query, {"id": update.edge_id})
+        result = await db.execute(geom_query, {"id": update.edge_id})
         geom_res = result.fetchone()
 
         if not geom_res:
@@ -310,8 +387,8 @@ async def update_danger_zone(
         """
         )
 
-        await postgisDb.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
-        await postgisDb.commit()
+        await db.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
+        await db.commit()
 
         # TODO: add audit when auth is ready
 
@@ -339,24 +416,20 @@ async def update_danger_zone(
     except HTTPException:
         raise
     except Exception as e:
-        await postgisDb.rollback()
+        await db.rollback()
         print(f"Error updating safety_factor: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.patch("/api/danger_zones/{zone_id}")
-async def reset_danger_zone(
-    zone_id: int,
-    db: AsyncSession = Depends(get_db),
-    postgisDb: AsyncSession = Depends(get_postgis_db),
-):
+@app.delete("/api/danger_zones/{zone_id}")
+async def reset_danger_zone(zone_id: int, db: AsyncSession = Depends(get_safety_scoring_db)):
     """
     Reset safety_factor(weight) for a zone to default (1.0).
     """
     try:
         query = text("UPDATE ways SET safety_factor = 1.0 WHERE gid = :id")
-        await postgisDb.execute(query, {"id": zone_id})
-        await postgisDb.commit()
+        await db.execute(query, {"id": zone_id})
+        await db.commit()
 
         # TODO: add audit when auth is ready
 
@@ -374,48 +447,62 @@ async def reset_danger_zone(
 
         return {"status": "reset"}
     except Exception as e:
-        await postgisDb.rollback()
+        await db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/route")
 async def get_route(
     request: RouteRequest,
-    db: AsyncSession = Depends(get_db),
-    postgisDb: AsyncSession = Depends(get_postgis_db),
+    algorithm: Literal["ch", "astar", "dijkstra", "bd_dijkstra"] = Query("dijkstra"),
+    db: AsyncSession = Depends(get_safety_scoring_db),
 ):
     """
-    Calculate route using pgRouting (Dijkstra) with safety weights.
+    Calculate route using pgRouting with safety weights.
     """
     try:
         # Metric
         SAFETY_SCORE_ROUTE_REQUESTS_TOTAL.inc()
 
-        # 1. Find Nearest Node (Source or Target)
+        if algorithm == "ch":
+            try:
+                return await get_ch_route_geojson(request)
+            except Exception:
+                if not CH_FALLBACK_TO_DIJKSTRA:
+                    raise
+                algorithm = "dijkstra"
+
+        # 1. Find nearest graph node by snapping to nearest edge endpoint.
+        # This avoids scanning huge start/end-point candidate sets.
         node_query = text(
             """
-        WITH node_candidates AS (
-            SELECT source as id, ST_StartPoint(geometry) as geom FROM ways
-            WHERE geometry && ST_Buffer(ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), 0.01)
-            UNION ALL
-            SELECT target as id, ST_EndPoint(geometry) as geom FROM ways
-            WHERE geometry && ST_Buffer(ST_SetSRID(ST_MakePoint(:lng, :lat), 4326), 0.01)
+        WITH p AS (
+            SELECT ST_SetSRID(ST_MakePoint(:lng, :lat), 4326) AS pt
+        ),
+        nearest_edge AS (
+            SELECT w.source, w.target, w.geometry, p.pt
+            FROM ways w
+            CROSS JOIN p
+            ORDER BY w.geometry <-> p.pt
+            LIMIT 1
         )
-        SELECT id
-        FROM node_candidates
-        ORDER BY geom <-> ST_SetSRID(ST_MakePoint(:lng, :lat), 4326)
-        LIMIT 1;
+        SELECT
+            CASE
+                WHEN ST_Distance(ST_StartPoint(geometry)::geography, pt::geography)
+                   <= ST_Distance(ST_EndPoint(geometry)::geography, pt::geography)
+                THEN source
+                ELSE target
+            END AS id
+        FROM nearest_edge;
         """
         )
 
-        start_res = await postgisDb.execute(
+        start_res = await db.execute(
             node_query, {"lng": request.start.lng, "lat": request.start.lat}
         )
         start_node_res = start_res.fetchone()
 
-        end_res = await postgisDb.execute(
-            node_query, {"lng": request.end.lng, "lat": request.end.lat}
-        )
+        end_res = await db.execute(node_query, {"lng": request.end.lng, "lat": request.end.lat})
         end_node_res = end_res.fetchone()
 
         if not start_node_res or not end_node_res:
@@ -424,18 +511,12 @@ async def get_route(
         start_node = start_node_res[0]
         end_node = end_node_res[0]
 
-        # 2. Simplified Cost Query
-        cost_sql = """
-            SELECT 
-                gid as id, 
-                source, 
-                target, 
-                length * safety_factor as cost, 
-                length * safety_factor as reverse_cost 
-            FROM ways
-        """
-
-        # 3. Execute pgRouting
+        # 2. Build query against progressively larger local subgraphs, then full graph fallback.
+        routing_fn = (
+            "pgr_aStar"
+            if algorithm == "astar"
+            else "pgr_bdDijkstra" if algorithm == "bd_dijkstra" else "pgr_dijkstra"
+        )
         routing_query = text(
             """
             SELECT 
@@ -449,7 +530,9 @@ async def get_route(
                 w.length,
                 w.source,
                 w.target
-            FROM pgr_dijkstra(
+            FROM """
+            + routing_fn
+            + """(
                 CAST(:sql AS TEXT),
                 CAST(:start_node AS BIGINT), 
                 CAST(:end_node AS BIGINT), 
@@ -460,10 +543,72 @@ async def get_route(
         """
         )
 
-        route_res = await postgisDb.execute(
-            routing_query, {"sql": cost_sql, "start_node": start_node, "end_node": end_node}
-        )
-        routes = route_res.fetchall()
+        expanded = max(0.001, ROUTE_SUBGRAPH_EXPAND_DEGREES)
+        max_expand = max(expanded, ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES)
+        expansions: List[float] = []
+        while expanded <= max_expand + 1e-9:
+            expansions.append(round(expanded, 6))
+            expanded *= 2
+
+        routes = []
+        for expand in expansions:
+            cost_sql = f"""
+                WITH route_window AS (
+                    SELECT ST_Expand(
+                        ST_Envelope(
+                            ST_Collect(
+                                ST_SetSRID(ST_MakePoint({request.start.lng}, {request.start.lat}), 4326),
+                                ST_SetSRID(ST_MakePoint({request.end.lng}, {request.end.lat}), 4326)
+                            )
+                        ),
+                        {expand}
+                    ) AS bbox
+                )
+                SELECT
+                    w.gid AS id,
+                    w.source,
+                    w.target,
+                    w.length * w.safety_factor AS cost,
+                    w.length * w.safety_factor AS reverse_cost,
+                    ST_X(ST_StartPoint(w.geometry)) AS x1,
+                    ST_Y(ST_StartPoint(w.geometry)) AS y1,
+                    ST_X(ST_EndPoint(w.geometry)) AS x2,
+                    ST_Y(ST_EndPoint(w.geometry)) AS y2
+                FROM ways w
+                CROSS JOIN route_window rw
+                WHERE w.geometry && rw.bbox
+            """
+            try:
+                route_res = await db.execute(
+                    routing_query, {"sql": cost_sql, "start_node": start_node, "end_node": end_node}
+                )
+                routes = route_res.fetchall()
+                if routes:
+                    break
+            except Exception:
+                # If the local subgraph is too small/invalid, keep expanding.
+                continue
+
+        if not routes:
+            # Fallback to full graph to avoid false negatives.
+            full_cost_sql = """
+                SELECT
+                    gid AS id,
+                    source,
+                    target,
+                    length * safety_factor AS cost,
+                    length * safety_factor AS reverse_cost,
+                    ST_X(ST_StartPoint(geometry)) AS x1,
+                    ST_Y(ST_StartPoint(geometry)) AS y1,
+                    ST_X(ST_EndPoint(geometry)) AS x2,
+                    ST_Y(ST_EndPoint(geometry)) AS y2
+                FROM ways
+            """
+            route_res = await db.execute(
+                routing_query,
+                {"sql": full_cost_sql, "start_node": start_node, "end_node": end_node},
+            )
+            routes = route_res.fetchall()
 
         if not routes:
             raise HTTPException(status_code=404, detail="No path found.")
@@ -474,7 +619,8 @@ async def get_route(
 
         # Path Segments
         road_coords = []
-        print(f"--- Routing from {start_node} to {end_node} ---")
+        if ROUTE_DEBUG_LOG:
+            print(f"--- Routing from {start_node} to {end_node} ---")
         for r in routes:
             if r.edge != -1:
                 # print(f"Used Edge: {r.edge}, Cost: {r.cost}, Length: {r.length}")
@@ -564,6 +710,8 @@ async def get_route(
             },
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error: {e}")
         import traceback
@@ -578,7 +726,7 @@ async def get_graph_geojson(
     min_lat: float = Query(..., description="Minimum Latitude(-90 ~ 90)"),
     max_lng: float = Query(..., description="Maximum Longitude(-180 ~ 180)"),
     max_lat: float = Query(..., description="Maximum Latitude(-90 ~ 90)"),
-    postgisDb: AsyncSession = Depends(get_postgis_db),
+    postgisDb: AsyncSession = Depends(get_safety_scoring_db),
 ):
     try:
         # Filter by bounding box using PostGIS && operator (overlap)

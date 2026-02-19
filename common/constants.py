@@ -13,6 +13,7 @@ SERVICES = {
     "notification": ("services.notification.main", 20001),
     "routing_service": ("services.routing_service.main", 20002),
     "safety_scoring": ("services.safety_scoring.main", 20003),
+    "graphhopper_proxy": ("services.graphhopper_proxy.main", 20007),
     "feedback": ("services.feedback.main", 20004),
     "data_cleaner": ("services.data_cleaner.main", 20005),
     "sos": ("services.sos.main", 20006),
