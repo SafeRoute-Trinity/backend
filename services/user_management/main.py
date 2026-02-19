@@ -862,6 +862,12 @@ async def upsert_trusted_contact(
 
 
 @app.get(
+    "/v1/audit",
+    response_model=AuditListResponse,
+    tags=["Audit"],
+    summary="List audit logs (paginated)",
+)
+@app.get(
     "/v1/users/audit",
     response_model=AuditListResponse,
     tags=["Audit"],
