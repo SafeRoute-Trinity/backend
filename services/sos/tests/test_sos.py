@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 import services.sos.main as sos
 from services.sos.main import app, get_db
@@ -51,6 +52,17 @@ def client():
 
 
 # ----------------------------
+# Metrics mock
+# ----------------------------
+class Counter:
+    def __init__(self):
+        self.count = 0
+
+    def inc(self):
+        self.count += 1
+
+
+# ----------------------------
 # httpx AsyncClient mocks
 # ----------------------------
 class DummyResponse:
@@ -72,7 +84,7 @@ class DummyResponse:
         return self._payload
 
 
-class DummyAsyncClientOK:
+class DummyAsyncClientCallOK:
     def __init__(self, timeout=10.0):
         self.timeout = timeout
 
@@ -93,7 +105,7 @@ class DummyAsyncClientOK:
         )
 
 
-class DummyAsyncClientFail:
+class DummyAsyncClientCallFail:
     def __init__(self, timeout=10.0):
         self.timeout = timeout
 
@@ -109,22 +121,87 @@ class DummyAsyncClientFail:
         raise httpx.ConnectError("connect failed", request=SimpleNamespace(url=url))
 
 
+class DummyAsyncClientSMSOK:
+    def __init__(self, timeout=10.0):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json):
+        # EmergencySMSResponse wants: emergency_id, status, sms_id, timestamp, message_sent, recipient
+        return DummyResponse(
+            {
+                "emergency_id": str(uuid.uuid4()),
+                "status": "sent",
+                "sms_id": str(uuid.uuid4()),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "message_sent": "hello",
+                "recipient": "+353123456789",
+            },
+            status_code=200,
+        )
+
+
+class DummyAsyncClientSMSFailStatus500:
+    def __init__(self, timeout=10.0):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json):
+        return DummyResponse({"detail": "downstream error"}, status_code=500)
+
+
+class DummyAsyncClientTestSMSOK:
+    def __init__(self, timeout=10.0):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json):
+        return DummyResponse(
+            {"status": "sent", "sid": "SMxxxx", "to": json["to_phone"], "message": json["message"]},
+            status_code=200,
+        )
+
+
+class DummyAsyncClientTestSMSFail:
+    def __init__(self, timeout=10.0):
+        self.timeout = timeout
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def post(self, url, json):
+        import httpx
+
+        raise httpx.ConnectError("boom", request=SimpleNamespace(url=url))
+
+
 # ----------------------------
-# Tests
+# Tests: /v1/emergency/call
 # ----------------------------
-def test_emergency_call_success_200(client, monkeypatch):
-    # Patch httpx.AsyncClient
-    monkeypatch.setattr(sos.httpx, "AsyncClient", DummyAsyncClientOK)
+def test_emergency_call_success_200_writes_status_and_metric(client, monkeypatch):
+    monkeypatch.setattr(sos.httpx, "AsyncClient", DummyAsyncClientCallOK)
 
-    # Patch metrics + STATUS
-    class _Counter:
-        def __init__(self):
-            self.count = 0
+    counter_calls = Counter()
+    monkeypatch.setattr(sos, "SOS_CALLS_TOTAL", counter_calls, raising=False)
 
-        def inc(self):
-            self.count += 1
-
-    monkeypatch.setattr(sos, "SOS_CALLS_TOTAL", _Counter(), raising=False)
     monkeypatch.setattr(sos, "STATUS", {}, raising=False)
 
     fake_db = FakeDB()
@@ -143,36 +220,30 @@ def test_emergency_call_success_200(client, monkeypatch):
     assert res.status_code == 200, res.text
     data = res.json()
 
-    # Response shape
     assert data["status"] == "initiated"
     assert data["call_id"] == "twilio_sid_123"
     assert "timestamp" in data
-
-    # IMPORTANT: endpoint should include emergency_id in response
     assert "emergency_id" in data
-    uuid.UUID(data["emergency_id"])
 
-    # DB interactions
+    eid = uuid.UUID(data["emergency_id"])
+    assert eid in sos.STATUS  # ✅ status dict updated
+    assert sos.STATUS[eid]["call_status"] == "initiated"
+    assert sos.STATUS[eid]["sms_status"] == "not_sent"
+
     assert fake_db.flushed is True
     assert fake_db.committed is True
     assert fake_db.rolled_back is False
     assert len(fake_db.added) >= 2  # Emergency + Audit
 
-    # Metric incremented once
-    assert sos.SOS_CALLS_TOTAL.count == 1
+    assert counter_calls.count == 1
 
 
 def test_emergency_call_notification_fail_503(client, monkeypatch):
-    monkeypatch.setattr(sos.httpx, "AsyncClient", DummyAsyncClientFail)
+    monkeypatch.setattr(sos.httpx, "AsyncClient", DummyAsyncClientCallFail)
 
-    class _Counter:
-        def __init__(self):
-            self.count = 0
+    counter_calls = Counter()
+    monkeypatch.setattr(sos, "SOS_CALLS_TOTAL", counter_calls, raising=False)
 
-        def inc(self):
-            self.count += 1
-
-    monkeypatch.setattr(sos, "SOS_CALLS_TOTAL", _Counter(), raising=False)
     monkeypatch.setattr(sos, "STATUS", {}, raising=False)
 
     fake_db = FakeDB()
@@ -190,8 +261,186 @@ def test_emergency_call_notification_fail_503(client, monkeypatch):
     res = client.post("/v1/emergency/call", json=payload)
     assert res.status_code == 503, res.text
 
-    # In failure branch you commit audit (per your code)
     assert fake_db.flushed is True
     assert fake_db.committed is True or fake_db.rolled_back is True
     assert len(fake_db.added) >= 2  # Emergency + Audit
-    assert sos.SOS_CALLS_TOTAL.count == 0  # should NOT count success metric
+    assert counter_calls.count == 0  # metric should not increment on failure
+    assert sos.STATUS == {}  # no status recorded on failure
+
+
+def test_emergency_call_commit_integrity_error_400(client, monkeypatch):
+    monkeypatch.setattr(sos.httpx, "AsyncClient", DummyAsyncClientCallOK)
+    monkeypatch.setattr(sos, "SOS_CALLS_TOTAL", Counter(), raising=False)
+    monkeypatch.setattr(sos, "STATUS", {}, raising=False)
+
+    fake_db = FakeDB(commit_raises=IntegrityError("stmt", "params", Exception("orig")))
+    _override_db(fake_db)
+
+    payload = {
+        "user_id": str(uuid.uuid4()),
+        "route_id": str(uuid.uuid4()),
+        "lat": 1.0,
+        "lon": 2.0,
+        "trigger_type": "manual",
+        "message": "x",
+    }
+
+    res = client.post("/v1/emergency/call", json=payload)
+    assert res.status_code == 400, res.text
+    assert fake_db.rolled_back is True
+
+
+# ----------------------------
+# Tests: /v1/emergency/{id}/status
+# ----------------------------
+def test_get_status_invalid_uuid_400(client):
+    res = client.get("/v1/emergency/not-a-uuid/status")
+    assert res.status_code == 400
+    assert res.json()["detail"] == "emergency_id must be a valid UUID"
+
+
+def test_get_status_not_found_returns_default(client, monkeypatch):
+    monkeypatch.setattr(sos, "STATUS", {}, raising=False)
+
+    eid = uuid.uuid4()
+    res = client.get(f"/v1/emergency/{eid}/status")
+    assert res.status_code == 200, res.text
+    data = res.json()
+
+    # Current implementation returns default
+    assert data["call_status"] == "not_triggered"
+    assert data["sms_status"] == "not_sent"
+
+
+def test_get_status_found_returns_saved(client, monkeypatch):
+    eid = uuid.uuid4()
+    monkeypatch.setattr(
+        sos,
+        "STATUS",
+        {
+            str(eid): {
+                "emergency_id": str(eid),
+                "call_status": "initiated",
+                "sms_status": "not_sent",
+                "last_update": datetime.now(timezone.utc).isoformat(),
+            }
+        },
+        raising=False,
+    )
+
+    res = client.get(f"/v1/emergency/{eid}/status")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["call_status"] == "initiated"
+    assert data["sms_status"] == "not_sent"
+
+
+# ----------------------------
+# Tests: /v1/emergency/sms
+# ----------------------------
+def test_emergency_sms_invalid_user_id_400(client):
+    payload = {
+        "user_id": "not-a-uuid",
+        "location": {"lat": 1.0, "lon": 2.0},
+        "emergency_contact": {"name": "A", "phone": "+353123"},
+        "variables": {"x": "y"},
+    }
+    res = client.post("/v1/emergency/sms", json=payload)
+    # Pydantic already rejects invalid uuid with 422; if it passes, endpoint rejects with 400
+    assert res.status_code in (400, 422)
+
+
+def test_emergency_sms_success_200_increments_metric(client, monkeypatch):
+    monkeypatch.setattr(sos.httpx, "AsyncClient", DummyAsyncClientSMSOK)
+
+    counter_sms = Counter()
+    monkeypatch.setattr(sos, "SOS_SMS_TOTAL", counter_sms, raising=False)
+
+    # Avoid real write_audit side effects
+    async def _noop_write_audit(**kwargs):
+        return None
+
+    monkeypatch.setattr(sos, "write_audit", _noop_write_audit, raising=False)
+
+    monkeypatch.setattr(sos, "STATUS", {}, raising=False)
+
+    fake_db = FakeDB()
+    _override_db(fake_db)
+
+    payload = {
+        "user_id": str(uuid.uuid4()),
+        "location": {"lat": 1.0, "lon": 2.0},
+        "emergency_contact": {"name": "A", "phone": "+353123"},
+        "variables": {"x": "y"},
+    }
+
+    res = client.post("/v1/emergency/sms", json=payload)
+    assert res.status_code == 200, res.text
+    data = res.json()
+
+    assert data["status"] == "sent"
+    assert "sms_id" in data
+    assert "recipient" in data
+
+    assert counter_sms.count == 1
+
+
+def test_emergency_sms_downstream_500_returns_503(client, monkeypatch):
+    monkeypatch.setattr(sos.httpx, "AsyncClient", DummyAsyncClientSMSFailStatus500)
+
+    async def _noop_write_audit(**kwargs):
+        return None
+
+    monkeypatch.setattr(sos, "write_audit", _noop_write_audit, raising=False)
+
+    fake_db = FakeDB()
+    _override_db(fake_db)
+
+    payload = {
+        "user_id": str(uuid.uuid4()),
+        "location": {"lat": 1.0, "lon": 2.0},
+        "emergency_contact": {"name": "A", "phone": "+353123"},
+        "variables": {"x": "y"},
+    }
+
+    res = client.post("/v1/emergency/sms", json=payload)
+    assert res.status_code == 503, res.text
+
+
+# ----------------------------
+# Tests: /v1/test/sms
+# ----------------------------
+def test_test_sms_success_200(client, monkeypatch):
+    monkeypatch.setattr(sos.httpx, "AsyncClient", DummyAsyncClientTestSMSOK)
+
+    async def _noop_write_audit(**kwargs):
+        return None
+
+    monkeypatch.setattr(sos, "write_audit", _noop_write_audit, raising=False)
+
+    fake_db = FakeDB()
+    _override_db(fake_db)
+
+    payload = {"to_phone": "+353123", "message": "hi"}
+    res = client.post("/v1/test/sms", json=payload)
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["status"] == "sent"
+    assert data["to"] == "+353123"
+    assert data["message"] == "hi"
+
+
+def test_test_sms_fail_503(client, monkeypatch):
+    monkeypatch.setattr(sos.httpx, "AsyncClient", DummyAsyncClientTestSMSFail)
+
+    async def _noop_write_audit(**kwargs):
+        return None
+
+    monkeypatch.setattr(sos, "write_audit", _noop_write_audit, raising=False)
+
+    fake_db = FakeDB()
+    _override_db(fake_db)
+
+    payload = {"to_phone": "+353123", "message": "hi"}
+    res = client.post("/v1/test/sms", json=payload)
+    assert res.status_code == 503, res.text

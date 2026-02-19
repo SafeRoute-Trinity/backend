@@ -13,6 +13,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Path
 from pydantic import BaseModel
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
@@ -158,16 +159,6 @@ async def root():
     return {"service": "sos", "status": "running"}
 
 
-import uuid
-from datetime import datetime
-
-from sqlalchemy.exc import IntegrityError
-
-from models.base import Base
-
-print("TABLES IN METADATA:", list(Base.metadata.tables.keys())[:50])
-
-
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
 async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
     now = datetime.utcnow()
@@ -179,7 +170,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
         route_id=body.route_id,
         lat=body.lat,
         lon=body.lon,
-        trigger_type=body.trigger_type,  # TBD
+        trigger_type=body.trigger_type,
         messaging_id=None,  # Messaging ID: Twilio SID
         message=body.message,  # optional
     )
@@ -209,7 +200,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
         db.add(
             Audit(
                 log_id=uuid.uuid4(),
-                user_id=body.user_id,  # request 沒 user_id
+                user_id=body.user_id,
                 event_type="emergency",
                 event_id=emergency_id,
                 message=(
