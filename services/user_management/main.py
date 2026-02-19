@@ -383,13 +383,17 @@ async def register_user(
     db=Depends(get_db),
 ):
     """
-    Register a new user account.
-    DB schema (saferoute.users):
-      - user_id UUID PK default gen_random_uuid()
-      - created_at timestamptz not null default now()
-      - updated_at timestamptz not null default now()
-      - last_login timestamptz null
-      - email unique
+        Register a new user account.
+    <<<<<<< HEAD
+    =======
+
+    >>>>>>> b5b51bd (feat: update user_models apis)
+        DB schema (saferoute.users):
+          - user_id UUID PK default gen_random_uuid()
+          - created_at timestamptz not null default now()
+          - updated_at timestamptz not null default now()
+          - last_login timestamptz null
+          - email unique
     """
     now = datetime.utcnow()
     token = f"atk_{uuid.uuid4().hex[:6]}"

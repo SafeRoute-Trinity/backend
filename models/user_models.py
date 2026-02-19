@@ -10,13 +10,9 @@ from typing import List, Optional
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-
-class Base(DeclarativeBase):
-    """Base class for all database models."""
-
-    pass
+from models.base import Base
 
 
 class User(Base):

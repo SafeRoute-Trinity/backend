@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from typing import Dict, Literal, Optional
 
@@ -72,7 +73,7 @@ class EmergencyCallPoint(BaseModel):
 
 
 class EmergencyCallRequest(BaseModel):
-    sos_id: str
+    emergency_id: Optional[uuid.UUID]
     phone_number: str
     user_location: EmergencyCallPoint
     call_reason: str
