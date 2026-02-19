@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
 from libs.db import DatabaseType, get_database_factory, initialize_databases
+from models.audit import Audit
+from models.emergency import Emergency
 
 logger = logging.getLogger(__name__)
 
@@ -86,13 +88,16 @@ class Point(BaseModel):
 
 
 class EmergencyCallRequest(BaseModel):
-    sos_id: str
-    phone_number: str
-    user_location: Point
-    call_reason: str
+    user_id: uuid.UUID
+    route_id: Optional[uuid.UUID]
+    lat: float
+    lon: float
+    trigger_type: Literal["manual", "automatic"]
+    message: Optional[str] = None
 
 
 class EmergencyCallResponse(BaseModel):
+    emergency_id: uuid.UUID
     status: Literal["initiated", "failed"]
     call_id: str
     timestamp: datetime
@@ -110,8 +115,7 @@ class SOSContact(BaseModel):
 
 
 class EmergencySMSRequest(BaseModel):
-    sos_id: str
-    user_id: str
+    user_id: uuid.UUID
     location: Optional[Location] = None
     emergency_contact: SOSContact
     message_template: Optional[str] = None
@@ -121,15 +125,16 @@ class EmergencySMSRequest(BaseModel):
 
 
 class EmergencySMSResponse(BaseModel):
+    emergency_id: uuid.UUID
     status: Literal["sent", "failed"]
-    sms_id: str
+    sms_id: uuid.UUID
     timestamp: datetime
     message_sent: str
     recipient: str
 
 
 class EmergencyStatusResponse(BaseModel):
-    sos_id: str
+    emergency_id: uuid.UUID
     call_status: Literal["initiated", "connected", "failed", "not_triggered"]
     sms_status: Literal["sent", "failed", "not_sent"]
     last_update: datetime
@@ -153,64 +158,113 @@ async def root():
     return {"service": "sos", "status": "running"}
 
 
+import uuid
+from datetime import datetime
+
+from sqlalchemy.exc import IntegrityError
+
+from models.base import Base
+
+print("TABLES IN METADATA:", list(Base.metadata.tables.keys())[:50])
+
+
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
 async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
-    # Validate sos_id is UUID
-    parsed_sos_id = _uuid_or_none(body.sos_id)
-    if parsed_sos_id is None:
-        raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
+    now = datetime.utcnow()
+    emergency_id = uuid.uuid4()
 
+    call_row = Emergency(
+        emergency_id=emergency_id,
+        user_id=body.user_id,
+        route_id=body.route_id,
+        lat=body.lat,
+        lon=body.lon,
+        trigger_type=body.trigger_type,  # TBD
+        messaging_id=None,  # Messaging ID: Twilio SID
+        message=body.message,  # optional
+    )
+    db.add(call_row)
+
+    await db.flush()
+
+    # call notification service
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
+            resp = await client.post(
                 f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/call",
-                json=body.model_dump(),
+                json=body.model_dump(mode="json"),
             )
-            response.raise_for_status()
-            data = response.json()
+            resp.raise_for_status()
+            data = resp.json()
     except httpx.HTTPError as e:
-        # Log the httpx error details for easier debugging
         logger.exception(
-            "Notification service call failed for sos_id=%s phone=%s: %s",
-            body.sos_id,
-            body.phone_number,
+            "Notification service call failed for emergency_id=%s error=%s",
+            emergency_id,
             repr(e),
         )
 
-        await write_audit(
-            db=db,
-            event_type="emergency",
-            user_id=None,  # call request 没 user_id 字段
-            event_id=parsed_sos_id,
-            message=f"sos_call_failed sos_id={body.sos_id} phone={body.phone_number} reason={body.call_reason} error={str(e)}",
-            commit=True,
+        call_row.updated_at = datetime.utcnow()
+
+        # Audit（failed）
+        db.add(
+            Audit(
+                log_id=uuid.uuid4(),
+                user_id=body.user_id,  # request 沒 user_id
+                event_type="emergency",
+                event_id=emergency_id,
+                message=(
+                    f"sos_call_failed emergency_id={emergency_id} "
+                    f"trigger_type={body.trigger_type} error={str(e)}"
+                ),
+                created_at=now,
+                updated_at=now,
+            )
         )
+
+        try:
+            await db.commit()
+        except Exception:
+            await db.rollback()
+
         raise HTTPException(
             status_code=503,
             detail=f"Failed to dispatch SOS call via notification service: {str(e)}",
         )
 
-    now = datetime.utcnow()
-    STATUS[body.sos_id] = {
-        "sos_id": body.sos_id,
-        "call_status": data.get("status", "failed"),
+    call_status = data.get("status", "failed")
+
+    call_row.updated_at = datetime.utcnow()
+
+    STATUS[emergency_id] = {
+        "emergency_id": emergency_id,
+        "call_status": call_status,
         "sms_status": "not_sent",
-        "last_update": now,
+        "last_update": datetime.utcnow(),
     }
 
-    SOS_CALLS_TOTAL.inc()
-    # Audit call success
-    try:
-        await write_audit(
-            db=db,
-            event_type="emergency",
+    db.add(
+        Audit(
+            log_id=uuid.uuid4(),
             user_id=None,
-            event_id=parsed_sos_id,
-            message=f"sos_call_initiated sos_id={body.sos_id} phone={body.phone_number} status={data.get('status')}",
-            commit=True,
+            event_type="emergency",
+            event_id=emergency_id,
+            message=f"sos_call_initiated emergency_id={emergency_id} status={call_status}",
+            created_at=now,
+            updated_at=now,
         )
-    except Exception:
-        pass
+    )
+
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not create emergency call record: {e}",
+        )
+
+    SOS_CALLS_TOTAL.inc()
+    data["emergency_id"] = emergency_id
     return EmergencyCallResponse(**data)
 
 
@@ -220,11 +274,12 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     Send emergency SMS with rich details (templates, variables, location).
     Delegates delivery to the Notification service.
     """
-    # Validate required UUIDs: sos_id and user_id
-    parsed_sos_id = _uuid_or_none(body.sos_id)
+    # Validate required UUIDs: emergency_id and user_id
+
+    emergency_id = uuid.uuid4()
+
     parsed_user_id = _uuid_or_none(body.user_id)
-    if parsed_sos_id is None:
-        raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
+
     if parsed_user_id is None:
         raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
 
@@ -232,15 +287,15 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
-                json=body.model_dump(),
+                json=body.model_dump(mode="json"),
             )
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPError as e:
         # Log and audit SMS failure
         logger.exception(
-            "Notification service SMS call failed for sos_id=%s user_id=%s recipient=%s: %s",
-            body.sos_id,
+            "Notification service SMS call failed for emergency_id=%s user_id=%s recipient=%s: %s",
+            emergency_id,
             body.user_id,
             body.emergency_contact.phone,
             repr(e),
@@ -251,8 +306,8 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
                 db=db,
                 event_type="emergency",
                 user_id=parsed_user_id,
-                event_id=parsed_sos_id,
-                message=f"sos_sms_failed sos_id={body.sos_id} user_id={body.user_id} recipient={body.emergency_contact.phone} error={str(e)}",
+                event_id=emergency_id,
+                message=f"sos_sms_failed emergency_id={emergency_id} user_id={body.user_id} recipient={body.emergency_contact.phone} error={str(e)}",
                 commit=True,
             )
         except Exception:
@@ -267,9 +322,9 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     # Update status
     now = datetime.utcnow()
     s = STATUS.setdefault(
-        body.sos_id,
+        emergency_id,
         {
-            "sos_id": body.sos_id,
+            "emergency_id": emergency_id,
             "call_status": "not_triggered",
             "sms_status": "not_sent",
             "last_update": now,
@@ -287,8 +342,8 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
             db=db,
             event_type="emergency",
             user_id=parsed_user_id,
-            event_id=parsed_sos_id,
-            message=f"sos_sms_sent sos_id={body.sos_id} user_id={body.user_id} sms_id={data.get('sms_id')} recipient={data.get('recipient')}",
+            event_id=emergency_id,
+            message=f"sos_sms_sent emergency_id={emergency_id} user_id={body.user_id} sms_id={data.get('sms_id')} recipient={data.get('recipient')}",
             commit=True,
         )
     except Exception:
@@ -298,18 +353,18 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     return EmergencySMSResponse(**data)
 
 
-@app.get("/v1/emergency/{sos_id}/status", response_model=EmergencyStatusResponse)
-async def get_status(sos_id: str = Path(..., description="SOS event to check")):
-    # Validate sos_id is UUID
-    parsed_sos_id = _uuid_or_none(sos_id)
-    if parsed_sos_id is None:
-        raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
+@app.get("/v1/emergency/{emergency_id}/status", response_model=EmergencyStatusResponse)
+async def get_status(emergency_id: str = Path(..., description="SOS event to check")):
+    # Validate emergency_id is UUID
+    parsed_emergency_id = _uuid_or_none(emergency_id)
+    if parsed_emergency_id is None:
+        raise HTTPException(status_code=400, detail="emergency_id must be a valid UUID")
 
     now = datetime.utcnow()
     s = STATUS.get(
-        sos_id,
+        emergency_id,
         {
-            "sos_id": sos_id,
+            "emergency_id": emergency_id,
             "call_status": "not_triggered",
             "sms_status": "not_sent",
             "last_update": now,

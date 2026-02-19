@@ -200,8 +200,8 @@ async def send_emergency_call(body: EmergencyCallRequest, db: AsyncSession = Dep
                 db=db,
                 event_type="notification",
                 user_id=_maybe_uuid(body.user_id) if hasattr(body, "user_id") else None,
-                event_id=None,
-                message=f"notification.call_initiated sos_id={body.sos_id} call_id={resp.call_id} status={resp.status}",
+                event_id=body.emergency_id,
+                message=f"notification.call_initiated sos_id={body.emergency_id} call_id={resp.call_id} status={resp.status}",
                 commit=True,
             )
         except Exception:
@@ -213,7 +213,7 @@ async def send_emergency_call(body: EmergencyCallRequest, db: AsyncSession = Dep
                 db=db,
                 event_type="notification",
                 user_id=_maybe_uuid(body.user_id) if hasattr(body, "user_id") else None,
-                event_id=None,
+                event_id=body.emergency_id,
                 message=f"notification.call_failed sos_id={body.sos_id} error={str(e)}",
                 commit=True,
             )
