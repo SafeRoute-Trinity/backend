@@ -6,10 +6,9 @@ import logging
 import os
 import sys
 import time
+import uuid
 from datetime import datetime
-from typing import List, Literal, Optional
-from sqlalchemy import text
-from uuid import UUID
+from typing import List, Optional
 
 from fastapi import Depends, HTTPException, Request, Response
 from prometheus_client import (
@@ -20,6 +19,7 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
@@ -206,7 +206,7 @@ class FeedbackSubmitRequest(BaseModel):
 
 
 class FeedbackSubmitResponse(BaseModel):
-    feedback_id: UUID
+    feedback_id: uuid.UUID
     status: Status
     ticket_number: str
     created_at: datetime
@@ -227,7 +227,7 @@ class FeedbackValidateResponse(BaseModel):
 
 
 class FeedbackStatusResponse(BaseModel):
-    feedback_id: UUID
+    feedback_id: uuid.UUID
     ticket_number: str
     status: Status
     type: Optional[FeedbackType] = None
@@ -418,20 +418,18 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
 
 
 @app.get("/v1/feedback/{feedback_id}/status", response_model=FeedbackStatusResponse)
-async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
+async def status(feedback_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     FEEDBACK_STATUS_CHECKS_TOTAL.inc()
-
-    parsed_feedback_id = _maybe_uuid(feedback_id)
-    if parsed_feedback_id is None:
-        raise HTTPException(status_code=400, detail="feedback_id must be a valid UUID")
 
     # === DB-backed status lookup ===
     row = (
-        await db.execute(
-            text(
-                """
+        (
+            await db.execute(
+                text(
+                    """
                 SELECT
                   feedback_id,
+                  user_id,
                   ticket_number,
                   status,
                   type AS feedback_type,
@@ -441,10 +439,13 @@ async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
                 FROM saferoute.feedback
                 WHERE feedback_id = :fid
                 """
-            ),
-            {"fid": str(parsed_feedback_id)},
+                ),
+                {"fid": str(feedback_id)},
+            )
         )
-    ).mappings().first()
+        .mappings()
+        .first()
+    )
 
     if not row:
         raise HTTPException(status_code=404, detail="feedback not found")
@@ -453,9 +454,23 @@ async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
     if api_type == "others":
         api_type = "other"
 
+    # Extract user_id from the feedback record and parse it for audit logging
+    user_id_str = row.get("user_id")
+    parsed_user_id = _maybe_uuid(user_id_str) if user_id_str else None
+
+    # Extract feedback_id as UUID from database row (already a UUID object)
+    feedback_id_uuid = row["feedback_id"]
+    if not isinstance(feedback_id_uuid, uuid.UUID):
+        # Fallback: use the validated UUID from path parameter
+        feedback_id_uuid = feedback_id
+
     res = FeedbackStatusResponse(
         feedback_id=str(row["feedback_id"]),
-        ticket_number=str(row["ticket_number"]) if row["ticket_number"] is not None else f"TKT-{datetime.utcnow().year}-DB",
+        ticket_number=(
+            str(row["ticket_number"])
+            if row["ticket_number"] is not None
+            else f"TKT-{datetime.utcnow().year}-DB"
+        ),
         status=row["status"],
         type=api_type,
         severity=row["severity"],
@@ -467,8 +482,8 @@ async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
         await write_audit(
             db=db,
             event_type="feedback",
-            user_id=None,
-            event_id=parsed_feedback_id,
+            user_id=parsed_user_id,
+            event_id=feedback_id_uuid,
             message=f"feedback.status_check feedback_id={feedback_id} ticket={row.get('ticket_number')} status={row.get('status')}",
             commit=True,
         )
@@ -476,8 +491,6 @@ async def status(feedback_id: str, db: AsyncSession = Depends(get_db)):
         logger.exception("Failed to write audit for feedback.status_check")
 
     return res
-
-
 
 
 # ========= PROMETHEUS METRICS ENDPOINT =========
