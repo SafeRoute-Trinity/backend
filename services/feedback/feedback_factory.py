@@ -59,11 +59,12 @@ class FeedbackFactory:
         user_id: str,
         ticket_number: str,
         route_id: Optional[str] = None,
-        session_id: Optional[str] = None,
+        lat: Optional[float] = None,
+        lon: Optional[float] = None,
         type: Optional[FeedbackType] = None,
         severity: Optional[SeverityType] = None,
-        location: Optional[dict] = None,
         description: Optional[str] = None,
+        location: Optional[dict] = None,
         attachments: Optional[list] = None,
         status: Status = Status.RECEIVED,
         created_at: Optional[datetime] = None,
@@ -74,15 +75,16 @@ class FeedbackFactory:
         Args:
             db: Database session
             feedback_id: UUID for the feedback
-            user_id: UUID of the user submitting feedback
-            ticket_number: Unique ticket number for the feedback
-            route_id: Optional route ID
-            session_id: Optional session ID
+            user_id: User ID string (VARCHAR)
+            ticket_number: Unique ticket number string for the feedback
+            route_id: Optional route ID string
+            lat: Optional latitude coordinate
+            lon: Optional longitude coordinate
             type: Optional feedback type enum
             severity: Optional severity level enum
-            location: Optional location dict with 'lat' and 'lon'
             description: Optional feedback description
-            attachments: Optional list of attachment URLs
+            location: Optional location dict (JSON)
+            attachments: Optional list of attachment URLs (JSON)
             status: Feedback status (default: RECEIVED)
             created_at: Optional creation timestamp (defaults to now)
 
@@ -113,11 +115,12 @@ class FeedbackFactory:
             user_id=user_id,
             ticket_number=ticket_number,
             route_id=route_id,
-            session_id=session_id,
+            lat=lat,
+            lon=lon,
             type=type_value,
             severity=severity_value,
-            location=location,
             description=description,
+            location=location,
             attachments=attachments,
             status=status_value,
             created_at=created_at,

@@ -260,13 +260,29 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     elif user_id_str.startswith("auth0_"):
         user_id_str = user_id_str.replace("auth0_", "", 1)
 
-    # For audit logging, try to parse as UUID if possible, but store as string
+    # For audit logging, try to parse as UUID if possible
     parsed_user_id = _maybe_uuid(user_id_str)
+
+    # Extract lat/lon from location dict if provided
+    lat = None
+    lon = None
+    location_dict = None
+    if body.location:
+        if isinstance(body.location, dict):
+            lat = body.location.get("lat")
+            lon = body.location.get("lon")
+            location_dict = body.location
+        elif hasattr(body.location, "lat") and hasattr(body.location, "lon"):
+            lat = body.location.lat
+            lon = body.location.lon
+            location_dict = {"lat": lat, "lon": lon}
 
     # Generate feedback_id and timestamp
     feedback_id = uuid.uuid4()
     now = datetime.utcnow()
-    ticket = f"TKT-{now.year}-{uuid.uuid4().hex[:6]}"
+
+    # Generate ticket number as string (format: TKT-YYYY-XXXXXX)
+    ticket_number = f"TKT-{now.year}-{uuid.uuid4().hex[:6]}"
 
     # Get feedback factory and create feedback record in database
     feedback_factory = get_feedback_factory()
@@ -275,13 +291,14 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
             db=db,
             feedback_id=feedback_id,
             user_id=user_id_str,
-            ticket_number=ticket,
+            ticket_number=ticket_number,
             route_id=body.route_id,
-            session_id=body.session_id,
+            lat=lat,
+            lon=lon,
             type=body.type,
             severity=body.severity,
-            location=body.location,
             description=body.description,
+            location=location_dict,
             attachments=body.attachments,
             status=Status.RECEIVED,
             created_at=now,
@@ -290,7 +307,9 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         # Commit the transaction
         await db.commit()
 
-        logger.info(f"Feedback created successfully: feedback_id={feedback_id} ticket={ticket}")
+        logger.info(
+            f"Feedback created successfully: feedback_id={feedback_id} ticket={ticket_number}"
+        )
     except Exception as e:
         await db.rollback()
         logger.exception(f"Failed to create feedback in database: {e}")
@@ -298,7 +317,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
 
     # Also store in in-memory cache for backward compatibility
     FEEDBACK[str(feedback_id)] = {
-        "ticket_number": ticket,
+        "ticket_number": ticket_number,
         "status": Status.RECEIVED.value,
         "type": body.type.value if body.type else None,
         "severity": body.severity.value if body.severity else None,
@@ -310,10 +329,8 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     # Add optional fields if provided
     if body.route_id is not None:
         FEEDBACK[str(feedback_id)]["route_id"] = body.route_id
-    if body.session_id is not None:
-        FEEDBACK[str(feedback_id)]["session_id"] = body.session_id
-    if body.location is not None:
-        FEEDBACK[str(feedback_id)]["location"] = body.location
+    if location_dict is not None:
+        FEEDBACK[str(feedback_id)]["location"] = location_dict
     if body.description is not None:
         FEEDBACK[str(feedback_id)]["description"] = body.description
     if body.attachments is not None:
@@ -322,7 +339,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     resp = FeedbackSubmitResponse(
         feedback_id=feedback_id,
         status=Status.RECEIVED,
-        ticket_number=ticket,
+        ticket_number=ticket_number,
         created_at=now,
     )
 
@@ -333,7 +350,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
             event_type="feedback",
             user_id=parsed_user_id,
             event_id=feedback_id,
-            message=f"feedback.submit feedback_id={feedback_id} ticket={ticket} type={body.type} severity={body.severity} route_id={body.route_id} session_id={body.session_id}",
+            message=f"feedback.submit feedback_id={feedback_id} ticket={ticket_number} type={body.type} severity={body.severity} route_id={body.route_id}",
             commit=True,
         )
     except Exception:
@@ -405,41 +422,73 @@ async def status(feedback_id: UUID, db: AsyncSession = Depends(get_db)):
     # Business metric
     FEEDBACK_STATUS_CHECKS_TOTAL.inc()
 
-    # TODO: when the Feedback schema finished, add the line below and get user_id
-    # result = await db.execute(select(Feedback).where(Feedback.feedback_id == feedback_id))
+    # Query database for feedback record
+    from sqlalchemy import select
 
-    # TODO: when the Feedback schema finished, add the line below and get user_id
-    # user_id = result.user_id
-    user_id = None
+    from models.feedback import Feedback
 
-    fb = FEEDBACK.get(str(feedback_id))
-    now = datetime.utcnow()
-    if not fb:
+    result = await db.execute(select(Feedback).where(Feedback.feedback_id == feedback_id))
+    feedback_record = result.scalar_one_or_none()
+
+    if not feedback_record:
+        # Fallback to in-memory cache for backward compatibility
+        fb = FEEDBACK.get(str(feedback_id))
+        if not fb:
+            raise HTTPException(status_code=404, detail=f"Feedback with id {feedback_id} not found")
+        now = datetime.utcnow()
         fb = {
-            "ticket_number": f"TKT-{now.year}-DEMO",
-            "status": Status.RECEIVED.value,
-            "created_at": now,
-            "updated_at": now,
+            "ticket_number": fb.get("ticket_number", 0),
+            "status": fb.get("status", Status.RECEIVED.value),
+            "type": fb.get("type"),
+            "severity": fb.get("severity"),
+            "created_at": fb.get("created_at", now),
+            "updated_at": fb.get("updated_at", now),
         }
-    # Convert string values from dict to enum types for response
-    # Handle optional type and severity fields
-    feedback_type = None
-    if "type" in fb and fb["type"]:
-        feedback_type = FeedbackType(fb["type"])
 
-    severity = None
-    if "severity" in fb and fb["severity"]:
-        severity = SeverityType(fb["severity"])
+        feedback_type = None
+        if fb.get("type"):
+            feedback_type = FeedbackType(fb["type"])
 
-    res = FeedbackStatusResponse(
-        feedback_id=feedback_id,
-        ticket_number=fb["ticket_number"],
-        status=Status(fb["status"]),
-        type=feedback_type,
-        severity=severity,
-        created_at=fb["created_at"],
-        updated_at=fb["updated_at"],
-    )
+        severity = None
+        if fb.get("severity"):
+            severity = SeverityType(fb["severity"])
+
+        res = FeedbackStatusResponse(
+            feedback_id=feedback_id,
+            ticket_number=(
+                int(fb["ticket_number"])
+                if isinstance(fb["ticket_number"], str)
+                else fb["ticket_number"]
+            ),
+            status=Status(fb["status"]),
+            type=feedback_type,
+            severity=severity,
+            created_at=fb["created_at"],
+            updated_at=fb["updated_at"],
+        )
+        user_id = None
+    else:
+        # Convert database record to response
+        feedback_type = None
+        if feedback_record.type:
+            feedback_type = FeedbackType(feedback_record.type)
+
+        severity = None
+        if feedback_record.severity:
+            severity = SeverityType(feedback_record.severity)
+
+        res = FeedbackStatusResponse(
+            feedback_id=feedback_record.feedback_id,
+            ticket_number=(
+                str(feedback_record.ticket_number) if feedback_record.ticket_number else ""
+            ),
+            status=Status(feedback_record.status),
+            type=feedback_type,
+            severity=severity,
+            created_at=feedback_record.created_at,
+            updated_at=feedback_record.updated_at,
+        )
+        user_id = _maybe_uuid(feedback_record.user_id)
 
     # Audit status lookup
     try:

@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, String, Text
+from sqlalchemy import JSON, DateTime, Float, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -38,24 +38,17 @@ class Feedback(Base):
     )
 
     route_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    session_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
-    # Store enum values as strings
+    lat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    lon: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
     type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    severity: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    severity: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="received")
 
-    # Location stored as JSON: {"lat": float, "lon": float}
-    location: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    ticket_number: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, unique=True)
 
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # Attachments stored as JSON array of URLs
-    attachments: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
-
-    ticket_number: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
-
-    # Status stored as enum value string
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="received")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -68,3 +61,12 @@ class Feedback(Base):
         nullable=False,
         server_default="now()",
     )
+
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Additional columns that exist in the database
+    location: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    attachments: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
