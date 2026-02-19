@@ -116,6 +116,7 @@ async def get_ch_route_geojson(route_request: "RouteRequest") -> dict:
         raise HTTPException(status_code=502, detail="Invalid CH response format.")
     return body
 
+
 # Create service configuration
 service_config = ServiceAppConfig(
     service_name="safety_scoring",
