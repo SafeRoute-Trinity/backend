@@ -15,7 +15,7 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import validators
@@ -23,6 +23,9 @@ import validators
 logger = logging.getLogger(__name__)
 
 # Try to import transformers for ML model (optional dependency)
+if TYPE_CHECKING:
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
+
 try:
     import torch
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -30,6 +33,9 @@ try:
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     TRANSFORMERS_AVAILABLE = False
+    # Create type aliases for when transformers is not available
+    AutoTokenizer = Any  # type: ignore
+    AutoModelForSequenceClassification = Any  # type: ignore
     logger.warning("transformers library not available. ML-based spam detection will be disabled.")
 
 # Try to import better-profanity (optional dependency)
@@ -234,8 +240,8 @@ class MLSpamDetector:
             model_name: Hugging Face model name
         """
         self.model_name = model_name
-        self.tokenizer: Optional[AutoTokenizer] = None
-        self.model: Optional[AutoModelForSequenceClassification] = None
+        self.tokenizer: Optional[Any] = None
+        self.model: Optional[Any] = None
         self._initialized = False
 
     async def initialize(self) -> None:
@@ -260,8 +266,10 @@ class MLSpamDetector:
             logger.error(f"Failed to initialize ML spam detector: {e}")
             self._initialized = False
 
-    def _load_model(self) -> Tuple[AutoTokenizer, AutoModelForSequenceClassification]:
+    def _load_model(self) -> Tuple[Any, Any]:
         """Load model synchronously (called in executor)."""
+        if not TRANSFORMERS_AVAILABLE:
+            raise RuntimeError("Transformers library not available")
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         model = AutoModelForSequenceClassification.from_pretrained(self.model_name)
         return tokenizer, model
@@ -295,28 +303,39 @@ class MLSpamDetector:
             )
 
             # Model returns logits, interpret them for binary classification
-            if isinstance(result, torch.Tensor):
-                # Handle tensor shape: [batch_size, num_classes] or [num_classes]
-                if result.dim() == 2:
-                    # Batch dimension present: [1, 2] -> take first item
-                    logits = result[0]
+            if TRANSFORMERS_AVAILABLE:
+                try:
+                    is_tensor = isinstance(result, torch.Tensor)
+                except (NameError, AttributeError, TypeError):
+                    is_tensor = False
+
+                if is_tensor:
+                    # Handle tensor shape: [batch_size, num_classes] or [num_classes]
+                    if result.dim() == 2:
+                        # Batch dimension present: [1, 2] -> take first item
+                        logits = result[0]
+                    else:
+                        # No batch dimension: [2]
+                        logits = result
+
+                    # Apply softmax to get probabilities
+                    probabilities = torch.softmax(logits, dim=-1)
+
+                    # Assuming binary classification: [not_spam, spam]
+                    # If model has different label mapping, adjust accordingly
+                    if len(probabilities) >= 2:
+                        spam_prob = float(probabilities[1])  # Probability of spam class
+                    else:
+                        # Fallback: use first class if only one output
+                        spam_prob = float(probabilities[0])
+
+                    is_spam = spam_prob > 0.5
+                    confidence = abs(spam_prob - 0.5) * 2  # Normalize to 0-1
                 else:
-                    # No batch dimension: [2]
-                    logits = result
-
-                # Apply softmax to get probabilities
-                probabilities = torch.softmax(logits, dim=-1)
-
-                # Assuming binary classification: [not_spam, spam]
-                # If model has different label mapping, adjust accordingly
-                if len(probabilities) >= 2:
-                    spam_prob = float(probabilities[1])  # Probability of spam class
-                else:
-                    # Fallback: use first class if only one output
-                    spam_prob = float(probabilities[0])
-
-                is_spam = spam_prob > 0.5
-                confidence = abs(spam_prob - 0.5) * 2  # Normalize to 0-1
+                    # Fallback if result is not a tensor
+                    is_spam = False
+                    spam_prob = 0.5
+                    confidence = 0.0
             else:
                 # Fallback if result format is unexpected
                 is_spam = False
@@ -338,7 +357,7 @@ class MLSpamDetector:
                 reason=f"ML detection error: {str(e)}",
             )
 
-    def _predict(self, text: str) -> Optional[torch.Tensor]:
+    def _predict(self, text: str) -> Optional[Any]:
         """
         Run model prediction synchronously (called in executor).
 
@@ -348,7 +367,7 @@ class MLSpamDetector:
         Returns:
             Tensor with logits, or None if error
         """
-        if not self.tokenizer or not self.model:
+        if not TRANSFORMERS_AVAILABLE or not self.tokenizer or not self.model:
             return None
 
         try:
