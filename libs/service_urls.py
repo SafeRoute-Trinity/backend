@@ -21,6 +21,7 @@ LOCAL_PORTS = {
     "routing": 20002,
     "safety_scoring": 20003,
     "feedback": 20004,
+    "graphhopper_proxy": 20007,
     "sos": 20006,
     "user_management": 20000,
 }
@@ -53,3 +54,8 @@ SAFETY_SCORING_SERVICE_URL = _get_service_url("safety_scoring", LOCAL_PORTS["saf
 FEEDBACK_SERVICE_URL = _get_service_url("feedback", LOCAL_PORTS["feedback"])
 SOS_SERVICE_URL = _get_service_url("sos", LOCAL_PORTS["sos"])
 USER_MANAGEMENT_SERVICE_URL = _get_service_url("user_management", LOCAL_PORTS["user_management"])
+GRAPHHOPPER_PROXY_SERVICE_URL = _get_service_url(
+    "graphhopper_proxy", LOCAL_PORTS["graphhopper_proxy"]
+)
+# Backward compatibility for older references.
+CH_ROUTING_SERVICE_URL = GRAPHHOPPER_PROXY_SERVICE_URL

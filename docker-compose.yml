@@ -58,8 +58,26 @@ services:
       - POSTGIS_USER=saferoute
       - POSTGIS_PASSWORD=Owen1SL8te
       - POSTGIS_DATABASE=saferoute_geo
+      - GRAPHHOPPER_PROXY_SERVICE_URL=http://graphhopper-proxy-service:80
     depends_on:
       - postgis
+      - graphhopper-proxy-service
+    restart: unless-stopped
+
+  graphhopper-proxy-service:
+    build:
+      context: .
+      dockerfile: services/graphhopper_proxy/dockerfile
+    image: saferoute/graphhopper-proxy:latest
+    container_name: saferoute-graphhopper-proxy
+    platform: linux/amd64
+    ports:
+      - "20007:80"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PORT=80
+      - GRAPHHOPPER_BASE_URL=http://host.docker.internal:8989
+      - GRAPHHOPPER_PROFILE=foot
     restart: unless-stopped
 
   feedback-service:
