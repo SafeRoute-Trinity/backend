@@ -39,28 +39,6 @@ from services.notification.schemas import (
     TestSMSRequest,
     TestSMSResponse,
 )
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from libs.audit_logger import write_audit
-from libs.db import DatabaseType, get_database_factory, initialize_databases
-from libs.fastapi_service import (
-    CORSMiddlewareConfig,
-    FastAPIServiceFactory,
-    ServiceAppConfig,
-)
-from libs.twilio_client import get_twilio_client
-from services.notification.manager import NotificationManager
-from services.notification.schemas import (
-    CreateResp,
-    EmergencyCallRequest,
-    EmergencyCallResponse,
-    EmergencySMSRequest,
-    EmergencySMSResponse,
-    SOSNotificationRequest,
-    StatusResp,
-    TestSMSRequest,
-    TestSMSResponse,
-)
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
