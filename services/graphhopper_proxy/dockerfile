@@ -1,0 +1,32 @@
+# Use official Python image
+FROM --platform=linux/amd64 python:3.9
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+COPY libs/ ./libs/
+COPY common/ ./common/
+COPY models/ ./models/
+COPY services/__init__.py ./services/
+
+RUN pip install --upgrade pip && \
+    pip install -r requirements.txt
+
+COPY services/graphhopper_proxy/ ./services/graphhopper_proxy/
+
+ARG PORT=80
+ENV PORT=${PORT}
+
+EXPOSE ${PORT}
+
+CMD ["sh", "-c", "uvicorn services.graphhopper_proxy.main:app --host 0.0.0.0 --port ${PORT}"]

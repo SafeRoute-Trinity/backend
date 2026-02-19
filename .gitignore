@@ -32,9 +32,11 @@ htmlcov/
 .python-version
 .ruff_cache/
 .mypy_cache/
-
-asebackend-env/
-
-#python venv
-asebackend-env/
 run_safety_service.sh
+docker-compose-local.yml
+graphhopper/data/*.osm.pbf
+graphhopper/data/*.osm
+graphhopper/cache/*
+!graphhopper/cache/.gitkeep
+graphhopper/*.jar
+asebackend-env/
