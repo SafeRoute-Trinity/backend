@@ -24,6 +24,20 @@ class FakeScalarsResult:
         return list(self._items)
 
 
+class FakeExecuteResult:
+    """Mock result for db.execute(); supports scalar_one() and scalars().all()."""
+
+    def __init__(self, scalar_one_value=None, scalars_all=None):
+        self._scalar_one_value = scalar_one_value
+        self._scalars_all = list(scalars_all) if scalars_all is not None else []
+
+    def scalar_one(self):
+        return self._scalar_one_value
+
+    def scalars(self):
+        return FakeScalarsResult(self._scalars_all)
+
+
 class FakeDB:
     """
     Mock async db session for endpoints that use:
@@ -39,10 +53,12 @@ class FakeDB:
         *,
         scalar_results=None,  # queue for db.scalar(...)
         scalars_results=None,  # queue for db.scalars(...)
+        execute_results=None,  # queue for db.execute(...) (FakeExecuteResult)
         commit_raises: Exception | None = None,
     ):
         self.scalar_results = list(scalar_results) if scalar_results is not None else []
         self.scalars_results = list(scalars_results) if scalars_results is not None else []
+        self.execute_results = list(execute_results) if execute_results is not None else []
         self.commit_raises = commit_raises
 
         self.added = []
@@ -57,6 +73,9 @@ class FakeDB:
     async def scalars(self, stmt):
         items = self.scalars_results.pop(0) if self.scalars_results else []
         return FakeScalarsResult(items)
+
+    async def execute(self, stmt):
+        return self.execute_results.pop(0) if self.execute_results else FakeExecuteResult()
 
     def add(self, obj):
         self.added.append(obj)
@@ -147,7 +166,10 @@ def test_list_trusted_contacts_success(client):
 
     fake_db = FakeDB(
         scalar_results=[make_user(uid)],  # user exists
-        scalars_results=[[c1, c2]],  # contacts list
+        execute_results=[
+            FakeExecuteResult(scalar_one_value=2),  # count for pagination
+        ],
+        scalars_results=[[c1, c2]],  # contacts list (paginated query)
     )
     override_db(fake_db)
 
@@ -156,11 +178,19 @@ def test_list_trusted_contacts_success(client):
     data = res.json()
 
     assert str(uid) == str(data["user_id"])
-    assert isinstance(data["contacts"], list)
-    assert len(data["contacts"]) == 2
-    assert data["contacts"][0]["phone"] == "+353111111111"
-    assert data["contacts"][0]["is_primary"] is True
-    assert data["contacts"][1]["phone"] == "+353222222222"
+    assert isinstance(data["data"], list)
+    assert len(data["data"]) == 2
+    assert data["data"][0]["phone"] == "+353111111111"
+    assert data["data"][0]["is_primary"] is True
+    assert data["data"][1]["phone"] == "+353222222222"
+    assert "filters" in data
+    assert data["filters"]["is_primary"] == ""
+    assert data["filters"]["search"] == ""
+    assert "pagination" in data
+    assert data["pagination"]["page"] == 1
+    assert data["pagination"]["page_size"] == 20
+    assert data["pagination"]["total"] == 2
+    assert data["pagination"]["total_pages"] == 1
 
 
 def test_list_trusted_contacts_invalid_uuid_400(client):
