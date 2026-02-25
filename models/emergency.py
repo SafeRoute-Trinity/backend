@@ -8,7 +8,6 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     String,
-    Text,
     text,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -58,7 +57,7 @@ class Emergency(Base):
     )
 
     message = Column(
-        Text,
+        String(50),
         nullable=True,
     )
 
