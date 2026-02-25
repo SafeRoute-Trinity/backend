@@ -219,7 +219,7 @@ class Coordinate(BaseModel):
 
 class WeightUpdateRequest(BaseModel):
     edge_id: int  # gid in ways table
-    weight: float
+    safety_factor: float
 
 
 class RouteRequest(BaseModel):
@@ -387,8 +387,22 @@ async def update_danger_zone(
         """
         )
 
-        await db.execute(update_query, {"w": update.weight, "geom": geom_res[0]})
+        await db.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
         await db.commit()
+
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
 
         # Metric
         SAFETY_WEIGHTS_UPDATES_TOTAL.inc()
@@ -396,24 +410,41 @@ async def update_danger_zone(
         return {
             "status": "updated",
             "id": update.edge_id,
-            "weight": update.weight,
+            "safety_factor": update.safety_factor,
             "note": "Updated bidirectional edges",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         await db.rollback()
-        print(f"Error updating weight: {e}")
+        print(f"Error updating safety_factor: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/danger_zones/{zone_id}")
 async def reset_danger_zone(zone_id: int, db: AsyncSession = Depends(get_safety_scoring_db)):
     """
-    Reset safety info for a zone to default (1.0).
+    Reset safety_factor(weight) for a zone to default (1.0).
     """
     try:
         query = text("UPDATE ways SET safety_factor = 1.0 WHERE gid = :id")
         await db.execute(query, {"id": zone_id})
         await db.commit()
+
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
+
         return {"status": "reset"}
     except Exception as e:
         await db.rollback()
@@ -653,6 +684,20 @@ async def get_route(
         walking_speed_mps = 1.39
         duration_seconds = total_distance / walking_speed_mps
 
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
+
         return {
             "type": "FeatureCollection",
             "features": features,
@@ -677,11 +722,11 @@ async def get_route(
 
 @app.get("/api/graph")
 async def get_graph_geojson(
-    min_lng: float = Query(..., description="Minimum Longitude"),
-    min_lat: float = Query(..., description="Minimum Latitude"),
-    max_lng: float = Query(..., description="Maximum Longitude"),
-    max_lat: float = Query(..., description="Maximum Latitude"),
-    db: AsyncSession = Depends(get_safety_scoring_db),
+    min_lng: float = Query(..., description="Minimum Longitude(-180 ~ 180)"),
+    min_lat: float = Query(..., description="Minimum Latitude(-90 ~ 90)"),
+    max_lng: float = Query(..., description="Maximum Longitude(-180 ~ 180)"),
+    max_lat: float = Query(..., description="Maximum Latitude(-90 ~ 90)"),
+    postgisDb: AsyncSession = Depends(get_safety_scoring_db),
 ):
     try:
         # Filter by bounding box using PostGIS && operator (overlap)
@@ -695,7 +740,7 @@ async def get_graph_geojson(
         """
         )
 
-        result = await db.execute(
+        result = await postgisDb.execute(
             query, {"min_lng": min_lng, "min_lat": min_lat, "max_lng": max_lng, "max_lat": max_lat}
         )
         rows = result.fetchall()
@@ -716,6 +761,20 @@ async def get_graph_geojson(
 
 
 # --- Existing Validated Endpoints (Keep for backward compatibility) ---
+
+
+@app.get("/v1/safety/factors", response_model=SafetyFactorsResponse)
+async def get_factors(body: SafetyFactorsRequest):
+    # Business metric: count factors queries
+    SAFETY_FACTORS_QUERIES_TOTAL.inc()
+
+    return SafetyFactorsResponse(
+        location=PointModel(lat=body.lat, lon=body.lon),
+        radius_m=body.radius_m,
+        factors={"cctv_cameras": 3, "street_lights": 5, "foot_traffic_level": "medium"},
+        composite_score=88.0,
+        queried_at=datetime.utcnow(),
+    )
 
 
 @app.post("/v1/safety/score-route", response_model=ScoreRouteResponse)
@@ -744,20 +803,6 @@ async def score_route(body: ScoreRouteRequest):
         segments=segs,
         alerts=[],
         calculated_at=datetime.utcnow(),
-    )
-
-
-@app.post("/v1/safety/factors", response_model=SafetyFactorsResponse)
-async def get_factors(body: SafetyFactorsRequest):
-    # Business metric: count factors queries
-    SAFETY_FACTORS_QUERIES_TOTAL.inc()
-
-    return SafetyFactorsResponse(
-        location=PointModel(lat=body.lat, lon=body.lon),
-        radius_m=body.radius_m,
-        factors={"cctv_cameras": 3, "street_lights": 5, "foot_traffic_level": "medium"},
-        composite_score=88.0,
-        queried_at=datetime.utcnow(),
     )
 
 
