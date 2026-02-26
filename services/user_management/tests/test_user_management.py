@@ -514,4 +514,3 @@ def test_upsert_trusted_contact_user_not_found_404(client):
 # FastAPI matches "audit" as a user_id parameter value.
 # To fix this, the audit route should be registered BEFORE the
 # get_user route, or moved to a different URL (e.g. /v1/audit/logs).
-
