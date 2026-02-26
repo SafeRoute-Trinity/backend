@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 from typing import List, Optional
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -107,7 +107,7 @@ class UserPreferences(Base):
     )
 
 
-class TrustedContact(Base):
+class Contact(Base):
     """
     ORM for DB table: saferoute.contacts
     """
@@ -122,42 +122,64 @@ class TrustedContact(Base):
         server_default="gen_random_uuid()",
     )
 
+    # DB is varchar(255)
     user_id: Mapped[str] = mapped_column(
         String(255),
         ForeignKey("saferoute.users.user_id", ondelete="CASCADE"),
         nullable=False,
-        index=True,  # idx_contacts_user_id
+        index=True,
     )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     phone: Mapped[str] = mapped_column(String(20), nullable=False)
 
-    # DB column is "relationship" varchar(50) nullable
-    relation: Mapped[Optional[str]] = mapped_column(
+    relationship: Mapped[Optional[str]] = mapped_column(
         "relationship",
         String(50),
         nullable=True,
     )
 
-    is_primary: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        server_default="false",
-    )
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default="now()",
+        DateTime(timezone=True), nullable=False, server_default="now()"
     )
-
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-        server_default="now()",
+        DateTime(timezone=True), nullable=False, server_default="now()"
     )
 
-    user: Mapped["User"] = relationship(
-        back_populates="trusted_contacts",
-        lazy="selectin",
+
+class TrustedContact(Base):
+    """
+    ORM for DB table: saferoute.trusted_contacts
+    """
+
+    __tablename__ = "trusted_contacts"
+    __table_args__ = {"schema": "saferoute"}
+
+    # DB 没默认 -> 后端必须生成
+    contact_id: Mapped[uuid.UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        nullable=False,
     )
+
+    # DB 是 varchar(255) -> 用 String
+    user_id: Mapped[str] = mapped_column(
+        String(255),
+        ForeignKey("saferoute.users.user_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # DB 是 text -> 用 Text/ String 都行，我建议 Text
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    phone: Mapped[str] = mapped_column(Text, nullable=False)
+    relationship: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # DB 可空
+    is_primary: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+
+    # DB 没默认且 not null -> 后端必须写
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
