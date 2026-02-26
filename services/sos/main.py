@@ -179,12 +179,18 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
 
     await db.flush()
 
-    # call notification service
+    # call notification service (payload must match notification's EmergencyCallRequest schema)
     try:
+        notification_payload = {
+            "emergency_id": str(emergency_id),
+            "phone_number": "",  # Notification expects it; not used by manager yet
+            "user_location": {"lat": body.lat, "lon": body.lon},
+            "call_reason": body.message or f"SOS {body.trigger_type}",
+        }
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/call",
-                json=body.model_dump(mode="json"),
+                json=notification_payload,
             )
             resp.raise_for_status()
             data = resp.json()

@@ -25,7 +25,7 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from models.audit import Audit
@@ -41,7 +41,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-from models.user_models import TrustedContact, User, UserPreferences
+from models.user_models import Contact, TrustedContact, User, UserPreferences
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -182,6 +182,56 @@ class AuditLogResponse(BaseModel):
     event_id: Optional[uuid.UUID] = None
     message: str
     created_at: datetime
+    updated_at: datetime
+
+
+# ======== Contact Models ===========================
+class ContactItem(BaseModel):
+    name: str
+    phone: str
+    relationship: Optional[str] = None
+    is_primary: Optional[bool] = False
+
+
+class ContactsSetRequest(BaseModel):
+    contacts: List[ContactItem]
+
+
+class ContactDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    contact_id: uuid.UUID
+    user_id: str
+    name: str
+    phone: str
+    relationship: Optional[str] = None
+    is_primary: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ContactsSetResponse(BaseModel):
+    user_id: str
+    status: Literal["contacts_set"]
+    contacts: List[ContactDTO]
+    updated_at: datetime
+
+
+class TrustedContactDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    contact_id: uuid.UUID
+    user_id: str
+    name: str
+    phone: str
+    relationship: Optional[str] = None
+    is_primary: Optional[bool] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TrustedContactsSetResponse(BaseModel):
+    user_id: str
+    status: Literal["trusted_contacts_set"]
+    contacts: List[TrustedContactDTO]
     updated_at: datetime
 
 
@@ -688,53 +738,99 @@ async def save_preferences(
     )
 
 
-@app.get(
+@app.put(
     "/v1/users/{user_id}/trusted-contacts",
-    response_model=TrustedContactsListResponse,
+    response_model=TrustedContactsSetResponse,
     tags=["User Management"],
-    summary="List trusted contacts (paginated, filterable)",
 )
-async def list_trusted_contacts(
+async def set_trusted_contacts(
     user_id: str,
-    page: int = Query(1, ge=1, description="Page number (1-based)"),
-    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
-    is_primary: Optional[bool] = Query(None, description="Filter by primary contact (true/false)"),
-    search: Optional[str] = Query(None, description="Filter by name (case-insensitive contains)"),
+    body: ContactsSetRequest,
     db=Depends(get_db),
 ):
-    """
-    List trusted contacts for a user from PostgreSQL (saferoute.contacts).
-    Supports pagination and optional filters (is_primary, name search).
-    """
+    now = datetime.utcnow()
 
-    # ---- (1) Ensure user exists ----
-    user = await db.scalar(select(User).where(User.user_id == user_id))
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found",
+    if sum(1 for c in body.contacts if c.is_primary) > 1:
+        raise HTTPException(status_code=400, detail="Only one trusted contact can be primary")
+
+    # 1) delete old
+    await db.execute(delete(TrustedContact).where(TrustedContact.user_id == user_id))
+
+    # 2) insert new
+    rows = [
+        TrustedContact(
+            contact_id=uuid.uuid4(),  #
+            user_id=user_id,
+            name=c.name,
+            phone=c.phone,
+            relationship=c.relationship,
+            is_primary=c.is_primary,  #
+            created_at=now,  #
+            updated_at=now,  #
         )
+        for c in body.contacts
+    ]
+    db.add_all(rows)
+    await db.flush()
 
-    # ---- (2) Query contacts ----
-    offset = (page - 1) * page_size
-    stmt = (
-        select(TrustedContact)
-        .where(TrustedContact.user_id == user_id)
-        .order_by(
-            desc(TrustedContact.is_primary),
-            TrustedContact.created_at.asc(),
-        )
-        .offset(offset)
-        .limit(page_size)
-    )
-    contacts = (await db.scalars(stmt)).all()
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"Could not set trusted contacts: {e}")
 
-    # ---- (3) ORM → DTO ----
-    items = [TrustedContactDTO.model_validate(c) for c in contacts]
-
-    return TrustedContactsListResponse(
+    return TrustedContactsSetResponse(
         user_id=user_id,
-        contacts=items,
+        status="trusted_contacts_set",
+        contacts=[TrustedContactDTO.model_validate(r) for r in rows],
+        updated_at=now,
+    )
+
+
+@app.put(
+    "/v1/users/{user_id}/contacts",
+    response_model=ContactsSetResponse,
+    tags=["User Management"],
+)
+async def set_contacts(
+    user_id: str,
+    body: ContactsSetRequest,
+    db=Depends(get_db),
+):
+    now = datetime.utcnow()
+
+    # 可选：最多一个 primary
+    if sum(1 for c in body.contacts if c.is_primary) > 1:
+        raise HTTPException(status_code=400, detail="Only one contact can be primary")
+
+    # 1) delete old
+    await db.execute(delete(Contact).where(Contact.user_id == user_id))
+
+    # 2) insert new (contacts 表：contact_id/created_at/updated_at 都有默认，可不手动填)
+    rows = [
+        Contact(
+            user_id=user_id,
+            name=c.name,
+            phone=c.phone,
+            relationship=c.relationship,
+            is_primary=bool(c.is_primary),
+        )
+        for c in body.contacts
+    ]
+    db.add_all(rows)
+    await db.flush()
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Could not set contacts")
+
+    return ContactsSetResponse(
+        user_id=user_id,
+        status="contacts_set",
+        contacts=[ContactDTO.model_validate(r) for r in rows],
+        updated_at=now,
     )
 
 
