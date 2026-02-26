@@ -237,13 +237,10 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         "created_at": now,
         "updated_at": now,
     }
-    # Validate required UUIDs: feedback_id and user_id should be valid UUID strings
-    parsed_user_id = _maybe_uuid(getattr(body, "user_id", None))
+    # Validate feedback_id is UUID (user_id is now a plain string from Auth0)
     parsed_feedback_id = _maybe_uuid(getattr(body, "feedback_id", None))
     if parsed_feedback_id is None:
         raise HTTPException(status_code=400, detail="feedback_id must be a valid UUID")
-    if parsed_user_id is None:
-        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
 
     resp = FeedbackSubmitResponse(
         feedback_id=body.feedback_id,
@@ -256,7 +253,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         await write_audit(
             db=db,
             event_type="feedback",
-            user_id=parsed_user_id,
+            user_id=body.user_id,
             event_id=parsed_feedback_id,
             message=f"feedback.submit feedback_id={body.feedback_id} ticket={ticket} type={body.type} severity={body.severity}",
             commit=True,
@@ -272,10 +269,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
     # Business metric
     FEEDBACK_VALIDATIONS_TOTAL.inc()
 
-    # Validate user_id is a UUID (required for feedback validation traces)
-    parsed_user_id = _maybe_uuid(getattr(body, "user_id", None))
-    if parsed_user_id is None:
-        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
+    # user_id is now a plain string from Auth0
 
     is_spam = body.recent_submissions_count > 10
     resp = FeedbackValidateResponse(
@@ -291,7 +285,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
         await write_audit(
             db=db,
             event_type="feedback",
-            user_id=parsed_user_id,
+            user_id=body.user_id,
             event_id=None,
             message=f"feedback.validate user_id={body.user_id} is_spam={resp.is_spam} confidence={resp.confidence} allow_submission={resp.allow_submission}",
             commit=True,

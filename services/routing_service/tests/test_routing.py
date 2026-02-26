@@ -33,7 +33,7 @@ def test_health_check():
 
 def test_calculate_route():
     """Test route calculation with valid request"""
-    user_id = str(uuid.uuid4())
+    user_id = "test-user-routing"
     payload = {
         "origin": {"lat": 53.3498, "lon": -6.2603},
         "destination": {"lat": 53.3398, "lon": -6.2503},
@@ -68,7 +68,7 @@ def test_calculate_route():
 
 def test_calculate_route_invalid_coordinates():
     """Test route calculation with invalid coordinates"""
-    user_id = str(uuid.uuid4())
+    user_id = "test-user-routing"
     payload = {
         "origin": {"lat": 200.0, "lon": -6.2603},  # Invalid latitude
         "destination": {"lat": 53.3398, "lon": -6.2503},
@@ -89,7 +89,7 @@ def test_calculate_route_missing_fields():
     payload = {
         "origin": {"lat": 53.3498, "lon": -6.2603},
         # Missing destination
-        "user_id": str(uuid.uuid4()),
+        "user_id": "test-user-routing",
     }
 
     response = client.post("/v1/routes/calculate", json=payload)
@@ -98,7 +98,7 @@ def test_calculate_route_missing_fields():
 
 def test_calculate_route_different_optimization():
     """Test route calculation with different optimization preferences"""
-    user_id = str(uuid.uuid4())
+    user_id = "test-user-routing"
 
     for optimize_for in ["safety", "time", "distance", "balanced"]:
         payload = {
@@ -154,7 +154,7 @@ def test_recalculate_route_different_reasons():
 def test_navigation_start():
     """Test navigation session start"""
     route_id = str(uuid.uuid4())
-    user_id = str(uuid.uuid4())
+    user_id = "test-user-nav"
 
     payload = {
         "route_id": route_id,

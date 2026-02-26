@@ -203,7 +203,7 @@ class RoutePreferences(BaseModel):
 class RouteCalculateRequest(BaseModel):
     origin: Point
     destination: Point
-    user_id: uuid.UUID
+    user_id: str
     preferences: RoutePreferences
     time_of_day: Optional[datetime] = None
 
@@ -239,7 +239,7 @@ class RecalculateRequest(BaseModel):
 
 class NavigationStartRequest(BaseModel):
     route_id: uuid.UUID
-    user_id: uuid.UUID
+    user_id: str
     estimated_arrival: datetime
 
 
@@ -338,7 +338,7 @@ async def recalc(
         RouteCalculateRequest(
             origin=body.current_location,
             destination=body.current_location,
-            user_id=uuid.uuid4(),
+            user_id="recalc-placeholder",
             preferences=RoutePreferences(optimize_for="balanced", transport_mode="walking"),
         )
     )

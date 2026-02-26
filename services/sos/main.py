@@ -220,13 +220,10 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     Send emergency SMS with rich details (templates, variables, location).
     Delegates delivery to the Notification service.
     """
-    # Validate required UUIDs: sos_id and user_id
+    # Validate sos_id is UUID (user_id is now a plain string from Auth0)
     parsed_sos_id = _uuid_or_none(body.sos_id)
-    parsed_user_id = _uuid_or_none(body.user_id)
     if parsed_sos_id is None:
         raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
-    if parsed_user_id is None:
-        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -250,7 +247,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
             await write_audit(
                 db=db,
                 event_type="emergency",
-                user_id=parsed_user_id,
+                user_id=body.user_id,
                 event_id=parsed_sos_id,
                 message=f"sos_sms_failed sos_id={body.sos_id} user_id={body.user_id} recipient={body.emergency_contact.phone} error={str(e)}",
                 commit=True,
@@ -286,7 +283,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         await write_audit(
             db=db,
             event_type="emergency",
-            user_id=parsed_user_id,
+            user_id=body.user_id,
             event_id=parsed_sos_id,
             message=f"sos_sms_sent sos_id={body.sos_id} user_id={body.user_id} sms_id={data.get('sms_id')} recipient={data.get('recipient')}",
             commit=True,
