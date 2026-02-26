@@ -167,8 +167,6 @@ def test_emergency_sms_success(monkeypatch):
     assert data["status"] in ["sent", "failed"]
 
 
-
-
 def test_emergency_sms_missing_fields():
     payload = {"sos_id": "SOS-INCOMPLETE"}
     r = client.post("/v1/emergency/sms", json=payload)

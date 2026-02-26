@@ -489,7 +489,9 @@ async def get_current_user(
             user_id=user_id,
             email=profile.get("email") or f"{user_id}@unknown",
             name=profile.get("name") or profile.get("nickname") or None,
-            phone=profile.get("phone") or auth.get("https://saferouteapp.eu.auth0.com/phone") or None,
+            phone=profile.get("phone")
+            or auth.get("https://saferouteapp.eu.auth0.com/phone")
+            or None,
             created_at=now,
             updated_at=now,
             last_login=now,
@@ -1072,4 +1074,3 @@ async def metrics_endpoint():
     Prometheus will scrape this endpoint inside the cluster.
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
-

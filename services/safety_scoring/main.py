@@ -858,8 +858,7 @@ async def get_graph_geojson(
             LIMIT 2000
             ORDER BY gid
             LIMIT :limit OFFSET :offset
-        """
-        )
+        """)
         result = await postgisDb.execute(query, params)
         rows = result.fetchall()
 
