@@ -34,7 +34,6 @@ from models.audit import Audit
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from common.constants import AUTH_TOKEN_TTL
 from libs.auth.auth0_verify import verify_token
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
@@ -717,6 +716,7 @@ async def list_trusted_contacts(
         )
 
     # ---- (2) Query contacts ----
+    offset = (page - 1) * page_size
     stmt = (
         select(TrustedContact)
         .where(TrustedContact.user_id == user_id)

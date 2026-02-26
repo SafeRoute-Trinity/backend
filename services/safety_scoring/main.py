@@ -386,13 +386,15 @@ async def get_danger_zones(
         offset = (page - 1) * page_size
         params["limit"] = page_size
         params["offset"] = offset
-        query = text(f"""
+        query = text(
+            f"""
             SELECT gid, safety_factor, ST_AsGeoJSON(geometry) as geojson
             FROM ways
             WHERE {where_clause}
             ORDER BY gid
             LIMIT :limit OFFSET :offset
-            """)
+            """
+        )
         result = await db.execute(query, params)
         rows = result.fetchall()
 
@@ -449,11 +451,13 @@ async def update_danger_zone(
             raise HTTPException(status_code=404, detail="Edge not found")
 
         # Update ALL edges that share exactly the same geometry (spatial equality)
-        update_query = text("""
+        update_query = text(
+            """
             UPDATE ways 
             SET safety_factor = :w 
             WHERE ST_Equals(geometry, :geom)
-        """)
+        """
+        )
 
         await postgisDb.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
         await postgisDb.commit()
@@ -542,6 +546,9 @@ async def get_route(
     request: RouteRequest,
     db: AsyncSession = Depends(get_db),
     postgisDb: AsyncSession = Depends(get_postgis_db),
+    algorithm: str = Query(
+        "dijkstra", description="Routing algorithm: ch, dijkstra, astar, bd_dijkstra"
+    ),
 ):
     """
     Calculate route using pgRouting with safety weights.
@@ -560,7 +567,8 @@ async def get_route(
 
         # 1. Find nearest graph node by snapping to nearest edge endpoint.
         # This avoids scanning huge start/end-point candidate sets.
-        node_query = text("""
+        node_query = text(
+            """
         WITH p AS (
             SELECT ST_SetSRID(ST_MakePoint(:lng, :lat), 4326) AS pt
         ),
@@ -579,7 +587,8 @@ async def get_route(
                 ELSE target
             END AS id
         FROM nearest_edge;
-        """)
+        """
+        )
 
         start_res = await postgisDb.execute(
             node_query, {"lng": request.start.lng, "lat": request.start.lat}
@@ -629,10 +638,6 @@ async def get_route(
         """
         )
 
-        route_res = await postgisDb.execute(
-            routing_query, {"sql": cost_sql, "start_node": start_node, "end_node": end_node}
-        )
-        routes = route_res.fetchall()
         expanded = max(0.001, ROUTE_SUBGRAPH_EXPAND_DEGREES)
         max_expand = max(expanded, ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES)
         expansions: List[float] = []
@@ -669,7 +674,7 @@ async def get_route(
                 WHERE w.geometry && rw.bbox
             """
             try:
-                route_res = await db.execute(
+                route_res = await postgisDb.execute(
                     routing_query, {"sql": cost_sql, "start_node": start_node, "end_node": end_node}
                 )
                 routes = route_res.fetchall()
@@ -816,6 +821,8 @@ async def get_graph_geojson(
     min_lat: float = Query(..., description="Minimum Latitude(-90 ~ 90)"),
     max_lng: float = Query(..., description="Maximum Longitude(-180 ~ 180)"),
     max_lat: float = Query(..., description="Maximum Latitude(-90 ~ 90)"),
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(100, ge=1, le=2000, description="Items per page"),
     postgisDb: AsyncSession = Depends(get_postgis_db),
 ):
     """
@@ -836,27 +843,26 @@ async def get_graph_geojson(
         }
 
         # Total count in bbox
-        count_query = text("""
+        count_query = text(
+            """
             SELECT COUNT(*) FROM ways
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
-            """)
+            """
+        )
         count_result = await postgisDb.execute(count_query, params)
         total = count_result.scalar() or 0
 
         offset = (page - 1) * page_size
         params["limit"] = page_size
         params["offset"] = offset
-        query = text("""
+        query = text(
+            """
             SELECT gid, source, target, ST_AsGeoJSON(geometry) as geojson, safety_factor
             FROM ways
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
-            LIMIT 2000
             ORDER BY gid
             LIMIT :limit OFFSET :offset
-        """)
-
-        result = await postgisDb.execute(
-            query, {"min_lng": min_lng, "min_lat": min_lat, "max_lng": max_lng, "max_lat": max_lat}
+        """
         )
         result = await postgisDb.execute(query, params)
         rows = result.fetchall()

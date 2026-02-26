@@ -116,6 +116,7 @@ class SOSContact(BaseModel):
 
 
 class EmergencySMSRequest(BaseModel):
+    sos_id: str  # SOS/emergency identifier (UUID string) for status correlation
     user_id: uuid.UUID
     location: Optional[Location] = None
     emergency_contact: SOSContact
@@ -282,7 +283,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         # Log and audit SMS failure
         logger.exception(
             "Notification service SMS call failed for emergency_id=%s user_id=%s recipient=%s: %s",
-            emergency_id,
+            body.sos_id,
             body.user_id,
             body.emergency_contact.phone,
             repr(e),
@@ -309,9 +310,9 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     # Update status
     now = datetime.utcnow()
     s = STATUS.setdefault(
-        emergency_id,
+        body.sos_id,
         {
-            "emergency_id": emergency_id,
+            "emergency_id": body.sos_id,
             "call_status": "not_triggered",
             "sms_status": "not_sent",
             "last_update": now,
