@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.feedback import Feedback
@@ -167,6 +167,47 @@ class FeedbackFactory:
         """
         result = await db.execute(select(Feedback).where(Feedback.ticket_number == ticket_number))
         return result.scalar_one_or_none()
+
+    async def get_feedbacks(
+        self,
+        db: AsyncSession,
+        user_id: Optional[str] = None,
+        status: Optional[Status] = None,
+        feedback_type: Optional[FeedbackType] = None,
+        skip: int = 0,
+        limit: int = 10
+    ) -> tuple[int, list[Feedback]]:
+        """
+        Retrieve a paginated list of feedback records with dynamic filtering.
+        """
+        # 1. Build the base queries
+        query = select(Feedback)
+        count_query = select(func.count(Feedback.feedback_id))
+        
+        # 2. Apply filters dynamically (MUST be applied to BOTH queries)
+        if user_id:
+            query = query.where(Feedback.user_id == user_id)
+            count_query = count_query.where(Feedback.user_id == user_id)
+            
+        if status:
+            query = query.where(Feedback.status == status)
+            count_query = count_query.where(Feedback.status == status)
+            
+        if feedback_type:
+            query = query.where(Feedback.type == feedback_type)
+            count_query = count_query.where(Feedback.type == feedback_type)
+
+        # 3. Execute count query
+        total_count = await db.scalar(count_query) or 0
+
+        # 4. Apply sorting and pagination
+        query = query.order_by(Feedback.created_at.desc()).offset(skip).limit(limit)
+        
+        # 5. Fetch results
+        result = await db.execute(query)
+        feedbacks = result.scalars().all()
+
+        return total_count, list(feedbacks)
 
 
 # Global factory instance (similar to DatabaseFactory pattern)

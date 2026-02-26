@@ -8,9 +8,9 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, TypeVar, Generic, Dict, Any
 
-from fastapi import Depends, HTTPException, Request, Response
+from fastapi import Depends, HTTPException, Request, Response, Query
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -18,7 +18,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -235,12 +235,32 @@ class FeedbackStatusResponse(BaseModel):
     updated_at: datetime
 
 
+class PaginationMeta(BaseModel):
+    """Metadata for paginated list responses."""
+    page: int = Field(..., ge=1, description="Current page (1-based)")
+    page_size: int = Field(..., ge=1, le=100, description="Items per page")
+    total: int = Field(..., ge=0, description="Total number of items")
+    total_pages: int = Field(..., ge=0, description="Total number of pages")
+
+T = TypeVar('T')
+class PaginatedResponse(BaseModel, Generic[T]):
+    """Paginated list of feedback with filters."""
+    data: List[T]
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    pagination: PaginationMeta
+
+
 # ========= ROUTES =========
 
 
 @app.get("/")
 async def root():
     return {"service": "feedback", "status": "running"}
+
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    return {"status": "ok", "service": "feedback"}
 
 
 @app.post("/v1/feedback/submit", response_model=FeedbackSubmitResponse)
@@ -356,6 +376,69 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         logger.exception("Failed to write audit for feedback.submit")
 
     return resp
+
+
+@app.get("/v1/feedback", response_model=PaginatedResponse[FeedbackStatusResponse])
+async def list_feedback(
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    status: Optional[Status] = Query(None, description="Filter by feedback status (received, resolved, rejected)"),
+    type: Optional[FeedbackType] = Query(None, description="Filter by feedback type (safety_issue, route_quality, others)"),
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Retrieve a paginated list of historical feedbacks with optional filtering.
+    """
+    skip = (page - 1) * page_size
+    
+    feedback_factory = get_feedback_factory()
+    
+    total_count, feedbacks = await feedback_factory.get_feedbacks(
+        db=db, 
+        user_id=user_id, 
+        status=status,
+        feedback_type=type,
+        skip=skip, 
+        limit=page_size
+    )
+
+    data = []
+    for row in feedbacks:
+        api_type = row.type if row.type else None
+        if api_type == "others":
+            api_type = "other"
+            
+        data.append(FeedbackStatusResponse(
+            feedback_id=row.feedback_id,
+            ticket_number=row.ticket_number or f"TKT-{datetime.utcnow().year}-DB",
+            status=row.status,
+            type=api_type,
+            severity=row.severity,
+            created_at=row.created_at,
+            updated_at=row.updated_at
+        ))
+
+    total_pages = max(0, (total_count + page_size - 1) // page_size) if page_size > 0 else 0
+
+    applied_filters = {
+        "status": status.value if status else "",
+        "type": type.value if type else "",
+        "user_id": user_id if user_id else ""
+    }
+
+    pagination_meta = PaginationMeta(
+        page=page,
+        page_size=page_size,
+        total=total_count,
+        total_pages=total_pages
+    )
+
+    return PaginatedResponse(
+        data=data,
+        filters=applied_filters,
+        pagination=pagination_meta
+    )
 
 
 @app.post("/v1/feedback/validate", response_model=FeedbackValidateResponse)
