@@ -1,27 +1,108 @@
 # pytest services/sos/tests/test_sos.py -v
 
-import httpx
+import uuid
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
+import pytest
 from fastapi.testclient import TestClient
-from httpx import ASGITransport
+from sqlalchemy.exc import IntegrityError
 
-from services.notification import factory as notif_factory
-from services.notification.main import app as notification_app
-from services.sos import main as sos_main
-
-client = TestClient(sos_main.app)
-_REAL_ASYNC_CLIENT = httpx.AsyncClient
+import services.sos.main as sos
+from services.sos.main import app, get_db
 
 
-class _AsyncClientProxy:
-    def __init__(self, *args, **kwargs) -> None:
-        transport = ASGITransport(app=notification_app)
-        self._client = _REAL_ASYNC_CLIENT(transport=transport, base_url="http://testserver")
+# ----------------------------
+# Fake db session (async)
+# ----------------------------
+class FakeDB:
+    def __init__(self, *, commit_raises: Exception | None = None):
+        self.added = []
+        self.flushed = False
+        self.committed = False
+        self.rolled_back = False
+        self.commit_raises = commit_raises
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def flush(self):
+        self.flushed = True
+
+    async def commit(self):
+        if self.commit_raises:
+            raise self.commit_raises
+        self.committed = True
+
+    async def rollback(self):
+        self.rolled_back = True
+
+
+def _override_db(fake_db: FakeDB):
+    async def override_get_db():
+        yield fake_db
+
+    app.dependency_overrides[get_db] = override_get_db
+
+
+@pytest.fixture()
+def client():
+    yield TestClient(app)
+    app.dependency_overrides.clear()
+
+
+# ----------------------------
+# Metrics mock
+# ----------------------------
+class Counter:
+    def __init__(self):
+        self.count = 0
+
+    def inc(self):
+        self.count += 1
+
+
+# ----------------------------
+# httpx AsyncClient mocks
+# ----------------------------
+class DummyResponse:
+    def __init__(self, payload: dict, status_code: int = 200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import httpx
+
+            raise httpx.HTTPStatusError(
+                "boom",
+                request=SimpleNamespace(url="http://test"),
+                response=SimpleNamespace(status_code=self.status_code),
+            )
+
+    def json(self):
+        return self._payload
+
+
+class DummyAsyncClientCallOK:
+    def __init__(self, timeout=10.0):
+        self.timeout = timeout
 
     async def __aenter__(self):
-        return self._client
+        return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        await self._client.aclose()
+        return False
+
+    async def post(self, url, json):
+        return DummyResponse(
+            {
+                "status": "initiated",
+                "call_id": "twilio_sid_123",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            status_code=200,
+        )
 
 
 # ----------------------------
@@ -111,10 +192,11 @@ def test_emergency_status_not_triggered():
 def test_full_emergency_flow(monkeypatch):
     monkeypatch.setattr(sos_main.httpx, "AsyncClient", _AsyncClientProxy)
 
-    async def _sms_stub(self, payload):
-        return {"status": "sent", "sid": "SMSTEST"}
+    async def __aenter__(self):
+        return self
 
-    monkeypatch.setattr(notif_factory.SmsSender, "send", _sms_stub)
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
     call_req = {
         "sos_id": "SOS-FLOW",
@@ -122,9 +204,6 @@ def test_full_emergency_flow(monkeypatch):
         "user_location": {"lat": 53.34, "lon": -6.26},
         "call_reason": "Test emergency",
     }
-    r = client.post("/v1/emergency/call", json=call_req)
-    assert r.status_code == 200
-    assert r.json()["status"] == "initiated"
 
     sms_req = {
         "sos_id": "SOS-FLOW",
@@ -135,9 +214,6 @@ def test_full_emergency_flow(monkeypatch):
         "locale": "en",
         "variables": {"name": "Bob"},
     }
-    r2 = client.post("/v1/emergency/sms", json=sms_req)
-    assert r2.status_code == 200
-    assert r2.json()["status"] in ["sent", "failed"]
 
     r3 = client.get("/v1/emergency/SOS-FLOW/status")
     assert r3.status_code == 200

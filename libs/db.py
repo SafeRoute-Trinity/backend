@@ -35,6 +35,8 @@ class DatabaseConfig:
         password: str = "",
         database: str = "saferoute",
         echo: bool = False,
+        sslmode: Optional[str] = None,
+        database_url: Optional[str] = None,
     ):
         """
         Initialize database configuration.
@@ -47,6 +49,8 @@ class DatabaseConfig:
             password: Database password
             database: Database name
             echo: Whether to echo SQL queries (for debugging)
+            sslmode: SSL mode (e.g., "disable", "require", "prefer")
+            database_url: Full database URL (if provided, takes precedence over individual params)
         """
         self.db_type = db_type
         self.host = host
@@ -55,6 +59,8 @@ class DatabaseConfig:
         self.password = password
         self.database = database
         self.echo = echo
+        self.sslmode = sslmode
+        self.database_url = database_url
 
     def get_url(self) -> str:
         """
@@ -63,8 +69,18 @@ class DatabaseConfig:
         Returns:
             Database URL string for SQLAlchemy
         """
+        # If a full database URL is provided, use it directly
+        if self.database_url:
+            return self.database_url
+
         password_encoded = quote_plus(self.password) if self.password else ""
-        return f"postgresql+asyncpg://{self.user}:{password_encoded}@{self.host}:{self.port}/{self.database}"
+        url = f"postgresql+asyncpg://{self.user}:{password_encoded}@{self.host}:{self.port}/{self.database}"
+
+        # Add SSL mode if specified
+        if self.sslmode:
+            url += f"?sslmode={self.sslmode}"
+
+        return url
 
 
 class DatabaseConnection:
@@ -149,9 +165,32 @@ class DatabaseFactory:
         """
         Create PostgreSQL database configuration from environment variables.
 
+        Priority:
+        1. DATABASE_URL (if set, used directly)
+        2. Individual environment variables (POSTGRES_HOST, etc.) + SSL mode
+
         Returns:
             DatabaseConfig for PostgreSQL
         """
+        # Check for full database URL first (highest priority)
+        database_url = os.getenv("DATABASE_URL")
+        if database_url:
+            # Convert postgresql:// to postgresql+asyncpg:// if needed
+            if database_url.startswith("postgresql://"):
+                database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            elif database_url.startswith("postgres://"):
+                database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+
+            return DatabaseConfig(
+                db_type=DatabaseType.POSTGRES,
+                database_url=database_url,
+                echo=os.getenv("POSTGRES_ECHO", "false").lower() == "true",
+            )
+
+        # Otherwise, use individual environment variables
+        # Check for SSL mode: DATABASE_SSLMODE or POSTGRES_SSLMODE
+        sslmode = os.getenv("DATABASE_SSLMODE") or os.getenv("POSTGRES_SSLMODE")
+
         return DatabaseConfig(
             db_type=DatabaseType.POSTGRES,
             host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
@@ -160,15 +199,39 @@ class DatabaseFactory:
             password=os.getenv("POSTGRES_PASSWORD", ""),
             database=os.getenv("POSTGRES_DATABASE", "saferoute"),
             echo=os.getenv("POSTGRES_ECHO", "false").lower() == "true",
+            sslmode=sslmode,
         )
 
     def _create_postgis_config(self) -> DatabaseConfig:
         """
         Create PostGIS database configuration from environment variables.
 
+        Priority:
+        1. POSTGIS_DATABASE_URL (if set, used directly)
+        2. Individual environment variables (POSTGIS_HOST, etc.) + SSL mode
+
         Returns:
             DatabaseConfig for PostGIS
         """
+        # Check for full database URL first (highest priority)
+        database_url = os.getenv("POSTGIS_DATABASE_URL")
+        if database_url:
+            # Convert postgresql:// to postgresql+asyncpg:// if needed
+            if database_url.startswith("postgresql://"):
+                database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            elif database_url.startswith("postgres://"):
+                database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+
+            return DatabaseConfig(
+                db_type=DatabaseType.POSTGIS,
+                database_url=database_url,
+                echo=os.getenv("POSTGIS_ECHO", "false").lower() == "true",
+            )
+
+        # Otherwise, use individual environment variables
+        # Check for SSL mode: DATABASE_SSLMODE or POSTGIS_SSLMODE
+        sslmode = os.getenv("DATABASE_SSLMODE") or os.getenv("POSTGIS_SSLMODE")
+
         return DatabaseConfig(
             db_type=DatabaseType.POSTGIS,
             host=os.getenv("POSTGIS_HOST", "127.0.0.1"),
@@ -177,6 +240,7 @@ class DatabaseFactory:
             password=os.getenv("POSTGIS_PASSWORD", ""),
             database=os.getenv("POSTGIS_DATABASE", "saferoute_geo"),
             echo=os.getenv("POSTGIS_ECHO", "false").lower() == "true",
+            sslmode=sslmode,
         )
 
     def initialize(self, databases: list[DatabaseType] = None):

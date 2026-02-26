@@ -1,0 +1,24 @@
+graphhopper:
+  datareader.file: /graphhopper/data/map.osm.pbf
+  graph.location: /graphhopper/cache
+  graph.encoded_values: foot_access,hike_rating,foot_priority,country,road_class,foot_road_access,mtb_rating,foot_average_speed
+  import.osm.ignored_highways:
+    - motorway
+    - motorway_link
+    - trunk
+    - trunk_link
+  profiles:
+    - name: foot
+      custom_model_files: [foot.json]
+  profiles_ch:
+    - profile: foot
+
+server:
+  application_connectors:
+    - type: http
+      port: 8989
+      bind_host: 0.0.0.0
+  admin_connectors:
+    - type: http
+      port: 8990
+      bind_host: 0.0.0.0

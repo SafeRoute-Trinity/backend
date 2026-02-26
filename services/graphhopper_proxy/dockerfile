@@ -1,22 +1,18 @@
-# 使用官方 Python 基础镜像 (指定 linux/amd64 架构以兼容 AKS)
+# Use official Python image
 FROM --platform=linux/amd64 python:3.9
 
-# 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app
 
-# 设置工作目录
 WORKDIR /app
 
-# 安装系统依赖（用于 psycopg2 等）
 RUN apt-get update && apt-get install -y \
     build-essential \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 复制依赖文件并安装（从根目录）
 COPY requirements.txt .
 COPY libs/ ./libs/
 COPY common/ ./common/
@@ -26,15 +22,11 @@ COPY services/__init__.py ./services/
 RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
-# 复制服务代码
-COPY services/feedback/ ./services/feedback/
+COPY services/graphhopper_proxy/ ./services/graphhopper_proxy/
 
-# 使用环境变量 PORT，默认为 80（与 K8s Service 端口一致）
 ARG PORT=80
 ENV PORT=${PORT}
 
-# 暴露端口
 EXPOSE ${PORT}
 
-# 启动命令（生产环境建议用 --workers 4）
-CMD ["sh", "-c", "uvicorn services.feedback.main:app --host 0.0.0.0 --port ${PORT}"]
+CMD ["sh", "-c", "uvicorn services.graphhopper_proxy.main:app --host 0.0.0.0 --port ${PORT}"]

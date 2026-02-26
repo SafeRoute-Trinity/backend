@@ -15,6 +15,7 @@ if [ -z "$SERVICE" ]; then
     echo "  - notification (port 20001)"
     echo "  - routing_service (port 20002)"
     echo "  - safety_scoring (port 20003)"
+    echo "  - graphhopper_proxy (port 20007)"
     echo "  - sos (port 20006)"
     echo "  - user_management (port 20000)"
     exit 1
@@ -34,4 +35,3 @@ echo ""
 
 # Run the service using the normalized module name
 python3 -m uvicorn services.${SERVICE_MODULE}.main:app --host 0.0.0.0 --port $PORT --reload
-

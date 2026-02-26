@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Depends, HTTPException, Query, Request, Response, status
 from prometheus_client import (
@@ -186,11 +186,28 @@ class AuditLogResponse(BaseModel):
     updated_at: datetime
 
 
+# ---------- Pagination (shared for list endpoints) ----------
+
+
+class PaginationMeta(BaseModel):
+    """Metadata for paginated list responses."""
+
+    page: int = Field(..., ge=1, description="Current page (1-based)")
+    page_size: int = Field(..., ge=1, le=200, description="Items per page")
+    total: int = Field(..., ge=0, description="Total number of items")
+    total_pages: int = Field(..., ge=0, description="Total number of pages")
+
+
+def _total_pages(total: int, page_size: int) -> int:
+    return max(0, (total + page_size - 1) // page_size) if page_size > 0 else 0
+
+
 class AuditListResponse(BaseModel):
+    """Paginated audit log list with filters and pagination."""
+
     data: List[AuditLogResponse]
-    total: int
-    page: int
-    page_size: int
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    pagination: PaginationMeta
 
 
 # ========= User Management Models =========
@@ -250,6 +267,14 @@ class UserResponse(BaseModel):
     phone: Optional[str] = None
     created_at: datetime
     last_login: Optional[datetime] = None
+
+
+class UserListResponse(BaseModel):
+    """Paginated list of users with filters and pagination."""
+
+    data: List[UserResponse]
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    pagination: PaginationMeta
 
 
 class PreferencesRequest(BaseModel):
@@ -317,6 +342,83 @@ async def root():
         Dict with service name and status
     """
     return {"service": "user_management", "status": "running"}
+
+
+@app.get(
+    "/v1/users",
+    response_model=UserListResponse,
+    tags=["User Management"],
+    summary="List users (paginated, filterable)",
+)
+async def list_users(
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    email: Optional[str] = Query(None, description="Filter by email (case-insensitive contains)"),
+    name: Optional[str] = Query(None, description="Filter by name (case-insensitive contains)"),
+    created_after: Optional[datetime] = Query(
+        None, description="Filter users created after this time (inclusive)"
+    ),
+    created_before: Optional[datetime] = Query(
+        None, description="Filter users created before this time (inclusive)"
+    ),
+    db=Depends(get_db),
+):
+    """
+    List users with pagination and optional filters.
+
+    Useful for admin or support tooling. Filters are combined with AND.
+    """
+    # Applied filter values for response (convention: empty string when not set)
+    filters_resp = {
+        "email": email if (email and email.strip()) else "",
+        "name": name if (name and name.strip()) else "",
+        "created_after": created_after.isoformat() if created_after else "",
+        "created_before": created_before.isoformat() if created_before else "",
+    }
+    # SQL predicates
+    predicates = []
+    if email is not None and email.strip() != "":
+        predicates.append(func.lower(User.email).contains(email.strip().lower()))
+    if name is not None and name.strip() != "":
+        predicates.append(func.lower(User.name).contains(name.strip().lower()))
+    if created_after is not None:
+        predicates.append(User.created_at >= created_after)
+    if created_before is not None:
+        predicates.append(User.created_at <= created_before)
+
+    count_stmt = select(func.count()).select_from(User)
+    if predicates:
+        count_stmt = count_stmt.where(*predicates)
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    offset = (page - 1) * page_size
+    stmt = select(User).order_by(User.created_at.desc()).offset(offset).limit(page_size)
+    if predicates:
+        stmt = stmt.where(*predicates)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    data = [
+        UserResponse(
+            user_id=u.user_id,
+            name=u.name,
+            email=u.email,
+            phone=u.phone,
+            created_at=u.created_at,
+            last_login=u.last_login,
+        )
+        for u in rows
+    ]
+    return UserListResponse(
+        data=data,
+        filters=filters_resp,
+        pagination=PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        ),
+    )
 
 
 @app.get(
@@ -591,13 +693,19 @@ async def save_preferences(
     "/v1/users/{user_id}/trusted-contacts",
     response_model=TrustedContactsListResponse,
     tags=["User Management"],
+    summary="List trusted contacts (paginated, filterable)",
 )
 async def list_trusted_contacts(
     user_id: str,
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    is_primary: Optional[bool] = Query(None, description="Filter by primary contact (true/false)"),
+    search: Optional[str] = Query(None, description="Filter by name (case-insensitive contains)"),
     db=Depends(get_db),
 ):
     """
-    List all trusted contacts for a user from PostgreSQL (saferoute.contacts).
+    List trusted contacts for a user from PostgreSQL (saferoute.contacts).
+    Supports pagination and optional filters (is_primary, name search).
     """
 
     # ---- (1) Ensure user exists ----
@@ -616,8 +724,9 @@ async def list_trusted_contacts(
             desc(TrustedContact.is_primary),
             TrustedContact.created_at.asc(),
         )
+        .offset(offset)
+        .limit(page_size)
     )
-
     contacts = (await db.scalars(stmt)).all()
 
     # ---- (3) ORM → DTO ----
@@ -733,6 +842,12 @@ async def upsert_trusted_contact(
 
 
 @app.get(
+    "/v1/audit",
+    response_model=AuditListResponse,
+    tags=["Audit"],
+    summary="List audit logs (paginated)",
+)
+@app.get(
     "/v1/users/audit",
     response_model=AuditListResponse,
     tags=["Audit"],
@@ -747,33 +862,40 @@ async def list_audit_logs(
     page_size: int = Query(20, ge=1, le=200),
     db=Depends(get_db),
 ):
-    # 1) build filters
-    filters = []
+    # 1) Filters for response (convention: empty string when not set)
+    filters_resp = {
+        "user_id": str(user_id) if user_id is not None else "",
+        "event_type": event_type if (event_type and event_type.strip()) else "",
+        "start": start.isoformat() if start is not None else "",
+        "end": end.isoformat() if end is not None else "",
+    }
+    # 2) SQL predicates
+    predicates = []
     if user_id is not None:
-        filters.append(Audit.user_id == user_id)
+        predicates.append(Audit.user_id == user_id)
     if event_type is not None and event_type != "":
-        filters.append(Audit.event_type == event_type)
+        predicates.append(Audit.event_type == event_type)
     if start is not None:
-        filters.append(Audit.created_at >= start)
+        predicates.append(Audit.created_at >= start)
     if end is not None:
-        filters.append(Audit.created_at <= end)
+        predicates.append(Audit.created_at <= end)
 
-    # 2) total count
+    # 3) total count
     count_stmt = select(func.count()).select_from(Audit)
-    if filters:
-        count_stmt = count_stmt.where(*filters)
+    if predicates:
+        count_stmt = count_stmt.where(*predicates)
     total = (await db.execute(count_stmt)).scalar_one()
 
-    # 3) page query
+    # 4) page query
     offset = (page - 1) * page_size
     stmt = select(Audit).order_by(Audit.created_at.desc()).offset(offset).limit(page_size)
-    if filters:
-        stmt = stmt.where(*filters)
+    if predicates:
+        stmt = stmt.where(*predicates)
 
     result = await db.execute(stmt)
     rows = result.scalars().all()
 
-    # 4) map to response
+    # 5) map to response
     data = [
         AuditLogResponse(
             log_id=r.log_id,
@@ -787,7 +909,16 @@ async def list_audit_logs(
         for r in rows
     ]
 
-    return AuditListResponse(data=data, total=total, page=page, page_size=page_size)
+    return AuditListResponse(
+        data=data,
+        filters=filters_resp,
+        pagination=PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        ),
+    )
 
 
 @app.get("/auth0/callback", tags=["Auth"])

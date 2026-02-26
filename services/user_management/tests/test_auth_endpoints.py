@@ -308,8 +308,10 @@ def test_list_trusted_contacts_requires_valid_jwt(mock_jwks_request, create_vali
 
     data = response.json()
     assert data["user_id"] == user_id
-    assert "contacts" in data
-    assert isinstance(data["contacts"], list)
+    assert "data" in data
+    assert isinstance(data["data"], list)
+    assert "filters" in data
+    assert "pagination" in data
 
 
 def test_auth0_verify_endpoint_with_valid_jwt(mock_jwks_request, create_valid_jwt):
