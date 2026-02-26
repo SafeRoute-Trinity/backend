@@ -9,6 +9,7 @@ Provides endpoints for user registration, authentication, preferences,
 and trusted contact management.
 """
 
+import httpx
 import os
 import sys
 import time
@@ -92,18 +93,17 @@ def extract_user_id_from_auth(auth: dict) -> str:
     """
     Extract user_id from Auth0 authentication token.
 
-    Auth0 'sub' claim format can be:
-    - "auth0|user_id" (with provider prefix)
-    - "user_id" (without prefix)
+    Strips the provider prefix (e.g. "auth0|") so the DB stores
+    only the raw user ID (e.g. "6979e8045f101df3ab8cff1c").
 
     Args:
         auth: Authentication dictionary containing JWT claims
 
     Returns:
-        Extracted user_id string
+        Stripped user_id string for DB storage/lookup
     """
-    auth_sub = auth.get("sub")
-    return auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub", "")
+    return auth_sub.split("|", 1)[-1] if "|" in auth_sub else auth_sub
 
 
 # ========= Metrics =========
@@ -422,6 +422,111 @@ async def list_users(
 
 
 @app.get(
+    "/v1/users/me",
+    response_model=UserResponse,
+    tags=["User Management"],
+    summary="Get current user information (protected)",
+)
+async def get_current_user(
+    request: Request,
+    auth: dict = Depends(verify_token),
+    db=Depends(get_db),
+):
+    """
+    Get current user information (protected endpoint example).
+
+    This endpoint demonstrates how to use verify_token for stateless auth:
+    - Requires valid JWT token
+    - Validates token against Auth0 JWKS
+
+    Mobile app must send:
+    - Authorization: Bearer <access_token>
+
+    Args:
+        auth: Enhanced auth object from verify_token dependency
+            Contains JWT claims
+        db: Database session dependency
+
+    Returns:
+        UserResponse with user information
+
+    Raises:
+        HTTPException: 401 if JWT is invalid
+        HTTPException: 404 if user not found in database
+    """
+    # Extract user_id — full sub claim (e.g. "auth0|6979e8...")
+    user_id = extract_user_id_from_auth(auth)
+
+    print(f"[UserMgmt] get_current_user called for: {user_id}")
+
+    # Query PostgreSQL database for user
+    result = await db.execute(select(User).where(User.user_id == user_id))
+    user = result.scalar_one_or_none()
+
+    # Auto-create user on first login — fetch profile from Auth0 /userinfo
+    if not user:
+        print(f"[UserMgmt] User {user_id} not found, auto-creating from Auth0 /userinfo")
+
+        # Fetch profile from Auth0 /userinfo using the bearer token
+        profile = {}
+        auth0_domain = os.getenv("AUTH0_DOMAIN", "saferouteapp.eu.auth0.com")
+        try:
+            token = request.headers.get("Authorization", "").replace("Bearer ", "")
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"https://{auth0_domain}/userinfo",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code == 200:
+                    profile = resp.json()
+                    print(f"[UserMgmt] Got Auth0 profile: email={profile.get('email')}")
+                else:
+                    print(f"[UserMgmt] /userinfo returned {resp.status_code}")
+        except Exception as e:
+            print(f"[UserMgmt] Failed to fetch /userinfo: {e}")
+
+        now = datetime.utcnow()
+        user = User(
+            user_id=user_id,
+            email=profile.get("email") or f"{user_id}@unknown",
+            name=profile.get("name") or profile.get("nickname") or None,
+            phone=profile.get("phone") or auth.get("https://saferouteapp.eu.auth0.com/phone") or None,
+            created_at=now,
+            updated_at=now,
+            last_login=now,
+        )
+        db.add(user)
+        try:
+            await db.commit()
+            await db.refresh(user)
+            USER_REGISTRATION_TOTAL.inc()
+            print(f"[UserMgmt] Auto-created user {user_id}")
+        except Exception as e:
+            await db.rollback()
+            print(f"[UserMgmt] Failed to auto-create user {user_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create user: {e}",
+            )
+
+    # Update last_login
+    user.last_login = datetime.utcnow()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
+    return UserResponse(
+        user_id=user.user_id,
+        name=user.name,
+        email=user.email,
+        phone=user.phone,
+        created_at=user.created_at,
+        last_login=user.last_login,
+    )
+
+
+@app.get(
     "/v1/users/{user_id}",
     response_model=UserResponse,
     tags=["User Management"],
@@ -517,8 +622,11 @@ async def sync_auth0_user(
     if not expected_secret or secret != expected_secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
+    # Strip auth0| prefix for DB storage
+    raw_user_id = payload.user_id.split("|", 1)[-1] if "|" in payload.user_id else payload.user_id
+
     # Upsert: create if new, update if exists
-    result = await db.execute(select(User).where(User.user_id == payload.user_id))
+    result = await db.execute(select(User).where(User.user_id == raw_user_id))
     user = result.scalar_one_or_none()
 
     now = datetime.utcnow()
@@ -529,7 +637,7 @@ async def sync_auth0_user(
         user.updated_at = now
     else:
         user = User(
-            user_id=payload.user_id,
+            user_id=raw_user_id,
             email=payload.email,
             name=payload.name,
             phone=payload.phone,
@@ -540,7 +648,7 @@ async def sync_auth0_user(
     # Audit log
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=payload.user_id,
+        user_id=raw_user_id,
         event_type="authentication",
         message=f"Auth0 sync ({'update' if user else 'create'})",
         created_at=now,
@@ -560,7 +668,7 @@ async def sync_auth0_user(
     # Business metric
     USER_REGISTRATION_TOTAL.inc()
 
-    return {"status": "synced", "user_id": payload.user_id}
+    return {"status": "synced", "user_id": raw_user_id}
 
 
 @app.get(
@@ -950,59 +1058,3 @@ async def metrics_endpoint():
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 
-
-@app.get(
-    "/v1/users/me",
-    response_model=UserResponse,
-    tags=["User Management"],
-    summary="Get current user information (protected)",
-)
-async def get_current_user(
-    auth: dict = Depends(verify_token),
-    db=Depends(get_db),
-):
-    """
-    Get current user information (protected endpoint example).
-
-    This endpoint demonstrates how to use verify_token for stateless auth:
-    - Requires valid JWT token
-    - Validates token against Auth0 JWKS
-
-    Mobile app must send:
-    - Authorization: Bearer <access_token>
-
-    Args:
-        auth: Enhanced auth object from verify_token dependency
-            Contains JWT claims
-        db: Database session dependency
-
-    Returns:
-        UserResponse with user information
-
-    Raises:
-        HTTPException: 401 if JWT is invalid
-        HTTPException: 404 if user not found in database
-    """
-    # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
-    user_id = extract_user_id_from_auth(auth)
-
-    print(f"[UserMgmt] get_current_user called for: {user_id}")
-
-    # Query PostgreSQL database for user
-    result = await db.execute(select(User).where(User.user_id == user_id))
-    user = result.scalar_one_or_none()
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User {user_id} not found in database",
-        )
-
-    return UserResponse(
-        user_id=user.user_id,
-        name=user.name,
-        email=user.email,
-        phone=user.phone,
-        created_at=user.created_at,
-        last_login=user.last_login,
-    )
