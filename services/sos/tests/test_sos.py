@@ -104,35 +104,6 @@ class DummyAsyncClientCallOK:
         )
 
 
-class DummyAsyncClientSmsOK:
-    """Mock AsyncClient for SMS endpoint: returns success payload."""
-
-    def __init__(self, timeout=10.0):
-        self.timeout = timeout
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    async def post(self, url, json):
-        return DummyResponse(
-            {
-                "emergency_id": str(uuid.uuid4()),
-                "status": "sent",
-                "sms_id": str(uuid.uuid4()),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "message_sent": "test",
-                "recipient": json.get("emergency_contact", {}).get("phone", ""),
-            },
-            status_code=200,
-        )
-
-
-_AsyncClientProxy = DummyAsyncClientCallOK
-
-
 # ----------------------------
 # Root / health
 # ----------------------------
@@ -151,10 +122,10 @@ def test_emergency_call_success(monkeypatch):
     monkeypatch.setattr(sos_main.httpx, "AsyncClient", _AsyncClientProxy)
 
     call_req = {
-        "user_id": "550e8400-e29b-41d4-a716-446655440000",
-        "lat": 53.34,
-        "lon": -6.26,
-        "trigger_type": "manual",
+        "sos_id": "SOS-CALL-001",
+        "phone_number": "+112",
+        "user_location": {"lat": 53.34, "lon": -6.26},
+        "call_reason": "Test emergency",
     }
     r = client.post("/v1/emergency/call", json=call_req)
     assert r.status_code == 200
@@ -174,11 +145,16 @@ def test_emergency_call_missing_fields():
 # Emergency SMS
 # ----------------------------
 def test_emergency_sms_success(monkeypatch):
-    monkeypatch.setattr(sos_main.httpx, "AsyncClient", DummyAsyncClientSmsOK)
+    monkeypatch.setattr(sos_main.httpx, "AsyncClient", _AsyncClientProxy)
+
+    async def _sms_stub(self, payload):
+        return {"status": "sent", "sid": "SMSTEST"}
+
+    monkeypatch.setattr(notif_factory.SmsSender, "send", _sms_stub)
 
     sms_req = {
-        "sos_id": "550e8400-e29b-41d4-a716-446655440002",
-        "user_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sos_id": "SOS-SMS-001",
+        "user_id": "auth0|smsuser",
         "location": {"lat": 53.34, "lon": -6.26},
         "emergency_contact": {"name": "Alice", "phone": "+353800000222"},
         "notification_type": "sos",
@@ -201,11 +177,10 @@ def test_emergency_sms_missing_fields():
 # Status check
 # ----------------------------
 def test_emergency_status_not_triggered():
-    # Use a valid UUID that was never used -> returns default not_triggered / not_sent
-    r = client.get("/v1/emergency/550e8400-e29b-41d4-a716-446655440099/status")
+    r = client.get("/v1/emergency/SOS-NEVER-EXISTED/status")
     assert r.status_code == 200
     data = r.json()
-    assert data["emergency_id"] == "550e8400-e29b-41d4-a716-446655440099"
+    assert data["sos_id"] == "SOS-NEVER-EXISTED"
     assert data["call_status"] in ["not_triggered", "initiated", "connected", "failed"]
     assert data["sms_status"] in ["not_sent", "sent", "failed"]
 
@@ -214,25 +189,24 @@ def test_emergency_status_not_triggered():
 # Full flow: call → sms → status
 # ----------------------------
 def test_full_emergency_flow(monkeypatch):
-    # Mock that handles both call and SMS POSTs
-    class _CombinedClient(DummyAsyncClientCallOK):
-        async def post(self, url, json_payload=None):
-            json_payload = json_payload or {}
-            if "emergency_contact" in json_payload:
-                return await DummyAsyncClientSmsOK(timeout=self.timeout).post(url, json_payload)
-            return await DummyAsyncClientCallOK.post(self, url, json_payload)
+    monkeypatch.setattr(sos_main.httpx, "AsyncClient", _AsyncClientProxy)
 
-    monkeypatch.setattr(sos_main.httpx, "AsyncClient", _CombinedClient)
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
     call_req = {
-        "user_id": "550e8400-e29b-41d4-a716-446655440000",
-        "lat": 53.34,
-        "lon": -6.26,
-        "trigger_type": "manual",
+        "sos_id": "SOS-FLOW",
+        "phone_number": "+112",
+        "user_location": {"lat": 53.34, "lon": -6.26},
+        "call_reason": "Test emergency",
     }
+
     sms_req = {
-        "sos_id": "550e8400-e29b-41d4-a716-446655440001",
-        "user_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sos_id": "SOS-FLOW",
+        "user_id": "auth0|flowuser",
         "location": {"lat": 53.34, "lon": -6.26},
         "emergency_contact": {"name": "Bob", "phone": "+353800000333"},
         "notification_type": "sos",
