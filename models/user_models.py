@@ -154,6 +154,10 @@ class TrustedContact(Base):
     ORM for DB table: saferoute.trusted_contacts
     """
 
+    _relationship_fn = (
+        relationship  # 保留 orm.relationship 引用，避免被下面的列名 relationship 遮蔽
+    )
+
     __tablename__ = "trusted_contacts"
     __table_args__ = {"schema": "saferoute"}
 
@@ -183,3 +187,8 @@ class TrustedContact(Base):
     # DB 没默认且 not null -> 后端必须写
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    user: Mapped["User"] = _relationship_fn(
+        back_populates="trusted_contacts",
+        lazy="selectin",
+    )
