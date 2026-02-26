@@ -175,7 +175,7 @@ class FeedbackFactory:
         status: Optional[Status] = None,
         feedback_type: Optional[FeedbackType] = None,
         skip: int = 0,
-        limit: int = 10
+        limit: int = 10,
     ) -> tuple[int, list[Feedback]]:
         """
         Retrieve a paginated list of feedback records with dynamic filtering.
@@ -183,16 +183,16 @@ class FeedbackFactory:
         # 1. Build the base queries
         query = select(Feedback)
         count_query = select(func.count(Feedback.feedback_id))
-        
+
         # 2. Apply filters dynamically (MUST be applied to BOTH queries)
         if user_id:
             query = query.where(Feedback.user_id == user_id)
             count_query = count_query.where(Feedback.user_id == user_id)
-            
+
         if status:
             query = query.where(Feedback.status == status)
             count_query = count_query.where(Feedback.status == status)
-            
+
         if feedback_type:
             query = query.where(Feedback.type == feedback_type)
             count_query = count_query.where(Feedback.type == feedback_type)
@@ -202,7 +202,7 @@ class FeedbackFactory:
 
         # 4. Apply sorting and pagination
         query = query.order_by(Feedback.created_at.desc()).offset(skip).limit(limit)
-        
+
         # 5. Fetch results
         result = await db.execute(query)
         feedbacks = result.scalars().all()
