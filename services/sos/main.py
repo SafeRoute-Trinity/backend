@@ -116,6 +116,7 @@ class SOSContact(BaseModel):
 
 
 class EmergencySMSRequest(BaseModel):
+    sos_id: str  # SOS/emergency identifier (UUID string) for status correlation
     user_id: uuid.UUID
     location: Optional[Location] = None
     emergency_contact: SOSContact
@@ -265,14 +266,10 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     Send emergency SMS with rich details (templates, variables, location).
     Delegates delivery to the Notification service.
     """
-    # Validate required UUIDs: emergency_id and user_id
-
-    emergency_id = uuid.uuid4()
-
-    parsed_user_id = _uuid_or_none(body.user_id)
-
-    if parsed_user_id is None:
-        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
+    # Validate sos_id is UUID (user_id is now a plain string from Auth0)
+    parsed_sos_id = _uuid_or_none(body.sos_id)
+    if parsed_sos_id is None:
+        raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -286,7 +283,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         # Log and audit SMS failure
         logger.exception(
             "Notification service SMS call failed for emergency_id=%s user_id=%s recipient=%s: %s",
-            emergency_id,
+            body.sos_id,
             body.user_id,
             body.emergency_contact.phone,
             repr(e),
@@ -296,9 +293,9 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
             await write_audit(
                 db=db,
                 event_type="emergency",
-                user_id=parsed_user_id,
-                event_id=emergency_id,
-                message=f"sos_sms_failed emergency_id={emergency_id} user_id={body.user_id} recipient={body.emergency_contact.phone} error={str(e)}",
+                user_id=body.user_id,
+                event_id=parsed_sos_id,
+                message=f"sos_sms_failed sos_id={body.sos_id} user_id={body.user_id} recipient={body.emergency_contact.phone} error={str(e)}",
                 commit=True,
             )
         except Exception:
@@ -313,9 +310,9 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     # Update status
     now = datetime.utcnow()
     s = STATUS.setdefault(
-        emergency_id,
+        body.sos_id,
         {
-            "emergency_id": emergency_id,
+            "emergency_id": body.sos_id,
             "call_status": "not_triggered",
             "sms_status": "not_sent",
             "last_update": now,
@@ -332,9 +329,9 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         await write_audit(
             db=db,
             event_type="emergency",
-            user_id=parsed_user_id,
-            event_id=emergency_id,
-            message=f"sos_sms_sent emergency_id={emergency_id} user_id={body.user_id} sms_id={data.get('sms_id')} recipient={data.get('recipient')}",
+            user_id=body.user_id,
+            event_id=parsed_sos_id,
+            message=f"sos_sms_sent sos_id={body.sos_id} user_id={body.user_id} sms_id={data.get('sms_id')} recipient={data.get('recipient')}",
             commit=True,
         )
     except Exception:

@@ -9,9 +9,9 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Optional, TypeVar, Generic, Dict, Any
+from typing import Any, Dict, Generic, List, Optional, TypeVar
 
-from fastapi import Depends, HTTPException, Request, Response, Query
+from fastapi import Depends, HTTPException, Query, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -345,6 +345,10 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         "updated_at": now,
         "user_id": user_id_str,
     }
+    # Validate feedback_id is UUID (user_id is now a plain string from Auth0)
+    parsed_feedback_id = _maybe_uuid(getattr(body, "feedback_id", None))
+    if parsed_feedback_id is None:
+        raise HTTPException(status_code=400, detail="feedback_id must be a valid UUID")
 
     # Add optional fields if provided
     if body.route_id is not None:
@@ -447,10 +451,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
     # Business metric
     FEEDBACK_VALIDATIONS_TOTAL.inc()
 
-    # Validate user_id is a UUID (required for feedback validation traces)
-    parsed_user_id = _maybe_uuid(getattr(body, "user_id", None))
-    if parsed_user_id is None:
-        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
+    # user_id is now a plain string from Auth0
 
     # Get spam validator and validate content
     try:
@@ -489,7 +490,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
         await write_audit(
             db=db,
             event_type="feedback",
-            user_id=parsed_user_id,
+            user_id=body.user_id,
             event_id=None,
             message=f"feedback.validate user_id={body.user_id} is_spam={resp.is_spam} confidence={resp.confidence} allow_submission={resp.allow_submission} flags={','.join(resp.flags)}",
             commit=True,

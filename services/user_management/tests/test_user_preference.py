@@ -1,6 +1,5 @@
-# pytest services/user_management/tests/test_preferences.py -q
+# pytest services/user_management/tests/test_user_preference.py -q
 
-import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -53,7 +52,6 @@ class FakeDB:
     async def flush(self):
         self.flushed = True
         now = datetime.now(timezone.utc)
-        # simulate DB defaults for any object that has these attrs
         for obj in self.added:
             if hasattr(obj, "created_at") and getattr(obj, "created_at", None) is None:
                 obj.created_at = now
@@ -85,13 +83,12 @@ def client():
 # ----------------------------
 # Helpers: fake ORM-like objects
 # ----------------------------
-def make_user(user_id: uuid.UUID):
-    # GET/POST preferences 只會用到「user exists」判斷，所以只要 user_id 有就行
+def make_user(user_id: str):
     return SimpleNamespace(user_id=user_id)
 
 
 def make_pref(
-    user_id: uuid.UUID,
+    user_id: str,
     *,
     voice_guidance: bool = True,
     units: str = "metric",
@@ -109,7 +106,7 @@ def make_pref(
 # GET /preferences
 # ----------------------------
 def test_get_preferences_success(client):
-    uid = uuid.uuid4()
+    uid = "test-user-pref-001"
 
     fake_db = FakeDB(
         execute_results=[make_user(uid), make_pref(uid, voice_guidance=True, units="metric")]
@@ -121,23 +118,14 @@ def test_get_preferences_success(client):
     data = res.json()
 
     assert data["status"] == "preferences_loaded"
-    assert str(uid) == str(data["user_id"])
+    assert data["user_id"] == uid
     assert data["preferences"]["voice_guidance"] is True
     assert data["preferences"]["units"] == "metric"
     assert "updated_at" in data
 
 
-def test_get_preferences_invalid_uuid_400(client):
-    fake_db = FakeDB(execute_results=[])
-    override_db(fake_db)
-
-    res = client.get("/v1/users/not-a-uuid/preferences")
-    assert res.status_code == 400
-    assert res.json()["detail"] == "Invalid user_id format"
-
-
 def test_get_preferences_user_not_found_404(client):
-    uid = uuid.uuid4()
+    uid = "nonexistent-user"
 
     fake_db = FakeDB(execute_results=[None])  # user lookup returns None
     override_db(fake_db)
@@ -148,7 +136,7 @@ def test_get_preferences_user_not_found_404(client):
 
 
 def test_get_preferences_not_found_404(client):
-    uid = uuid.uuid4()
+    uid = "test-user-pref-002"
 
     fake_db = FakeDB(execute_results=[make_user(uid), None])  # pref lookup returns None
     override_db(fake_db)
@@ -162,20 +150,20 @@ def test_get_preferences_not_found_404(client):
 # POST /preferences
 # ----------------------------
 def test_save_preferences_create_success(client):
-    uid = uuid.uuid4()
+    uid = "test-user-pref-003"
 
     # user exists, pref does not exist -> create
     fake_db = FakeDB(execute_results=[make_user(uid), None])
     override_db(fake_db)
 
-    payload = {"user_id": str(uid), "voice_guidance": False, "units": "imperial"}
+    payload = {"voice_guidance": False, "units": "imperial"}
 
     res = client.post(f"/v1/users/{uid}/preferences", json=payload)
     assert res.status_code == 200, res.text
     data = res.json()
 
     assert data["status"] == "preferences_saved"
-    assert str(uid) == str(data["user_id"])
+    assert data["user_id"] == uid
     assert data["preferences"]["voice_guidance"] is False
     assert data["preferences"]["units"] == "imperial"
     assert "updated_at" in data
@@ -188,13 +176,13 @@ def test_save_preferences_create_success(client):
 
 
 def test_save_preferences_update_success(client):
-    uid = uuid.uuid4()
+    uid = "test-user-pref-004"
 
     existing_pref = make_pref(uid, voice_guidance=True, units="metric")
     fake_db = FakeDB(execute_results=[make_user(uid), existing_pref])
     override_db(fake_db)
 
-    payload = {"user_id": str(uid), "voice_guidance": True, "units": "imperial"}
+    payload = {"voice_guidance": True, "units": "imperial"}
 
     res = client.post(f"/v1/users/{uid}/preferences", json=payload)
     assert res.status_code == 200, res.text
@@ -210,24 +198,13 @@ def test_save_preferences_update_success(client):
     assert len(fake_db.added) == 1
 
 
-def test_save_preferences_invalid_uuid_400(client):
-    fake_db = FakeDB(execute_results=[])
-    override_db(fake_db)
-
-    payload = {"user_id": "not-a-uuid", "voice_guidance": True, "units": "metric"}
-    res = client.post("/v1/users/not-a-uuid/preferences", json=payload)
-
-    assert res.status_code == 400
-    assert res.json()["detail"] == "Invalid user_id format"
-
-
 def test_save_preferences_user_not_found_404(client):
-    uid = uuid.uuid4()
+    uid = "test-user-pref-005"
 
     fake_db = FakeDB(execute_results=[None])  # user not found
     override_db(fake_db)
 
-    payload = {"user_id": str(uid), "voice_guidance": True, "units": "metric"}
+    payload = {"voice_guidance": True, "units": "metric"}
     res = client.post(f"/v1/users/{uid}/preferences", json=payload)
 
     assert res.status_code == 404
@@ -235,7 +212,7 @@ def test_save_preferences_user_not_found_404(client):
 
 
 def test_save_preferences_integrity_error_400(client):
-    uid = uuid.uuid4()
+    uid = "test-user-pref-006"
 
     fake_db = FakeDB(
         execute_results=[make_user(uid), None],
@@ -243,7 +220,7 @@ def test_save_preferences_integrity_error_400(client):
     )
     override_db(fake_db)
 
-    payload = {"user_id": str(uid), "voice_guidance": True, "units": "metric"}
+    payload = {"voice_guidance": True, "units": "metric"}
     res = client.post(f"/v1/users/{uid}/preferences", json=payload)
 
     assert res.status_code == 400, res.text

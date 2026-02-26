@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Literal, Optional
 
-from sqlalchemy import DateTime, Text, func
+from sqlalchemy import DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -30,8 +30,8 @@ class Audit(Base):
         default=uuid.uuid4,
     )
 
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(
-        PG_UUID(as_uuid=True),
+    user_id: Mapped[Optional[str]] = mapped_column(
+        String(255),
         nullable=True,
     )
 

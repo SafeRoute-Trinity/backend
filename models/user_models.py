@@ -19,16 +19,17 @@ class User(Base):
     __tablename__ = "users"
     __table_args__ = (({"schema": "saferoute"}),)
 
-    # DB has gen_random_uuid, but I prefer create uuid in backend because audit may use it
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+    # Auth0 user ID (the part after "auth0|" prefix)
+    user_id: Mapped[str] = mapped_column(
+        String(255),
         primary_key=True,
+        unique=True,
         nullable=False,
     )
 
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    password: Mapped[str] = mapped_column(String(255), nullable=False)
+    password: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -69,8 +70,8 @@ class UserPreferences(Base):
         {"schema": "saferoute"},
     )
 
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+    user_id: Mapped[str] = mapped_column(
+        String(255),
         ForeignKey("saferoute.users.user_id", ondelete="CASCADE"),
         primary_key=True,
         nullable=False,
@@ -121,11 +122,11 @@ class TrustedContact(Base):
         server_default="gen_random_uuid()",
     )
 
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
+    user_id: Mapped[str] = mapped_column(
+        String(255),
         ForeignKey("saferoute.users.user_id", ondelete="CASCADE"),
         nullable=False,
-        index=True,  # 對應 idx_contacts_user_id
+        index=True,  # idx_contacts_user_id
     )
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
