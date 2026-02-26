@@ -786,6 +786,7 @@ async def set_trusted_contacts(
         updated_at=now,
     )
 
+
 @app.put(
     "/v1/users/{user_id}/contacts",
     response_model=ContactsSetResponse,
