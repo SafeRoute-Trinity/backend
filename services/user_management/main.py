@@ -35,7 +35,6 @@ from models.audit import Audit
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from common.constants import AUTH_TOKEN_TTL
 from libs.auth.auth0_verify import verify_token
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
@@ -627,6 +626,21 @@ async def sync_auth0_user(
 
     # Upsert: create if new, update if exists
     result = await db.execute(select(User).where(User.user_id == raw_user_id))
+
+    """
+    Auth0 calls this on every login (including first login after sign-up).
+    Creates the user if new, updates fields if existing.
+
+    Security: Validates shared secret via X-Auth0-Webhook-Secret header.
+    """
+    # Verify webhook secret
+    secret = request.headers.get("X-Auth0-Webhook-Secret")
+    expected_secret = os.getenv("AUTH0_WEBHOOK_SECRET")
+    if not expected_secret or secret != expected_secret:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    # Upsert: create if new, update if exists
+    result = await db.execute(select(User).where(User.user_id == payload.user_id))
     user = result.scalar_one_or_none()
 
     now = datetime.utcnow()
@@ -825,6 +839,7 @@ async def list_trusted_contacts(
         )
 
     # ---- (2) Query contacts ----
+    offset = (page - 1) * page_size
     stmt = (
         select(TrustedContact)
         .where(TrustedContact.user_id == user_id)

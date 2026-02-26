@@ -6,9 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.exc import IntegrityError
 
-import services.sos.main as sos
+import services.sos.main as sos_main
 from services.sos.main import app, get_db
 
 
@@ -168,6 +167,8 @@ def test_emergency_sms_success(monkeypatch):
     assert data["status"] in ["sent", "failed"]
 
 
+
+
 def test_emergency_sms_missing_fields():
     payload = {"sos_id": "SOS-INCOMPLETE"}
     r = client.post("/v1/emergency/sms", json=payload)
@@ -215,8 +216,13 @@ def test_full_emergency_flow(monkeypatch):
         "variables": {"name": "Bob"},
     }
 
-    r3 = client.get("/v1/emergency/SOS-FLOW/status")
+    r1 = client.post("/v1/emergency/call", json=call_req)
+    assert r1.status_code == 200
+    emergency_id = str(r1.json()["emergency_id"])
+    r2 = client.post("/v1/emergency/sms", json=sms_req)
+    assert r2.status_code == 200
+    r3 = client.get(f"/v1/emergency/{emergency_id}/status")
     assert r3.status_code == 200
     d = r3.json()
-    assert d["sos_id"] == "SOS-FLOW"
+    assert d["emergency_id"] == emergency_id
     assert d["sms_status"] in ["sent", "failed", "not_sent"]

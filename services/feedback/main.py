@@ -9,9 +9,9 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Optional, TypeVar, Generic, Dict, Any
+from typing import Any, Dict, Generic, List, Optional, TypeVar
 
-from fastapi import Depends, HTTPException, Request, Response, Query
+from fastapi import Depends, HTTPException, Query, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,

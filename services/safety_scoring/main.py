@@ -542,6 +542,9 @@ async def get_route(
     request: RouteRequest,
     db: AsyncSession = Depends(get_db),
     postgisDb: AsyncSession = Depends(get_postgis_db),
+    algorithm: str = Query(
+        "dijkstra", description="Routing algorithm: ch, dijkstra, astar, bd_dijkstra"
+    ),
 ):
     """
     Calculate route using pgRouting with safety weights.
@@ -669,7 +672,7 @@ async def get_route(
                 WHERE w.geometry && rw.bbox
             """
             try:
-                route_res = await db.execute(
+                route_res = await postgisDb.execute(
                     routing_query, {"sql": cost_sql, "start_node": start_node, "end_node": end_node}
                 )
                 routes = route_res.fetchall()
@@ -816,6 +819,8 @@ async def get_graph_geojson(
     min_lat: float = Query(..., description="Minimum Latitude(-90 ~ 90)"),
     max_lng: float = Query(..., description="Maximum Longitude(-180 ~ 180)"),
     max_lat: float = Query(..., description="Maximum Latitude(-90 ~ 90)"),
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(100, ge=1, le=2000, description="Items per page"),
     postgisDb: AsyncSession = Depends(get_postgis_db),
 ):
     """
@@ -853,10 +858,7 @@ async def get_graph_geojson(
             LIMIT 2000
             ORDER BY gid
             LIMIT :limit OFFSET :offset
-        """)
-
-        result = await postgisDb.execute(
-            query, {"min_lng": min_lng, "min_lat": min_lat, "max_lng": max_lng, "max_lat": max_lat}
+        """
         )
         result = await postgisDb.execute(query, params)
         rows = result.fetchall()
