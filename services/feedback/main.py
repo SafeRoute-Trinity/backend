@@ -338,7 +338,9 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     except Exception as e:
         await db.rollback()
         logger.exception(f"Failed to create feedback in database: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to submit feedback: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to submit feedback: {str(e)}"
+        )
 
     # Also store in in-memory cache for backward compatibility
     FEEDBACK[str(feedback_id)] = {
@@ -359,7 +361,9 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     if body.description is not None:
         FEEDBACK[str(feedback_id)]["description"] = body.description
     if body.attachments is not None:
-        FEEDBACK[str(feedback_id)]["attachments"] = [str(att) for att in body.attachments]
+        FEEDBACK[str(feedback_id)]["attachments"] = [
+            str(att) for att in body.attachments
+        ]
 
     resp = FeedbackSubmitResponse(
         feedback_id=feedback_id,
@@ -391,7 +395,8 @@ async def list_feedback(
         None, description="Filter by feedback status (received, resolved, rejected)"
     ),
     type: Optional[FeedbackType] = Query(
-        None, description="Filter by feedback type (safety_issue, route_quality, others)"
+        None,
+        description="Filter by feedback type (safety_issue, route_quality, others)",
     ),
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(10, ge=1, le=100, description="Items per page"),
@@ -405,7 +410,12 @@ async def list_feedback(
     feedback_factory = get_feedback_factory()
 
     total_count, feedbacks = await feedback_factory.get_feedbacks(
-        db=db, user_id=user_id, status=status, feedback_type=type, skip=skip, limit=page_size
+        db=db,
+        user_id=user_id,
+        status=status,
+        feedback_type=type,
+        skip=skip,
+        limit=page_size,
     )
 
     data = []
@@ -426,7 +436,9 @@ async def list_feedback(
             )
         )
 
-    total_pages = max(0, (total_count + page_size - 1) // page_size) if page_size > 0 else 0
+    total_pages = (
+        max(0, (total_count + page_size - 1) // page_size) if page_size > 0 else 0
+    )
 
     applied_filters = {
         "status": status.value if status else "",
@@ -438,7 +450,9 @@ async def list_feedback(
         page=page, page_size=page_size, total=total_count, total_pages=total_pages
     )
 
-    return PaginatedResponse(data=data, filters=applied_filters, pagination=pagination_meta)
+    return PaginatedResponse(
+        data=data, filters=applied_filters, pagination=pagination_meta
+    )
 
 
 @app.post("/v1/feedback/validate", response_model=FeedbackValidateResponse)
