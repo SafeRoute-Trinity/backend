@@ -9,9 +9,9 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import Depends, Request, Response
+from fastapi import Depends, Query, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -19,7 +19,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Prefer the centralized DB factory if available on newer branches; fall back to
 # the legacy postgis_db dependency for this branch. This allows the service to
@@ -249,6 +249,58 @@ class NavigationStartResponse(BaseModel):
     started_at: datetime
 
 
+# ---------- Pagination & filters (list response convention) ----------
+
+
+class PaginationMeta(BaseModel):
+    """Metadata for paginated list responses."""
+
+    page: int = Field(..., ge=1, description="Current page (1-based)")
+    page_size: int = Field(..., ge=1, le=100, description="Items per page")
+    total: int = Field(..., ge=0, description="Total number of items")
+    total_pages: int = Field(..., ge=0, description="Total number of pages")
+
+
+def _total_pages(total: int, page_size: int) -> int:
+    return max(0, (total + page_size - 1) // page_size) if page_size > 0 else 0
+
+
+class RouteListItem(BaseModel):
+    """Single route entry for list response."""
+
+    route_id: uuid.UUID
+    routes: List[RouteOption]
+    alternatives_count: int
+    calculated_at: datetime
+    user_id: Optional[uuid.UUID] = None
+
+
+class RouteListResponse(BaseModel):
+    """Paginated list of routes with filters."""
+
+    data: List[RouteListItem]
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    pagination: PaginationMeta
+
+
+class NavigationSessionItem(BaseModel):
+    """Single navigation session for list response."""
+
+    session_id: uuid.UUID
+    route_id: uuid.UUID
+    user_id: uuid.UUID
+    started_at: datetime
+    status: Literal["active"] = "active"
+
+
+class NavigationSessionListResponse(BaseModel):
+    """Paginated list of navigation sessions with filters."""
+
+    data: List[NavigationSessionItem]
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    pagination: PaginationMeta
+
+
 @app.get("/")
 async def root():
     return {"service": "routing_service", "status": "running"}
@@ -275,6 +327,67 @@ async def health():
             "ORS_API_KEY_set": env_key_set,
         },
     }
+
+
+@app.get("/v1/routes", response_model=RouteListResponse)
+async def list_routes(
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    user_id: Optional[uuid.UUID] = Query(None, description="Filter by user ID"),
+    calculated_after: Optional[datetime] = Query(
+        None, description="Filter: calculated_at >= value"
+    ),
+    calculated_before: Optional[datetime] = Query(
+        None, description="Filter: calculated_at <= value"
+    ),
+):
+    """
+    List stored routes with pagination and filters. Response: data, filters, pagination.
+    """
+    filters_resp: Dict[str, Any] = {
+        "user_id": str(user_id) if user_id is not None else "",
+        "calculated_after": calculated_after.isoformat() if calculated_after else "",
+        "calculated_before": calculated_before.isoformat() if calculated_before else "",
+    }
+    items = []
+    for rid, entry in ROUTES.items():
+        if user_id is not None and entry.get("user_id") != user_id:
+            continue
+        calc_at = entry.get("calculated_at")
+        if isinstance(calc_at, datetime):
+            if calculated_after is not None and calc_at < calculated_after:
+                continue
+            if calculated_before is not None and calc_at > calculated_before:
+                continue
+        items.append(
+            {
+                "route_id": rid,
+                "routes": entry["routes"],
+                "alternatives_count": entry["alternatives_count"],
+                "calculated_at": entry["calculated_at"],
+                "user_id": entry.get("user_id"),
+            }
+        )
+    items.sort(
+        key=lambda x: (
+            x["calculated_at"] if isinstance(x["calculated_at"], datetime) else datetime.min
+        ),
+        reverse=True,
+    )
+    total = len(items)
+    offset = (page - 1) * page_size
+    page_items = items[offset : offset + page_size]
+    data = [RouteListItem(**it) for it in page_items]
+    return RouteListResponse(
+        data=data,
+        filters=filters_resp,
+        pagination=PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        ),
+    )
 
 
 @app.post("/v1/routes/calculate", response_model=RouteCalculateResponse)
@@ -304,6 +417,7 @@ async def calc(body: RouteCalculateRequest, db=Depends(get_db), postgisDB=Depend
         "routes": [opt],
         "alternatives_count": 1,
         "calculated_at": now,
+        "user_id": body.user_id,
     }
 
     audit = Audit(
@@ -317,7 +431,7 @@ async def calc(body: RouteCalculateRequest, db=Depends(get_db), postgisDB=Depend
     )
     db.add(audit)
 
-    return RouteCalculateResponse(**ROUTES[rid])
+    return RouteCalculateResponse(**{k: v for k, v in ROUTES[rid].items() if k != "user_id"})
 
 
 @app.post("/v1/routes/{route_id}/recalculate", response_model=RouteCalculateResponse)
@@ -372,6 +486,65 @@ async def nav_start(
     db.add(audit)
 
     return NavigationStartResponse(session_id=sid, status="active", started_at=now)
+
+
+@app.get("/v1/navigation/sessions", response_model=NavigationSessionListResponse)
+async def list_navigation_sessions(
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    user_id: Optional[uuid.UUID] = Query(None, description="Filter by user ID"),
+    route_id: Optional[uuid.UUID] = Query(None, description="Filter by route ID"),
+    started_after: Optional[datetime] = Query(None, description="Filter: started_at >= value"),
+    started_before: Optional[datetime] = Query(None, description="Filter: started_at <= value"),
+):
+    """
+    List navigation sessions with pagination and filters. Response: data, filters, pagination.
+    """
+    filters_resp: Dict[str, Any] = {
+        "user_id": str(user_id) if user_id is not None else "",
+        "route_id": str(route_id) if route_id is not None else "",
+        "started_after": started_after.isoformat() if started_after else "",
+        "started_before": started_before.isoformat() if started_before else "",
+    }
+    items = []
+    for sid, entry in NAV.items():
+        if user_id is not None and entry.get("user_id") != user_id:
+            continue
+        if route_id is not None and entry.get("route_id") != route_id:
+            continue
+        started_at = entry.get("started_at")
+        if isinstance(started_at, datetime):
+            if started_after is not None and started_at < started_after:
+                continue
+            if started_before is not None and started_at > started_before:
+                continue
+        items.append(
+            {
+                "session_id": sid,
+                "route_id": entry["route_id"],
+                "user_id": entry["user_id"],
+                "started_at": entry["started_at"],
+                "status": "active",
+            }
+        )
+    items.sort(
+        key=lambda x: x["started_at"] if isinstance(x["started_at"], datetime) else datetime.min,
+        reverse=True,
+    )
+    total = len(items)
+    offset = (page - 1) * page_size
+    page_items = items[offset : offset + page_size]
+    data = [NavigationSessionItem(**it) for it in page_items]
+    return NavigationSessionListResponse(
+        data=data,
+        filters=filters_resp,
+        pagination=PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        ),
+    )
 
 
 @app.get("/metrics")
