@@ -379,6 +379,14 @@ class TrustedContactsListResponse(BaseModel):
     contacts: List[TrustedContactDTO]
 
 
+class TrustedContactsListPaginatedResponse(BaseModel):
+    """Paginated list of trusted contacts for a user."""
+
+    user_id: str
+    data: List[TrustedContactDTO]
+    pagination: PaginationMeta
+
+
 # ========= User Management Endpoints =========
 
 
@@ -738,6 +746,60 @@ async def save_preferences(
     )
 
 
+@app.get(
+    "/v1/users/{user_id}/trusted-contacts",
+    response_model=TrustedContactsListPaginatedResponse,
+    tags=["User Management"],
+    summary="List trusted contacts (paginated)",
+)
+async def list_trusted_contacts(
+    user_id: str,
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=200, description="Items per page"),
+    db=Depends(get_db),
+):
+    """
+    List trusted contacts for a user with pagination.
+    Use GET when you need to read the current list (e.g. for display or before editing).
+    """
+    # Ensure user exists
+    user = await db.scalar(select(User).where(User.user_id == user_id))
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found",
+        )
+    # Total count
+    count_stmt = (
+        select(func.count()).select_from(TrustedContact).where(TrustedContact.user_id == user_id)
+    )
+    total = (await db.execute(count_stmt)).scalar_one()
+    # Paginated query (primary first, then by created_at)
+    offset = (page - 1) * page_size
+    stmt = (
+        select(TrustedContact)
+        .where(TrustedContact.user_id == user_id)
+        .order_by(
+            TrustedContact.is_primary.desc().nulls_last(),
+            TrustedContact.created_at.asc(),
+        )
+        .offset(offset)
+        .limit(page_size)
+    )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return TrustedContactsListPaginatedResponse(
+        user_id=user_id,
+        data=[TrustedContactDTO.model_validate(r) for r in rows],
+        pagination=PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        ),
+    )
+
+
 @app.put(
     "/v1/users/{user_id}/trusted-contacts",
     response_model=TrustedContactsSetResponse,
@@ -748,6 +810,12 @@ async def set_trusted_contacts(
     body: ContactsSetRequest,
     db=Depends(get_db),
 ):
+    """
+    Replace the entire trusted contacts list for the user.
+    Deletes all existing trusted contacts and inserts the given list.
+    Use when the client has the full list (e.g. after editing all contacts at once).
+    For adding or updating a single contact, use POST instead.
+    """
     now = datetime.utcnow()
 
     if sum(1 for c in body.contacts if c.is_primary) > 1:
@@ -863,8 +931,10 @@ async def upsert_trusted_contact(
     db=Depends(get_db),
 ):
     """
-    If a contact with same (user_id + phone) exists -> update.
-    Otherwise -> create new contact with new UUID.
+    Add or update a single trusted contact (upsert by phone).
+    If a contact with the same (user_id + phone) exists -> update it.
+    Otherwise -> create a new contact.
+    Use for adding one contact or editing one by phone; use PUT to replace the whole list.
     """
     now = datetime.utcnow()
 
