@@ -1,3 +1,4 @@
+# fmt: off
 # Run:
 # uvicorn services.feedback.main:app --host 0.0.0.0 --port 20004 --reload
 # Docs: http://127.0.0.1:20004/docs
@@ -8,10 +9,9 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Optional
-from uuid import UUID
+from typing import Any, Dict, Generic, List, Optional, TypeVar
 
-from fastapi import Depends, HTTPException, Request, Response
+from fastapi import Depends, HTTPException, Query, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -19,7 +19,8 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
@@ -197,7 +198,6 @@ class FeedbackLocation(BaseModel):
 class FeedbackSubmitRequest(BaseModel):
     user_id: str
     route_id: Optional[str] = None
-    session_id: Optional[str] = None
     type: Optional[FeedbackType] = None
     severity: Optional[SeverityType] = None
     location: Optional[dict] = None
@@ -206,7 +206,7 @@ class FeedbackSubmitRequest(BaseModel):
 
 
 class FeedbackSubmitResponse(BaseModel):
-    feedback_id: UUID
+    feedback_id: uuid.UUID
     status: Status
     ticket_number: str
     created_at: datetime
@@ -227,13 +227,33 @@ class FeedbackValidateResponse(BaseModel):
 
 
 class FeedbackStatusResponse(BaseModel):
-    feedback_id: UUID
+    feedback_id: uuid.UUID
     ticket_number: str
     status: Status
     type: Optional[FeedbackType] = None
     severity: Optional[SeverityType] = None
     created_at: datetime
     updated_at: datetime
+
+
+class PaginationMeta(BaseModel):
+    """Metadata for paginated list responses."""
+
+    page: int = Field(..., ge=1, description="Current page (1-based)")
+    page_size: int = Field(..., ge=1, le=100, description="Items per page")
+    total: int = Field(..., ge=0, description="Total number of items")
+    total_pages: int = Field(..., ge=0, description="Total number of pages")
+
+
+T = TypeVar("T")
+
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    """Paginated list of feedback with filters."""
+
+    data: List[T]
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    pagination: PaginationMeta
 
 
 # ========= ROUTES =========
@@ -325,6 +345,10 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         "updated_at": now,
         "user_id": user_id_str,
     }
+    # Validate feedback_id is UUID (user_id is now a plain string from Auth0)
+    parsed_feedback_id = _maybe_uuid(getattr(body, "feedback_id", None))
+    if parsed_feedback_id is None:
+        raise HTTPException(status_code=400, detail="feedback_id must be a valid UUID")
 
     # Add optional fields if provided
     if body.route_id is not None:
@@ -359,15 +383,75 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     return resp
 
 
+@app.get("/v1/feedback", response_model=PaginatedResponse[FeedbackStatusResponse])
+async def list_feedback(
+    user_id: Optional[str] = Query(None, description="Filter by user ID"),
+    status: Optional[Status] = Query(
+        None, description="Filter by feedback status (received, resolved, rejected)"
+    ),
+    type: Optional[FeedbackType] = Query(
+        None,
+        description="Filter by feedback type (safety_issue, route_quality, others)",
+    ),
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(10, ge=1, le=100, description="Items per page"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retrieve a paginated list of historical feedbacks with optional filtering.
+    """
+    skip = (page - 1) * page_size
+
+    feedback_factory = get_feedback_factory()
+
+    total_count, feedbacks = await feedback_factory.get_feedbacks(
+        db=db,
+        user_id=user_id,
+        status=status,
+        feedback_type=type,
+        skip=skip,
+        limit=page_size,
+    )
+
+    data = []
+    for row in feedbacks:
+        api_type = row.type if row.type else None
+        if api_type == "others":
+            api_type = "other"
+
+        data.append(
+            FeedbackStatusResponse(
+                feedback_id=row.feedback_id,
+                ticket_number=row.ticket_number or f"TKT-{datetime.utcnow().year}-DB",
+                status=row.status,
+                type=api_type,
+                severity=row.severity,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+            )
+        )
+
+    total_pages = max(0, (total_count + page_size - 1) // page_size) if page_size > 0 else 0
+
+    applied_filters = {
+        "status": status.value if status else "",
+        "type": type.value if type else "",
+        "user_id": user_id if user_id else "",
+    }
+
+    pagination_meta = PaginationMeta(
+        page=page, page_size=page_size, total=total_count, total_pages=total_pages
+    )
+
+    return PaginatedResponse(data=data, filters=applied_filters, pagination=pagination_meta)
+
+
 @app.post("/v1/feedback/validate", response_model=FeedbackValidateResponse)
 async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get_db)):
     # Business metric
     FEEDBACK_VALIDATIONS_TOTAL.inc()
 
-    # Validate user_id is a UUID (required for feedback validation traces)
-    parsed_user_id = _maybe_uuid(getattr(body, "user_id", None))
-    if parsed_user_id is None:
-        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
+    # user_id is now a plain string from Auth0
 
     # Get spam validator and validate content
     try:
@@ -406,7 +490,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
         await write_audit(
             db=db,
             event_type="feedback",
-            user_id=parsed_user_id,
+            user_id=body.user_id,
             event_id=None,
             message=f"feedback.validate user_id={body.user_id} is_spam={resp.is_spam} confidence={resp.confidence} allow_submission={resp.allow_submission} flags={','.join(resp.flags)}",
             commit=True,
@@ -418,86 +502,71 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
 
 
 @app.get("/v1/feedback/{feedback_id}/status", response_model=FeedbackStatusResponse)
-async def status(feedback_id: UUID, db: AsyncSession = Depends(get_db)):
-    # Business metric
+async def status(feedback_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     FEEDBACK_STATUS_CHECKS_TOTAL.inc()
 
-    # Query database for feedback record
-    from sqlalchemy import select
-
-    from models.feedback import Feedback
-
-    result = await db.execute(select(Feedback).where(Feedback.feedback_id == feedback_id))
-    feedback_record = result.scalar_one_or_none()
-
-    if not feedback_record:
-        # Fallback to in-memory cache for backward compatibility
-        fb = FEEDBACK.get(str(feedback_id))
-        if not fb:
-            raise HTTPException(status_code=404, detail=f"Feedback with id {feedback_id} not found")
-        now = datetime.utcnow()
-        fb = {
-            "ticket_number": fb.get("ticket_number", 0),
-            "status": fb.get("status", Status.RECEIVED.value),
-            "type": fb.get("type"),
-            "severity": fb.get("severity"),
-            "created_at": fb.get("created_at", now),
-            "updated_at": fb.get("updated_at", now),
-        }
-
-        feedback_type = None
-        if fb.get("type"):
-            feedback_type = FeedbackType(fb["type"])
-
-        severity = None
-        if fb.get("severity"):
-            severity = SeverityType(fb["severity"])
-
-        res = FeedbackStatusResponse(
-            feedback_id=feedback_id,
-            ticket_number=(
-                int(fb["ticket_number"])
-                if isinstance(fb["ticket_number"], str)
-                else fb["ticket_number"]
-            ),
-            status=Status(fb["status"]),
-            type=feedback_type,
-            severity=severity,
-            created_at=fb["created_at"],
-            updated_at=fb["updated_at"],
+    # === DB-backed status lookup ===
+    row = (
+        (
+            await db.execute(
+                text("""
+                SELECT
+                  feedback_id,
+                  user_id,
+                  ticket_number,
+                  status,
+                  type AS feedback_type,
+                  severity,
+                  created_at,
+                  updated_at
+                FROM saferoute.feedback
+                WHERE feedback_id = :fid
+                """),
+                {"fid": str(feedback_id)},
+            )
         )
-        user_id = None
-    else:
-        # Convert database record to response
-        feedback_type = None
-        if feedback_record.type:
-            feedback_type = FeedbackType(feedback_record.type)
+        .mappings()
+        .first()
+    )
 
-        severity = None
-        if feedback_record.severity:
-            severity = SeverityType(feedback_record.severity)
+    if not row:
+        raise HTTPException(status_code=404, detail="feedback not found")
 
-        res = FeedbackStatusResponse(
-            feedback_id=feedback_record.feedback_id,
-            ticket_number=(
-                str(feedback_record.ticket_number) if feedback_record.ticket_number else ""
-            ),
-            status=Status(feedback_record.status),
-            type=feedback_type,
-            severity=severity,
-            created_at=feedback_record.created_at,
-            updated_at=feedback_record.updated_at,
-        )
-        user_id = _maybe_uuid(feedback_record.user_id)
+    api_type = row["feedback_type"]
+    if api_type == "others":
+        api_type = "other"
 
-    # Audit status lookup
+    # Extract user_id from the feedback record and parse it for audit logging
+    user_id_str = row.get("user_id")
+    parsed_user_id = _maybe_uuid(user_id_str) if user_id_str else None
+
+    # Extract feedback_id as UUID from database row (already a UUID object)
+    feedback_id_uuid = row["feedback_id"]
+    if not isinstance(feedback_id_uuid, uuid.UUID):
+        # Fallback: use the validated UUID from path parameter
+        feedback_id_uuid = feedback_id
+
+    res = FeedbackStatusResponse(
+        feedback_id=str(row["feedback_id"]),
+        ticket_number=(
+            str(row["ticket_number"])
+            if row["ticket_number"] is not None
+            else f"TKT-{datetime.utcnow().year}-DB"
+        ),
+        status=row["status"],
+        type=api_type,
+        severity=row["severity"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
     try:
         await write_audit(
             db=db,
             event_type="feedback",
-            user_id=user_id,
-            event_id=feedback_id,
-            message=f"feedback.status_check feedback_id={feedback_id} ticket={fb.get('ticket_number')} status={fb.get('status')}",
+            user_id=parsed_user_id,
+            event_id=feedback_id_uuid,
+            message=f"feedback.status_check feedback_id={feedback_id} ticket={row.get('ticket_number')} status={row.get('status')}",
             commit=True,
         )
     except Exception:

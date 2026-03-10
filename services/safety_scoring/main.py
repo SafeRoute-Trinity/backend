@@ -8,7 +8,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -21,7 +21,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -45,6 +45,7 @@ app = FastAPI()
 # Get database session dependency
 db_factory = get_database_factory()
 get_db = db_factory.get_session_dependency(DatabaseType.POSTGIS)
+get_postgis_db = db_factory.get_session_dependency(DatabaseType.POSTGIS)
 # Routing tuning knobs (can be overridden by env vars)
 ROUTE_SUBGRAPH_EXPAND_DEGREES = float(os.getenv("ROUTE_SUBGRAPH_EXPAND_DEGREES", "0.01"))
 ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES = float(os.getenv("ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES", "0.08"))
@@ -219,7 +220,7 @@ class Coordinate(BaseModel):
 
 class WeightUpdateRequest(BaseModel):
     edge_id: int  # gid in ways table
-    weight: float
+    safety_factor: float
 
 
 class RouteRequest(BaseModel):
@@ -306,6 +307,22 @@ class SafetyWeightsResponse(BaseModel):
     updated_at: datetime
 
 
+# ---------- Pagination & filters (list response convention) ----------
+
+
+class PaginationMeta(BaseModel):
+    """Metadata for paginated list responses."""
+
+    page: int = Field(..., ge=1, description="Current page (1-based)")
+    page_size: int = Field(..., ge=1, le=500, description="Items per page")
+    total: int = Field(..., ge=0, description="Total number of items")
+    total_pages: int = Field(..., ge=0, description="Total number of pages")
+
+
+def _total_pages(total: int, page_size: int) -> int:
+    return max(0, (total + page_size - 1) // page_size) if page_size > 0 else 0
+
+
 # ========= Endpoints =========
 
 
@@ -331,19 +348,54 @@ async def metrics():
 
 
 @app.get("/api/danger_zones")
-async def get_danger_zones(db: AsyncSession = Depends(get_safety_scoring_db)):
+async def get_danger_zones(
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(50, ge=1, le=200, description="Items per page"),
+    min_safety_factor: Optional[float] = Query(
+        None, description="Filter: safety_factor >= value (e.g. 0.5)"
+    ),
+    max_safety_factor: Optional[float] = Query(
+        None, description="Filter: safety_factor <= value (e.g. 2.0)"
+    ),
+    db: AsyncSession = Depends(get_safety_scoring_db),
+):
     """
-    Return edges that have custom weights.
+    Return edges that have custom weights. Paginated with optional filters.
+    Response follows convention: data, filters, pagination.
     """
     try:
+        # Filters for response (empty string when not set)
+        filters_resp: Dict[str, Any] = {
+            "min_safety_factor": min_safety_factor if min_safety_factor is not None else "",
+            "max_safety_factor": max_safety_factor if max_safety_factor is not None else "",
+        }
+        # SQL: always exclude default weight 1.0; optional range
+        where_clause = "safety_factor != 1.0"
+        params: Dict[str, Any] = {}
+        if min_safety_factor is not None:
+            where_clause += " AND safety_factor >= :min_sf"
+            params["min_sf"] = min_safety_factor
+        if max_safety_factor is not None:
+            where_clause += " AND safety_factor <= :max_sf"
+            params["max_sf"] = max_safety_factor
+
+        count_query = text(f"SELECT COUNT(*) FROM ways WHERE {where_clause}")
+        count_result = await db.execute(count_query, params)
+        total = count_result.scalar() or 0
+
+        offset = (page - 1) * page_size
+        params["limit"] = page_size
+        params["offset"] = offset
         query = text(
+            f"""
+            SELECT gid, safety_factor, ST_AsGeoJSON(geometry) as geojson
+            FROM ways
+            WHERE {where_clause}
+            ORDER BY gid
+            LIMIT :limit OFFSET :offset
             """
-            SELECT gid, safety_factor, ST_AsGeoJSON(geometry) as geojson 
-            FROM ways 
-            WHERE safety_factor != 1.0
-        """
         )
-        result = await db.execute(query)
+        result = await db.execute(query, params)
         rows = result.fetchall()
 
         features = []
@@ -356,15 +408,34 @@ async def get_danger_zones(db: AsyncSession = Depends(get_safety_scoring_db)):
                 }
             )
 
-        return {"type": "FeatureCollection", "features": features}
+        pagination = PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        )
+        return {
+            "type": "FeatureCollection",
+            "data": features,
+            "features": features,  # backward compat
+            "filters": filters_resp,
+            "pagination": pagination.model_dump(),
+        }
     except Exception as e:
         print(f"Error fetching zones: {e}")
-        return {"type": "FeatureCollection", "features": []}
+        return {
+            "type": "FeatureCollection",
+            "data": [],
+            "features": [],
+            "filters": {"min_safety_factor": "", "max_safety_factor": ""},
+            "pagination": PaginationMeta(page=1, page_size=50, total=0, total_pages=0).model_dump(),
+        }
 
 
 @app.post("/api/danger_zones")
 async def update_danger_zone(
-    update: WeightUpdateRequest, db: AsyncSession = Depends(get_safety_scoring_db)
+    update: WeightUpdateRequest,
+    db: AsyncSession = Depends(get_safety_scoring_db),
 ):
     """
     Update safety weight for a specific edge and its bidirectional counterpart.
@@ -387,8 +458,36 @@ async def update_danger_zone(
         """
         )
 
-        await db.execute(update_query, {"w": update.weight, "geom": geom_res[0]})
+        await db.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
         await db.commit()
+
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
+
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
 
         # Metric
         SAFETY_WEIGHTS_UPDATES_TOTAL.inc()
@@ -396,24 +495,41 @@ async def update_danger_zone(
         return {
             "status": "updated",
             "id": update.edge_id,
-            "weight": update.weight,
+            "safety_factor": update.safety_factor,
             "note": "Updated bidirectional edges",
         }
+    except HTTPException:
+        raise
     except Exception as e:
         await db.rollback()
-        print(f"Error updating weight: {e}")
+        print(f"Error updating safety_factor: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/danger_zones/{zone_id}")
 async def reset_danger_zone(zone_id: int, db: AsyncSession = Depends(get_safety_scoring_db)):
     """
-    Reset safety info for a zone to default (1.0).
+    Reset safety_factor(weight) for a zone to default (1.0).
     """
     try:
         query = text("UPDATE ways SET safety_factor = 1.0 WHERE gid = :id")
         await db.execute(query, {"id": zone_id})
         await db.commit()
+
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
+
         return {"status": "reset"}
     except Exception as e:
         await db.rollback()
@@ -653,6 +769,20 @@ async def get_route(
         walking_speed_mps = 1.39
         duration_seconds = total_distance / walking_speed_mps
 
+        # TODO: add audit when auth is ready
+
+        # audit = Audit(
+        #     log_id=uuid.uuid4(),
+        #     user_id=user_id,
+        #     event_type="authentication",
+        #     event_id=user_id,
+        #     message="Register",
+        #     created_at=now,
+        #     updated_at=now,
+        # )
+
+        # db.add(audit)
+
         return {
             "type": "FeatureCollection",
             "features": features,
@@ -682,22 +812,49 @@ async def get_graph_geojson(
     max_lng: float = Query(..., description="Maximum Longitude"),
     max_lat: float = Query(..., description="Maximum Latitude"),
     db: AsyncSession = Depends(get_safety_scoring_db),
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(100, ge=1, le=2000, description="Items per page"),
 ):
+    """
+    Return graph edges in bbox. Paginated. Response follows convention: data, filters, pagination.
+    """
     try:
-        # Filter by bounding box using PostGIS && operator (overlap)
-        # Limit to 2000 to prevent overload if zoomed out too far
+        filters_resp: Dict[str, Any] = {
+            "min_lng": min_lng,
+            "min_lat": min_lat,
+            "max_lng": max_lng,
+            "max_lat": max_lat,
+        }
+        params = {
+            "min_lng": min_lng,
+            "min_lat": min_lat,
+            "max_lng": max_lng,
+            "max_lat": max_lat,
+        }
+
+        # Total count in bbox
+        count_query = text(
+            """
+            SELECT COUNT(*) FROM ways
+            WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
+            """
+        )
+        count_result = await db.execute(count_query, params)
+        total = count_result.scalar() or 0
+
+        offset = (page - 1) * page_size
+        params["limit"] = page_size
+        params["offset"] = offset
         query = text(
             """
-            SELECT gid, source, target, ST_AsGeoJSON(geometry) as geojson, safety_factor 
-            FROM ways 
+            SELECT gid, source, target, ST_AsGeoJSON(geometry) as geojson, safety_factor
+            FROM ways
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
-            LIMIT 2000
+            ORDER BY gid
+            LIMIT :limit OFFSET :offset
         """
         )
-
-        result = await db.execute(
-            query, {"min_lng": min_lng, "min_lat": min_lat, "max_lng": max_lng, "max_lat": max_lat}
-        )
+        result = await db.execute(query, params)
         rows = result.fetchall()
 
         features = []
@@ -710,12 +867,40 @@ async def get_graph_geojson(
                 }
             )
 
-        return {"type": "FeatureCollection", "features": features}
+        pagination = PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        )
+        return {
+            "type": "FeatureCollection",
+            "data": features,
+            "features": features,  # backward compat
+            "filters": filters_resp,
+            "pagination": pagination.model_dump(),
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # --- Existing Validated Endpoints (Keep for backward compatibility) ---
+
+
+@app.get("/v1/safety/factors", response_model=SafetyFactorsResponse)
+async def get_factors(body: SafetyFactorsRequest):
+    # Business metric: count factors queries
+    SAFETY_FACTORS_QUERIES_TOTAL.inc()
+
+    return SafetyFactorsResponse(
+        location=PointModel(lat=body.lat, lon=body.lon),
+        radius_m=body.radius_m,
+        factors={"cctv_cameras": 3, "street_lights": 5, "foot_traffic_level": "medium"},
+        composite_score=88.0,
+        queried_at=datetime.utcnow(),
+    )
 
 
 @app.post("/v1/safety/score-route", response_model=ScoreRouteResponse)
@@ -744,20 +929,6 @@ async def score_route(body: ScoreRouteRequest):
         segments=segs,
         alerts=[],
         calculated_at=datetime.utcnow(),
-    )
-
-
-@app.post("/v1/safety/factors", response_model=SafetyFactorsResponse)
-async def get_factors(body: SafetyFactorsRequest):
-    # Business metric: count factors queries
-    SAFETY_FACTORS_QUERIES_TOTAL.inc()
-
-    return SafetyFactorsResponse(
-        location=PointModel(lat=body.lat, lon=body.lon),
-        radius_m=body.radius_m,
-        factors={"cctv_cameras": 3, "street_lights": 5, "foot_traffic_level": "medium"},
-        composite_score=88.0,
-        queried_at=datetime.utcnow(),
     )
 
 

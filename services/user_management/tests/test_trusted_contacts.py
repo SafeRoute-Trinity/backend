@@ -24,6 +24,20 @@ class FakeScalarsResult:
         return list(self._items)
 
 
+class FakeExecuteResult:
+    """Mock result for db.execute(); supports scalar_one() and scalars().all()."""
+
+    def __init__(self, scalar_one_value=None, scalars_all=None):
+        self._scalar_one_value = scalar_one_value
+        self._scalars_all = list(scalars_all) if scalars_all is not None else []
+
+    def scalar_one(self):
+        return self._scalar_one_value
+
+    def scalars(self):
+        return FakeScalarsResult(self._scalars_all)
+
+
 class FakeDB:
     """
     Mock async db session for endpoints that use:
@@ -39,10 +53,12 @@ class FakeDB:
         *,
         scalar_results=None,  # queue for db.scalar(...)
         scalars_results=None,  # queue for db.scalars(...)
+        execute_results=None,  # queue for db.execute(...) (FakeExecuteResult)
         commit_raises: Exception | None = None,
     ):
         self.scalar_results = list(scalar_results) if scalar_results is not None else []
         self.scalars_results = list(scalars_results) if scalars_results is not None else []
+        self.execute_results = list(execute_results) if execute_results is not None else []
         self.commit_raises = commit_raises
 
         self.added = []
@@ -51,19 +67,20 @@ class FakeDB:
         self.rolled_back = False
 
     async def scalar(self, stmt):
-        # pop in order; default None
         return self.scalar_results.pop(0) if self.scalar_results else None
 
     async def scalars(self, stmt):
         items = self.scalars_results.pop(0) if self.scalars_results else []
         return FakeScalarsResult(items)
 
+    async def execute(self, stmt):
+        return self.execute_results.pop(0) if self.execute_results else FakeExecuteResult()
+
     def add(self, obj):
         self.added.append(obj)
 
     async def flush(self):
         self.flushed = True
-        # mimic "db assigns defaults" if needed
         now = datetime.now(timezone.utc)
         for obj in self.added:
             if hasattr(obj, "created_at") and getattr(obj, "created_at", None) is None:
@@ -96,14 +113,14 @@ def client():
 # ----------------------------
 # Fake ORM-like objects
 # ----------------------------
-def make_user(user_id: uuid.UUID):
+def make_user(user_id: str):
     return SimpleNamespace(user_id=user_id)
 
 
 def make_contact(
     *,
     contact_id: uuid.UUID,
-    user_id: uuid.UUID,
+    user_id: str,
     name: str,
     phone: str,
     relation: str,
@@ -127,7 +144,7 @@ def make_contact(
 # GET /trusted-contacts
 # ----------------------------
 def test_list_trusted_contacts_success(client):
-    uid = uuid.uuid4()
+    uid = "test-user-contacts-001"
     c1 = make_contact(
         contact_id=uuid.uuid4(),
         user_id=uid,
@@ -147,7 +164,10 @@ def test_list_trusted_contacts_success(client):
 
     fake_db = FakeDB(
         scalar_results=[make_user(uid)],  # user exists
-        scalars_results=[[c1, c2]],  # contacts list
+        execute_results=[
+            FakeExecuteResult(scalar_one_value=2),  # count for pagination
+        ],
+        scalars_results=[[c1, c2]],  # contacts list (paginated query)
     )
     override_db(fake_db)
 
@@ -156,24 +176,23 @@ def test_list_trusted_contacts_success(client):
     data = res.json()
 
     assert str(uid) == str(data["user_id"])
-    assert isinstance(data["contacts"], list)
-    assert len(data["contacts"]) == 2
-    assert data["contacts"][0]["phone"] == "+353111111111"
-    assert data["contacts"][0]["is_primary"] is True
-    assert data["contacts"][1]["phone"] == "+353222222222"
-
-
-def test_list_trusted_contacts_invalid_uuid_400(client):
-    fake_db = FakeDB()
-    override_db(fake_db)
-
-    res = client.get("/v1/users/not-a-uuid/trusted-contacts")
-    assert res.status_code == 400
-    assert res.json()["detail"] == "Invalid user_id format"
+    assert isinstance(data["data"], list)
+    assert len(data["data"]) == 2
+    assert data["data"][0]["phone"] == "+353111111111"
+    assert data["data"][0]["is_primary"] is True
+    assert data["data"][1]["phone"] == "+353222222222"
+    assert "filters" in data
+    assert data["filters"]["is_primary"] == ""
+    assert data["filters"]["search"] == ""
+    assert "pagination" in data
+    assert data["pagination"]["page"] == 1
+    assert data["pagination"]["page_size"] == 20
+    assert data["pagination"]["total"] == 2
+    assert data["pagination"]["total_pages"] == 1
 
 
 def test_list_trusted_contacts_user_not_found_404(client):
-    uid = uuid.uuid4()
+    uid = "nonexistent-user"
     fake_db = FakeDB(scalar_results=[None])  # user not found
     override_db(fake_db)
 
@@ -186,7 +205,7 @@ def test_list_trusted_contacts_user_not_found_404(client):
 # POST /trusted-contacts (upsert)
 # ----------------------------
 def test_upsert_trusted_contact_create_success(client):
-    uid = uuid.uuid4()
+    uid = "test-user-contacts-002"
 
     # scalar() calls order inside endpoint:
     # (1) user exists -> user
@@ -206,7 +225,7 @@ def test_upsert_trusted_contact_create_success(client):
     data = res.json()
 
     assert data["status"] == "contact_upserted"
-    assert str(uid) == str(data["user_id"])
+    assert data["user_id"] == uid
     assert data["contact"]["phone"] == "+353111111111"
     assert data["contact"]["name"] == "Alice"
     assert data["contact"]["relation"] == "friend"
@@ -221,7 +240,7 @@ def test_upsert_trusted_contact_create_success(client):
 
 
 def test_upsert_trusted_contact_update_success(client):
-    uid = uuid.uuid4()
+    uid = "test-user-contacts-003"
     existing = make_contact(
         contact_id=uuid.uuid4(),
         user_id=uid,
@@ -259,25 +278,9 @@ def test_upsert_trusted_contact_update_success(client):
     assert len(fake_db.added) == 1  # only audit
 
 
-def test_upsert_trusted_contact_invalid_uuid_400(client):
-    fake_db = FakeDB()
-    override_db(fake_db)
-
-    payload = {
-        "name": "Alice",
-        "phone": "+353111111111",
-        "relationship": "friend",
-        "is_primary": True,
-    }
-
-    res = client.post("/v1/users/not-a-uuid/trusted-contacts", json=payload)
-    assert res.status_code == 400
-    assert res.json()["detail"] == "Invalid user_id format"
-
-
 def test_upsert_trusted_contact_user_not_found_404(client):
-    uid = uuid.uuid4()
-    fake_db = FakeDB(scalar_results=[None])  # user not found at step (2)
+    uid = "nonexistent-user"
+    fake_db = FakeDB(scalar_results=[None])  # user not found
     override_db(fake_db)
 
     payload = {
@@ -293,7 +296,7 @@ def test_upsert_trusted_contact_user_not_found_404(client):
 
 
 def test_upsert_trusted_contact_integrity_error_400(client):
-    uid = uuid.uuid4()
+    uid = "test-user-contacts-004"
 
     fake_db = FakeDB(
         scalar_results=[make_user(uid), None],  # user exists, contact not exists -> create

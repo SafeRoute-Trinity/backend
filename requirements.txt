@@ -12,7 +12,11 @@ twilio>=8.10.0
 httpx>=0.25.0
 prometheus-client>=0.23.1
 greenlet>=3.0.0
-prometheus-client>=0.23.1
+
+# --- Feedback Service Dependencies ---
+# Spam detection dependencies (optional - service will work without them)
+validators>=0.22.0
+better-profanity>=0.7.0
 
 
 # --- Testing ---

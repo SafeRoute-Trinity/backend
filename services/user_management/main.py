@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import Depends, HTTPException, Query, Request, Response, status
 from prometheus_client import (
@@ -34,7 +34,6 @@ from models.audit import Audit
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from common.constants import AUTH_TOKEN_TTL
 from libs.auth.auth0_verify import verify_token
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
@@ -178,7 +177,7 @@ class Point(BaseModel):
 # ======== Audit Log Models ===========================
 class AuditLogResponse(BaseModel):
     log_id: uuid.UUID
-    user_id: Optional[uuid.UUID] = None
+    user_id: Optional[str] = None
     event_type: str
     event_id: Optional[uuid.UUID] = None
     message: str
@@ -186,11 +185,28 @@ class AuditLogResponse(BaseModel):
     updated_at: datetime
 
 
+# ---------- Pagination (shared for list endpoints) ----------
+
+
+class PaginationMeta(BaseModel):
+    """Metadata for paginated list responses."""
+
+    page: int = Field(..., ge=1, description="Current page (1-based)")
+    page_size: int = Field(..., ge=1, le=200, description="Items per page")
+    total: int = Field(..., ge=0, description="Total number of items")
+    total_pages: int = Field(..., ge=0, description="Total number of pages")
+
+
+def _total_pages(total: int, page_size: int) -> int:
+    return max(0, (total + page_size - 1) // page_size) if page_size > 0 else 0
+
+
 class AuditListResponse(BaseModel):
+    """Paginated audit log list with filters and pagination."""
+
     data: List[AuditLogResponse]
-    total: int
-    page: int
-    page_size: int
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    pagination: PaginationMeta
 
 
 # ========= User Management Models =========
@@ -215,7 +231,7 @@ class AuthInfo(BaseModel):
 class RegisterResponse(BaseModel):
     """Response model for user registration."""
 
-    user_id: uuid.UUID
+    user_id: str
     status: Literal["created"]
     auth: AuthInfo
     email: str
@@ -234,7 +250,7 @@ class LoginRequest(BaseModel):
 class LoginResponse(BaseModel):
     """Response model for user login."""
 
-    user_id: uuid.UUID
+    user_id: str
     status: Literal["authenticated"]
     auth: AuthInfo
     email: str
@@ -244,12 +260,20 @@ class LoginResponse(BaseModel):
 class UserResponse(BaseModel):
     """Response model for user information."""
 
-    user_id: uuid.UUID
+    user_id: str
     name: Optional[str]
     email: str
     phone: Optional[str] = None
     created_at: datetime
     last_login: Optional[datetime] = None
+
+
+class UserListResponse(BaseModel):
+    """Paginated list of users with filters and pagination."""
+
+    data: List[UserResponse]
+    filters: Dict[str, Any] = Field(default_factory=dict)
+    pagination: PaginationMeta
 
 
 class PreferencesRequest(BaseModel):
@@ -263,7 +287,7 @@ class PreferencesRequest(BaseModel):
 class PreferencesResponse(BaseModel):
     """Response model for saved/loaded preferences."""
 
-    user_id: uuid.UUID
+    user_id: str
     status: Literal["preferences_saved", "preferences_loaded"]
     preferences: PreferencesRequest
     updated_at: datetime
@@ -284,7 +308,7 @@ class TrustedContactDTO(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     contact_id: uuid.UUID
-    user_id: uuid.UUID
+    user_id: str
     name: str
     phone: str
     relationship: Optional[str] = Field(default=None, alias="relation")
@@ -294,14 +318,14 @@ class TrustedContactDTO(BaseModel):
 
 
 class TrustedContactUpsertResponse(BaseModel):
-    user_id: uuid.UUID
+    user_id: str
     status: Literal["contact_upserted"]
     contact: TrustedContactDTO
     updated_at: datetime
 
 
 class TrustedContactsListResponse(BaseModel):
-    user_id: uuid.UUID
+    user_id: str
     contacts: List[TrustedContactDTO]
 
 
@@ -320,6 +344,83 @@ async def root():
 
 
 @app.get(
+    "/v1/users",
+    response_model=UserListResponse,
+    tags=["User Management"],
+    summary="List users (paginated, filterable)",
+)
+async def list_users(
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    email: Optional[str] = Query(None, description="Filter by email (case-insensitive contains)"),
+    name: Optional[str] = Query(None, description="Filter by name (case-insensitive contains)"),
+    created_after: Optional[datetime] = Query(
+        None, description="Filter users created after this time (inclusive)"
+    ),
+    created_before: Optional[datetime] = Query(
+        None, description="Filter users created before this time (inclusive)"
+    ),
+    db=Depends(get_db),
+):
+    """
+    List users with pagination and optional filters.
+
+    Useful for admin or support tooling. Filters are combined with AND.
+    """
+    # Applied filter values for response (convention: empty string when not set)
+    filters_resp = {
+        "email": email if (email and email.strip()) else "",
+        "name": name if (name and name.strip()) else "",
+        "created_after": created_after.isoformat() if created_after else "",
+        "created_before": created_before.isoformat() if created_before else "",
+    }
+    # SQL predicates
+    predicates = []
+    if email is not None and email.strip() != "":
+        predicates.append(func.lower(User.email).contains(email.strip().lower()))
+    if name is not None and name.strip() != "":
+        predicates.append(func.lower(User.name).contains(name.strip().lower()))
+    if created_after is not None:
+        predicates.append(User.created_at >= created_after)
+    if created_before is not None:
+        predicates.append(User.created_at <= created_before)
+
+    count_stmt = select(func.count()).select_from(User)
+    if predicates:
+        count_stmt = count_stmt.where(*predicates)
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    offset = (page - 1) * page_size
+    stmt = select(User).order_by(User.created_at.desc()).offset(offset).limit(page_size)
+    if predicates:
+        stmt = stmt.where(*predicates)
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    data = [
+        UserResponse(
+            user_id=u.user_id,
+            name=u.name,
+            email=u.email,
+            phone=u.phone,
+            created_at=u.created_at,
+            last_login=u.last_login,
+        )
+        for u in rows
+    ]
+    return UserListResponse(
+        data=data,
+        filters=filters_resp,
+        pagination=PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        ),
+    )
+
+
+@app.get(
     "/v1/users/{user_id}",
     response_model=UserResponse,
     tags=["User Management"],
@@ -333,20 +434,10 @@ async def get_user(
     Get user information by user ID (DB is the source of truth).
 
     Raises:
-        HTTPException: 400 if user_id format invalid
         HTTPException: 404 if user not found
     """
-    # Validate UUID
-    try:
-        user_uuid = uuid.UUID(user_id)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid user_id format",
-        )
-
     # Query PostgreSQL database
-    result = await db.execute(select(User).where(User.user_id == user_uuid))
+    result = await db.execute(select(User).where(User.user_id == user_id))
     user = result.scalar_one_or_none()
 
     if not user:
@@ -366,153 +457,91 @@ async def get_user(
         "last_login": user.last_login,
     }
 
-    # If your UserResponse doesn't include updated_at, remove it:
-    # payload.pop("updated_at", None)
-
     return UserResponse(**payload)
 
 
-@app.post(
-    "/v1/users/register",
-    response_model=RegisterResponse,
-    tags=["User Management"],
-    summary="Register a new user",
-)
-async def register_user(
-    payload: RegisterRequest,
+# --- COMMENTED OUT: Auth0 handles registration/login ---
+# These endpoints are no longer needed since Auth0 manages user
+# authentication. Users are synced to our DB via the
+# POST /v1/webhooks/auth0/sync-user webhook below.
+#
+# @app.post(
+#     "/v1/users/register",
+#     response_model=RegisterResponse,
+#     tags=["User Management"],
+#     summary="Register a new user",
+# )
+# async def register_user(payload: RegisterRequest, db=Depends(get_db)):
+#     ...  # See git history for original implementation
+#
+# @app.post(
+#     "/v1/auth/login",
+#     response_model=LoginResponse,
+#     tags=["User Management"],
+# )
+# async def login(payload: LoginRequest, db=Depends(get_db)):
+#     ...  # See git history for original implementation
+# --- END COMMENTED OUT ---
+
+
+# ========= Auth0 Webhook =========
+
+
+class Auth0SyncRequest(BaseModel):
+    """Request model for Auth0 post-login user sync."""
+
+    user_id: str  # Auth0 user ID suffix (e.g. "2wst54...")
+    email: str
+    name: Optional[str] = None
+    phone: Optional[str] = None
+
+
+@app.post("/v1/webhooks/auth0/sync-user", tags=["Auth0 Webhooks"])
+async def sync_auth0_user(
+    payload: Auth0SyncRequest,
+    request: Request,
     db=Depends(get_db),
 ):
     """
-    Register a new user account.
-    DB schema (saferoute.users):
-      - user_id UUID PK default gen_random_uuid()
-      - created_at timestamptz not null default now()
-      - updated_at timestamptz not null default now()
-      - last_login timestamptz null
-      - email unique
+    Webhook called by Auth0 Post-Login Action to upsert user data.
+
+    Auth0 calls this on every login (including first login after sign-up).
+    Creates the user if new, updates fields if existing.
+
+    Security: Validates shared secret via X-Auth0-Webhook-Secret header.
     """
-    now = datetime.utcnow()
-    token = f"atk_{uuid.uuid4().hex[:6]}"
+    # Verify webhook secret
+    secret = request.headers.get("X-Auth0-Webhook-Secret")
+    expected_secret = os.getenv("AUTH0_WEBHOOK_SECRET")
+    if not expected_secret or secret != expected_secret:
+        raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
-    # Check if email already exists (prevent duplicate registration)
-    result = await db.execute(select(User).where(User.email == payload.email))
-    existing = result.scalar_one_or_none()
-    if existing:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered",
-        )
-
-    user_id = uuid.uuid4()
-    # Create user row.
-    # Let DB generate: user_id, created_at, updated_at (per DB defaults)
-    user = User(
-        user_id=user_id,
-        email=payload.email,
-        password=payload.password,  # TODO: hash this
-        phone=payload.phone,
-        name=payload.name,
-        last_login=None,
-    )
-
-    db.add(user)
-
-    # Flush so DB defaults (user_id, created_at, updated_at) are available on `user`
-    await db.flush()
-
-    # Now we can safely use DB-generated UUID
-
-    audit = Audit(
-        log_id=uuid.uuid4(),
-        user_id=user_id,
-        event_type="authentication",
-        event_id=user_id,
-        message="Register",
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(audit)
-
-    try:
-        await db.commit()
-    except IntegrityError as e:
-        await db.rollback()
-        # Most common: unique violation on email
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Could not create user: {e}",
-        )
-
-    # Backward compatibility: in-memory store
-    # Use DB values for created_at/updated_at if your ORM model includes them;
-    # fall back to `now` otherwise.
-    created_at_val = getattr(user, "created_at", now)
-    users[user_id] = {
-        "user_id": user_id,
-        "email": user.email,
-        "phone": user.phone,
-        "name": user.name,
-        "password": user.password,
-        "created_at": created_at_val,
-        "last_login": None,
-    }
-
-    # Business metric: increment registrations counter (only once)
-    USER_REGISTRATION_TOTAL.inc()
-
-    return RegisterResponse(
-        user_id=user_id,
-        status="created",
-        auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-        email=user.email,
-        phone=user.phone,
-        name=user.name,
-        created_at=created_at_val,
-    )
-
-
-@app.post(
-    "/v1/auth/login",
-    response_model=LoginResponse,
-    tags=["User Management"],
-)
-async def login(
-    payload: LoginRequest,
-    db=Depends(get_db),
-):
-    """
-    Authenticate a user and return auth token.
-    DB schema (saferoute.users):
-      - last_login timestamptz NULL
-      - updated_at timestamptz NOT NULL default now()
-    """
-    now = datetime.utcnow()
-    token = f"atk_{uuid.uuid4().hex[:6]}"
-
-    # Query PostgreSQL database for user
-    result = await db.execute(select(User).where(User.email == payload.email))
+    # Upsert: create if new, update if exists
+    result = await db.execute(select(User).where(User.user_id == payload.user_id))
     user = result.scalar_one_or_none()
 
-    if not user or user.password != payload.password:
-        # Don't distinguish between "user not found" and "wrong password"
-        # to prevent user enumeration
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-        )
-
-    # Update timestamps
-    user.last_login = now
-    # If your User ORM includes updated_at (it should, per DB schema), update it too
-    if hasattr(user, "updated_at"):
+    now = datetime.utcnow()
+    if user:
+        user.email = payload.email
+        user.name = payload.name
+        user.last_login = now
         user.updated_at = now
+    else:
+        user = User(
+            user_id=payload.user_id,
+            email=payload.email,
+            name=payload.name,
+            phone=payload.phone,
+            last_login=now,
+        )
+        db.add(user)
 
+    # Audit log
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=user.user_id,
+        user_id=payload.user_id,
         event_type="authentication",
-        event_id=user.user_id,
-        message="Login",
+        message=f"Auth0 sync ({'update' if user else 'create'})",
         created_at=now,
         updated_at=now,
     )
@@ -524,27 +553,13 @@ async def login(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Could not login",
+            detail="Could not sync user",
         )
 
-    # Update in-memory cache (optional, can be removed later)
-    users[user.user_id] = {
-        "user_id": user.user_id,
-        "email": user.email,
-        "phone": user.phone,
-        "name": user.name,
-        "password": user.password,
-        "created_at": user.created_at,
-        "last_login": now,
-    }
+    # Business metric
+    USER_REGISTRATION_TOTAL.inc()
 
-    return LoginResponse(
-        user_id=user.user_id,
-        status="authenticated",
-        auth=AuthInfo(token=token, expires_in=AUTH_TOKEN_TTL),
-        email=user.email,
-        last_login=now,
-    )
+    return {"status": "synced", "user_id": payload.user_id}
 
 
 @app.get(
@@ -560,20 +575,10 @@ async def get_preferences(
     Get user preferences from PostgreSQL (saferoute.user_preferences).
 
     Raises:
-      - 400 if user_id invalid
       - 404 if user not found or preferences not set
     """
-    # ---- (0) Parse user_id from path ----
-    try:
-        user_uuid = uuid.UUID(user_id)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid user_id format",
-        )
-
-    # ---- (1) Ensure user exists (recommended) ----
-    result = await db.execute(select(User).where(User.user_id == user_uuid))
+    # ---- (1) Ensure user exists ----
+    result = await db.execute(select(User).where(User.user_id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(
@@ -582,7 +587,7 @@ async def get_preferences(
         )
 
     # ---- (2) Fetch preferences ----
-    result = await db.execute(select(UserPreferences).where(UserPreferences.user_id == user_uuid))
+    result = await db.execute(select(UserPreferences).where(UserPreferences.user_id == user_id))
     pref = result.scalar_one_or_none()
 
     if not pref:
@@ -592,10 +597,9 @@ async def get_preferences(
         )
 
     return PreferencesResponse(
-        user_id=user_uuid,
+        user_id=user_id,
         status="preferences_loaded",
         preferences=PreferencesRequest(
-            user_id=user_uuid,
             voice_guidance=pref.voice_guidance,
             units=pref.units,
         ),
@@ -618,24 +622,15 @@ async def save_preferences(
     Save user preferences into PostgreSQL (saferoute.user_preferences).
 
     DB schema:
-      - user_id uuid PK/FK
+      - user_id varchar(255) PK/FK
       - voice_guidance boolean not null default true
       - units varchar(20) not null default 'metric' (metric|imperial)
       - created_at/updated_at timestamptz not null default now()
     """
     now = datetime.utcnow()
 
-    # ---- (0) Parse user_id from path ----
-    try:
-        user_uuid = uuid.UUID(user_id)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid user_id format",
-        )
-
-    # Optional but recommended: ensure user exists
-    result = await db.execute(select(User).where(User.user_id == user_uuid))
+    # Ensure user exists
+    result = await db.execute(select(User).where(User.user_id == user_id))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(
@@ -644,7 +639,7 @@ async def save_preferences(
         )
 
     # ---- (1) Upsert into user_preferences ----
-    result = await db.execute(select(UserPreferences).where(UserPreferences.user_id == user_uuid))
+    result = await db.execute(select(UserPreferences).where(UserPreferences.user_id == user_id))
     pref = result.scalar_one_or_none()
 
     if pref:
@@ -653,11 +648,9 @@ async def save_preferences(
         pref.updated_at = now
     else:
         pref = UserPreferences(
-            user_id=user_uuid,
+            user_id=user_id,
             voice_guidance=payload.voice_guidance,
             units=payload.units,
-            # created_at has DB default now(); can omit, but ok to set explicitly if you want:
-            # created_at=now,
             updated_at=now,
         )
         db.add(pref)
@@ -666,9 +659,8 @@ async def save_preferences(
     # ---- (2) Audit ----
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=user_uuid,
+        user_id=user_id,
         event_type="authentication",
-        event_id=user_uuid,
         message="save_preference",
         created_at=now,
         updated_at=now,
@@ -686,10 +678,9 @@ async def save_preferences(
         )
 
     return PreferencesResponse(
-        user_id=user_uuid,
+        user_id=user_id,
         status="preferences_saved",
         preferences=PreferencesRequest(
-            user_id=user_uuid,
             voice_guidance=pref.voice_guidance,
             units=pref.units,
         ),
@@ -701,49 +692,48 @@ async def save_preferences(
     "/v1/users/{user_id}/trusted-contacts",
     response_model=TrustedContactsListResponse,
     tags=["User Management"],
+    summary="List trusted contacts (paginated, filterable)",
 )
 async def list_trusted_contacts(
     user_id: str,
+    page: int = Query(1, ge=1, description="Page number (1-based)"),
+    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
+    is_primary: Optional[bool] = Query(None, description="Filter by primary contact (true/false)"),
+    search: Optional[str] = Query(None, description="Filter by name (case-insensitive contains)"),
     db=Depends(get_db),
 ):
     """
-    List all trusted contacts for a user from PostgreSQL (saferoute.contacts).
+    List trusted contacts for a user from PostgreSQL (saferoute.contacts).
+    Supports pagination and optional filters (is_primary, name search).
     """
 
-    # ---- (1) Validate UUID ----
-    try:
-        user_uuid = uuid.UUID(user_id)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid user_id format",
-        )
-
-    # ---- (2) Ensure user exists ----
-    user = await db.scalar(select(User).where(User.user_id == user_uuid))
+    # ---- (1) Ensure user exists ----
+    user = await db.scalar(select(User).where(User.user_id == user_id))
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
 
-    # ---- (3) Query contacts ----
+    # ---- (2) Query contacts ----
+    offset = (page - 1) * page_size
     stmt = (
         select(TrustedContact)
-        .where(TrustedContact.user_id == user_uuid)
+        .where(TrustedContact.user_id == user_id)
         .order_by(
             desc(TrustedContact.is_primary),
             TrustedContact.created_at.asc(),
         )
+        .offset(offset)
+        .limit(page_size)
     )
-
     contacts = (await db.scalars(stmt)).all()
 
-    # ---- (4) ORM → DTO (不要直接回 ORM!) ----
+    # ---- (3) ORM → DTO ----
     items = [TrustedContactDTO.model_validate(c) for c in contacts]
 
     return TrustedContactsListResponse(
-        user_id=user_uuid,
+        user_id=user_id,
         contacts=items,
     )
 
@@ -782,32 +772,23 @@ async def upsert_trusted_contact(
     """
     now = datetime.utcnow()
 
-    # ---- (1) Validate user_id ----
-    try:
-        user_uuid = uuid.UUID(user_id)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid user_id format",
-        )
-
-    # ---- (2) Ensure user exists ----
-    user = await db.scalar(select(User).where(User.user_id == user_uuid))
+    # ---- (1) Ensure user exists ----
+    user = await db.scalar(select(User).where(User.user_id == user_id))
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
 
-    # ---- (3) Try find existing contact (by phone) ----
+    # ---- (2) Try find existing contact (by phone) ----
     contact = await db.scalar(
         select(TrustedContact).where(
-            TrustedContact.user_id == user_uuid,
+            TrustedContact.user_id == user_id,
             TrustedContact.phone == body.phone,
         )
     )
 
-    # ---- (4) Update if exists ----
+    # ---- (3) Update if exists ----
     if contact:
         contact.name = body.name
         contact.relation = body.relationship
@@ -815,11 +796,11 @@ async def upsert_trusted_contact(
             contact.is_primary = body.is_primary
         contact.updated_at = now
 
-    # ---- (5) Otherwise create new contact ----
+    # ---- (4) Otherwise create new contact ----
     else:
         contact = TrustedContact(
-            contact_id=uuid.uuid4(),  # ← 明確產生新 UUID
-            user_id=user_uuid,
+            contact_id=uuid.uuid4(),
+            user_id=user_id,
             name=body.name,
             phone=body.phone,
             relation=body.relationship,
@@ -830,19 +811,18 @@ async def upsert_trusted_contact(
         db.add(contact)
         await db.flush()
 
-    # ---- (6) Audit ----
+    # ---- (5) Audit ----
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=user_uuid,
+        user_id=user_id,
         event_type="authentication",
-        event_id=user_uuid,
         message="upsert trusted contact",
         created_at=now,
         updated_at=now,
     )
     db.add(audit)
 
-    # ---- (7) Commit ----
+    # ---- (6) Commit ----
     try:
         await db.commit()
     except IntegrityError:
@@ -852,9 +832,9 @@ async def upsert_trusted_contact(
             detail="Could not upsert trusted contact",
         )
 
-    # ---- (8) Response ----
+    # ---- (7) Response ----
     return TrustedContactUpsertResponse(
-        user_id=user_uuid,
+        user_id=user_id,
         status="contact_upserted",
         contact=TrustedContactDTO.model_validate(contact),
         updated_at=now,
@@ -862,13 +842,19 @@ async def upsert_trusted_contact(
 
 
 @app.get(
+    "/v1/audit",
+    response_model=AuditListResponse,
+    tags=["Audit"],
+    summary="List audit logs (paginated)",
+)
+@app.get(
     "/v1/users/audit",
     response_model=AuditListResponse,
     tags=["Audit"],
     summary="List audit logs (paginated)",
 )
 async def list_audit_logs(
-    user_id: Optional[uuid.UUID] = Query(None),
+    user_id: Optional[str] = Query(None),
     event_type: Optional[str] = Query(None),
     start: Optional[datetime] = Query(None, description="Filter created_at >= start"),
     end: Optional[datetime] = Query(None, description="Filter created_at <= end"),
@@ -876,33 +862,40 @@ async def list_audit_logs(
     page_size: int = Query(20, ge=1, le=200),
     db=Depends(get_db),
 ):
-    # 1) build filters
-    filters = []
+    # 1) Filters for response (convention: empty string when not set)
+    filters_resp = {
+        "user_id": str(user_id) if user_id is not None else "",
+        "event_type": event_type if (event_type and event_type.strip()) else "",
+        "start": start.isoformat() if start is not None else "",
+        "end": end.isoformat() if end is not None else "",
+    }
+    # 2) SQL predicates
+    predicates = []
     if user_id is not None:
-        filters.append(Audit.user_id == user_id)
+        predicates.append(Audit.user_id == user_id)
     if event_type is not None and event_type != "":
-        filters.append(Audit.event_type == event_type)
+        predicates.append(Audit.event_type == event_type)
     if start is not None:
-        filters.append(Audit.created_at >= start)
+        predicates.append(Audit.created_at >= start)
     if end is not None:
-        filters.append(Audit.created_at <= end)
+        predicates.append(Audit.created_at <= end)
 
-    # 2) total count
+    # 3) total count
     count_stmt = select(func.count()).select_from(Audit)
-    if filters:
-        count_stmt = count_stmt.where(*filters)
+    if predicates:
+        count_stmt = count_stmt.where(*predicates)
     total = (await db.execute(count_stmt)).scalar_one()
 
-    # 3) page query
+    # 4) page query
     offset = (page - 1) * page_size
     stmt = select(Audit).order_by(Audit.created_at.desc()).offset(offset).limit(page_size)
-    if filters:
-        stmt = stmt.where(*filters)
+    if predicates:
+        stmt = stmt.where(*predicates)
 
     result = await db.execute(stmt)
     rows = result.scalars().all()
 
-    # 4) map to response
+    # 5) map to response
     data = [
         AuditLogResponse(
             log_id=r.log_id,
@@ -916,7 +909,16 @@ async def list_audit_logs(
         for r in rows
     ]
 
-    return AuditListResponse(data=data, total=total, page=page, page_size=page_size)
+    return AuditListResponse(
+        data=data,
+        filters=filters_resp,
+        pagination=PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        ),
+    )
 
 
 @app.get("/auth0/callback", tags=["Auth"])

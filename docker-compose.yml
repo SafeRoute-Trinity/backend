@@ -92,6 +92,16 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      # Database configuration (optional - uncomment if needed)
+      # Option 1: Use full DATABASE_URL (recommended for production)
+      # - DATABASE_URL=postgresql://saferoute:password@postgres:5432/saferoute?sslmode=disable
+      # Option 2: Use individual variables + SSL mode
+      # - POSTGRES_HOST=postgres
+      # - POSTGRES_PORT=5432
+      # - POSTGRES_USER=saferoute
+      # - POSTGRES_PASSWORD=password
+      # - POSTGRES_DATABASE=saferoute
+      # - DATABASE_SSLMODE=disable
     restart: unless-stopped
 
   sos-service:

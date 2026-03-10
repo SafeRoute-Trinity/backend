@@ -36,7 +36,7 @@ async def write_audit(
     db: AsyncSession,
     event_type: str,
     message: str,
-    user_id: Optional[uuid.UUID] = None,
+    user_id: Optional[str] = None,
     event_id: Optional[uuid.UUID] = None,
     commit: bool = False,
 ) -> Optional[uuid.UUID]:

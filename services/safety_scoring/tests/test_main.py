@@ -1,60 +1,16 @@
-###pytest services/safety_scoring/tests/test_main.py -q
-
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
 from services.safety_scoring import main
-from services.safety_scoring.main import app, get_safety_scoring_db
+from services.safety_scoring.main import (
+    app,
+    get_db,
+    get_postgis_db,
+    get_safety_scoring_db,
+)
 
 client = TestClient(app)
-
-
-def test_score_route():
-    req = {
-        "route_geometry": "encoded_polyline_demo",
-        "segments": [
-            {
-                "start_lat": 53.34,
-                "start_lon": -6.26,
-                "end_lat": 53.341,
-                "end_lon": -6.261,
-            },
-            {
-                "start_lat": 53.341,
-                "start_lon": -6.261,
-                "end_lat": 53.342,
-                "end_lon": -6.262,
-            },
-        ],
-        "time_of_day": "2025-11-07T10:00:00Z",
-        "weather_conditions": "clear",
-    }
-    r = client.post("/v1/safety/score-route", json=req)
-    assert r.status_code == 200
-    d = r.json()
-    assert "overall_score" in d
-    assert len(d["segments"]) == 2
-
-
-def test_safety_factors_and_weights():
-    r = client.post("/v1/safety/factors", json={"lat": 53.34, "lon": -6.26, "radius_m": 50})
-    assert r.status_code == 200
-    assert "composite_score" in r.json()
-
-    w_req = {
-        "user_id": "usr_demo",
-        "weights": {
-            "cctv_coverage": 0.2,
-            "street_lighting": 0.2,
-            "business_activity": 0.2,
-            "crime_rate": 0.2,
-            "pedestrian_traffic": 0.2,
-        },
-    }
-    r2 = client.put("/v1/safety/weights", json=w_req)
-    assert r2.status_code == 200
-    assert r2.json()["status"] == "updated"
 
 
 class _FakeResult:
@@ -101,8 +57,20 @@ async def _override_route_db():
     yield _FakeRouteSession()
 
 
-def test_api_route_dijkstra_success():
+def _install_route_override():
     app.dependency_overrides[get_safety_scoring_db] = _override_route_db
+    app.dependency_overrides[get_db] = _override_route_db
+    app.dependency_overrides[get_postgis_db] = _override_route_db
+
+
+def _clear_overrides():
+    app.dependency_overrides.pop(get_safety_scoring_db, None)
+    app.dependency_overrides.pop(get_db, None)
+    app.dependency_overrides.pop(get_postgis_db, None)
+
+
+def test_api_route_dijkstra_success():
+    _install_route_override()
     try:
         req = {"start": {"lat": 53.34, "lng": -6.26}, "end": {"lat": 53.35, "lng": -6.25}}
         r = client.post("/api/route?algorithm=dijkstra", json=req)
@@ -112,7 +80,7 @@ def test_api_route_dijkstra_success():
         assert len(d["features"]) >= 1
         assert d["properties"]["summary"]["distance_meters"] > 0
     finally:
-        app.dependency_overrides.pop(get_safety_scoring_db, None)
+        _clear_overrides()
 
 
 def test_api_route_ch_success(monkeypatch):
