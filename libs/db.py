@@ -188,16 +188,16 @@ class DatabaseFactory:
             )
 
         # Otherwise, use individual environment variables
-        # Check for SSL mode: DATABASE_SSLMODE or POSTGRES_SSLMODE
-        sslmode = os.getenv("DATABASE_SSLMODE") or os.getenv("POSTGRES_SSLMODE")
+        # Check for SSL mode: POSTGRES_SSLMODE
+        sslmode = os.getenv("POSTGRES_SSLMODE")
 
         return DatabaseConfig(
             db_type=DatabaseType.POSTGRES,
-            host=os.getenv("DATABASE_HOST") or os.getenv("POSTGRES_HOST", "127.0.0.1"),
-            port=int(os.getenv("DATABASE_PORT") or os.getenv("POSTGRES_PORT", "5432")),
-            user=os.getenv("DATABASE_USER") or os.getenv("POSTGRES_USER", "saferoute"),
-            password=os.getenv("DATABASE_PASSWORD") or os.getenv("POSTGRES_PASSWORD", ""),
-            database=os.getenv("DATABASE_NAME") or os.getenv("POSTGRES_DATABASE", "saferoute"),
+            host=os.getenv("POSTGRES_HOST", "127.0.0.1"),
+            port=int(os.getenv("POSTGRES_PORT", "5432")),
+            user=os.getenv("POSTGRES_USER", "saferoute"),
+            password=os.getenv("POSTGRES_PASSWORD", ""),
+            database=os.getenv("POSTGRES_DATABASE", "saferoute"),
             echo=os.getenv("POSTGRES_ECHO", "false").lower() == "true",
             sslmode=sslmode,
         )
@@ -229,8 +229,8 @@ class DatabaseFactory:
             )
 
         # Otherwise, use individual environment variables
-        # Check for SSL mode: DATABASE_SSLMODE or POSTGIS_SSLMODE
-        sslmode = os.getenv("DATABASE_SSLMODE") or os.getenv("POSTGIS_SSLMODE")
+        # Check for SSL mode: POSTGIS_SSLMODE
+        sslmode = os.getenv("POSTGIS_SSLMODE")
 
         return DatabaseConfig(
             db_type=DatabaseType.POSTGIS,

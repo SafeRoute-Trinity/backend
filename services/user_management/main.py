@@ -25,7 +25,7 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from models.audit import Audit
@@ -41,7 +41,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-from models.user_models import TrustedContact, User, UserPreferences
+from models.user_models import Contact, TrustedContact, User, UserPreferences
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -182,6 +182,56 @@ class AuditLogResponse(BaseModel):
     event_id: Optional[uuid.UUID] = None
     message: str
     created_at: datetime
+    updated_at: datetime
+
+
+# ======== Contact Models ===========================
+class ContactItem(BaseModel):
+    name: str
+    phone: str
+    relationship: Optional[str] = None
+    is_primary: Optional[bool] = False
+
+
+class ContactsSetRequest(BaseModel):
+    contacts: List[ContactItem]
+
+
+class ContactDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    contact_id: uuid.UUID
+    user_id: str
+    name: str
+    phone: str
+    relationship: Optional[str] = None
+    is_primary: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ContactsSetResponse(BaseModel):
+    user_id: str
+    status: Literal["contacts_set"]
+    contacts: List[ContactDTO]
+    updated_at: datetime
+
+
+class TrustedContactDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    contact_id: uuid.UUID
+    user_id: str
+    name: str
+    phone: str
+    relationship: Optional[str] = None
+    is_primary: Optional[bool] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TrustedContactsSetResponse(BaseModel):
+    user_id: str
+    status: Literal["trusted_contacts_set"]
+    contacts: List[TrustedContactDTO]
     updated_at: datetime
 
 
@@ -327,6 +377,14 @@ class TrustedContactUpsertResponse(BaseModel):
 class TrustedContactsListResponse(BaseModel):
     user_id: str
     contacts: List[TrustedContactDTO]
+
+
+class TrustedContactsListPaginatedResponse(BaseModel):
+    """Paginated list of trusted contacts for a user."""
+
+    user_id: str
+    data: List[TrustedContactDTO]
+    pagination: PaginationMeta
 
 
 # ========= User Management Endpoints =========
@@ -690,51 +748,157 @@ async def save_preferences(
 
 @app.get(
     "/v1/users/{user_id}/trusted-contacts",
-    response_model=TrustedContactsListResponse,
+    response_model=TrustedContactsListPaginatedResponse,
     tags=["User Management"],
-    summary="List trusted contacts (paginated, filterable)",
+    summary="List trusted contacts (paginated)",
 )
 async def list_trusted_contacts(
     user_id: str,
     page: int = Query(1, ge=1, description="Page number (1-based)"),
-    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
-    is_primary: Optional[bool] = Query(None, description="Filter by primary contact (true/false)"),
-    search: Optional[str] = Query(None, description="Filter by name (case-insensitive contains)"),
+    page_size: int = Query(20, ge=1, le=200, description="Items per page"),
     db=Depends(get_db),
 ):
     """
-    List trusted contacts for a user from PostgreSQL (saferoute.contacts).
-    Supports pagination and optional filters (is_primary, name search).
+    List trusted contacts for a user with pagination.
+    Use GET when you need to read the current list (e.g. for display or before editing).
     """
-
-    # ---- (1) Ensure user exists ----
+    # Ensure user exists
     user = await db.scalar(select(User).where(User.user_id == user_id))
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-
-    # ---- (2) Query contacts ----
+    # Total count
+    count_stmt = (
+        select(func.count()).select_from(TrustedContact).where(TrustedContact.user_id == user_id)
+    )
+    total = (await db.execute(count_stmt)).scalar_one()
+    # Paginated query (primary first, then by created_at)
     offset = (page - 1) * page_size
     stmt = (
         select(TrustedContact)
         .where(TrustedContact.user_id == user_id)
         .order_by(
-            desc(TrustedContact.is_primary),
+            TrustedContact.is_primary.desc().nulls_last(),
             TrustedContact.created_at.asc(),
         )
         .offset(offset)
         .limit(page_size)
     )
-    contacts = (await db.scalars(stmt)).all()
-
-    # ---- (3) ORM → DTO ----
-    items = [TrustedContactDTO.model_validate(c) for c in contacts]
-
-    return TrustedContactsListResponse(
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return TrustedContactsListPaginatedResponse(
         user_id=user_id,
-        contacts=items,
+        data=[TrustedContactDTO.model_validate(r) for r in rows],
+        pagination=PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        ),
+    )
+
+
+@app.put(
+    "/v1/users/{user_id}/trusted-contacts",
+    response_model=TrustedContactsSetResponse,
+    tags=["User Management"],
+)
+async def set_trusted_contacts(
+    user_id: str,
+    body: ContactsSetRequest,
+    db=Depends(get_db),
+):
+    """
+    Replace the entire trusted contacts list for the user.
+    Deletes all existing trusted contacts and inserts the given list.
+    Use when the client has the full list (e.g. after editing all contacts at once).
+    For adding or updating a single contact, use POST instead.
+    """
+    now = datetime.utcnow()
+
+    if sum(1 for c in body.contacts if c.is_primary) > 1:
+        raise HTTPException(status_code=400, detail="Only one trusted contact can be primary")
+
+    # 1) delete old
+    await db.execute(delete(TrustedContact).where(TrustedContact.user_id == user_id))
+
+    # 2) insert new
+    rows = [
+        TrustedContact(
+            contact_id=uuid.uuid4(),  #
+            user_id=user_id,
+            name=c.name,
+            phone=c.phone,
+            relationship=c.relationship,
+            is_primary=c.is_primary,  #
+            created_at=now,  #
+            updated_at=now,  #
+        )
+        for c in body.contacts
+    ]
+    db.add_all(rows)
+    await db.flush()
+
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"Could not set trusted contacts: {e}")
+
+    return TrustedContactsSetResponse(
+        user_id=user_id,
+        status="trusted_contacts_set",
+        contacts=[TrustedContactDTO.model_validate(r) for r in rows],
+        updated_at=now,
+    )
+
+
+@app.put(
+    "/v1/users/{user_id}/contacts",
+    response_model=ContactsSetResponse,
+    tags=["User Management"],
+)
+async def set_contacts(
+    user_id: str,
+    body: ContactsSetRequest,
+    db=Depends(get_db),
+):
+    now = datetime.utcnow()
+
+    # 可选：最多一个 primary
+    if sum(1 for c in body.contacts if c.is_primary) > 1:
+        raise HTTPException(status_code=400, detail="Only one contact can be primary")
+
+    # 1) delete old
+    await db.execute(delete(Contact).where(Contact.user_id == user_id))
+
+    # 2) insert new (contacts 表：contact_id/created_at/updated_at 都有默认，可不手动填)
+    rows = [
+        Contact(
+            user_id=user_id,
+            name=c.name,
+            phone=c.phone,
+            relationship=c.relationship,
+            is_primary=bool(c.is_primary),
+        )
+        for c in body.contacts
+    ]
+    db.add_all(rows)
+    await db.flush()
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Could not set contacts")
+
+    return ContactsSetResponse(
+        user_id=user_id,
+        status="contacts_set",
+        contacts=[ContactDTO.model_validate(r) for r in rows],
+        updated_at=now,
     )
 
 
@@ -767,8 +931,10 @@ async def upsert_trusted_contact(
     db=Depends(get_db),
 ):
     """
-    If a contact with same (user_id + phone) exists -> update.
-    Otherwise -> create new contact with new UUID.
+    Add or update a single trusted contact (upsert by phone).
+    If a contact with the same (user_id + phone) exists -> update it.
+    Otherwise -> create a new contact.
+    Use for adding one contact or editing one by phone; use PUT to replace the whole list.
     """
     now = datetime.utcnow()
 
