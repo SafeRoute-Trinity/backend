@@ -197,7 +197,7 @@ class FeedbackLocation(BaseModel):
 
 class FeedbackSubmitRequest(BaseModel):
     user_id: str
-    route_id: Optional[str] = None
+    route_id: Optional[uuid.UUID] = None
     type: Optional[FeedbackType] = None
     severity: Optional[SeverityType] = None
     location: Optional[dict] = None
