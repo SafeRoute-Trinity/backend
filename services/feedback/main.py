@@ -22,8 +22,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel, EmailStr, Field
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, EmailStr, Field, validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 

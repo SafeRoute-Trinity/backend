@@ -91,7 +91,7 @@ class Point(BaseModel):
 
 
 class EmergencyCallRequest(BaseModel):
-    user_id: uuid.UUID
+    user_id: str
     route_id: Optional[uuid.UUID]
     lat: float
     lon: float
@@ -119,7 +119,7 @@ class SOSContact(BaseModel):
 
 class EmergencySMSRequest(BaseModel):
     sos_id: str  # SOS/emergency identifier (UUID string) for status correlation
-    user_id: uuid.UUID
+    user_id: str
     location: Optional[Location] = None
     emergency_contact: SOSContact
     message_template: Optional[str] = None
