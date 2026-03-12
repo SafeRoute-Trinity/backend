@@ -37,7 +37,7 @@ class Feedback(Base):
         index=True,
     )
 
-    route_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    route_id: Mapped[Optional[uuid.UUID]] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
 
     lat: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     lon: Mapped[Optional[float]] = mapped_column(Float, nullable=True)

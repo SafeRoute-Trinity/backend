@@ -637,7 +637,6 @@ async def get_route(
             ORDER BY d.seq;
         """
         )
-
         expanded = max(0.001, ROUTE_SUBGRAPH_EXPAND_DEGREES)
         max_expand = max(expanded, ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES)
         expansions: List[float] = []

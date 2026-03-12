@@ -436,7 +436,10 @@ async def calc(body: RouteCalculateRequest, db=Depends(get_db), postgisDB=Depend
 
 @app.post("/v1/routes/{route_id}/recalculate", response_model=RouteCalculateResponse)
 async def recalc(
-    route_id: str, body: RecalculateRequest, db=Depends(get_db), postgisDB=Depends(get_postgis_db)
+    route_id: uuid.UUID,
+    body: RecalculateRequest,
+    db=Depends(get_db),
+    postgisDB=Depends(get_postgis_db),
 ):
     # TODO: should use actual route_id (uuid) and test AUDIT again
 

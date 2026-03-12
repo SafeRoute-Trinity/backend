@@ -197,7 +197,7 @@ class FeedbackLocation(BaseModel):
 
 class FeedbackSubmitRequest(BaseModel):
     user_id: str
-    route_id: Optional[str] = None
+    route_id: Optional[uuid.UUID] = None
     type: Optional[FeedbackType] = None
     severity: Optional[SeverityType] = None
     location: Optional[dict] = None
@@ -345,11 +345,6 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         "updated_at": now,
         "user_id": user_id_str,
     }
-    # Validate feedback_id is UUID (user_id is now a plain string from Auth0)
-    parsed_feedback_id = _maybe_uuid(getattr(body, "feedback_id", None))
-    if parsed_feedback_id is None:
-        raise HTTPException(status_code=400, detail="feedback_id must be a valid UUID")
-
     # Add optional fields if provided
     if body.route_id is not None:
         FEEDBACK[str(feedback_id)]["route_id"] = body.route_id
