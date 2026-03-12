@@ -133,6 +133,7 @@ class Contact(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     phone: Mapped[str] = mapped_column(String(20), nullable=False)
 
+    # DB column is "relationship" varchar(50) nullable
     relationship: Mapped[Optional[str]] = mapped_column(
         "relationship",
         String(50),

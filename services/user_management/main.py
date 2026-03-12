@@ -346,6 +346,8 @@ class PreferencesResponse(BaseModel):
 class TrustedContactUpsertRequest(BaseModel):
     """Request model for creating/updating trusted contacts."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     phone: str
     relationship: Optional[str] = None
@@ -361,7 +363,7 @@ class TrustedContactDTO(BaseModel):
     user_id: str
     name: str
     phone: str
-    relationship: Optional[str] = Field(default=None, alias="relation")
+    relationship: Optional[str] = None
     is_primary: bool
     created_at: datetime
     updated_at: datetime
@@ -1082,7 +1084,7 @@ async def upsert_trusted_contact(
     # ---- (3) Update if exists ----
     if contact:
         contact.name = body.name
-        contact.relation = body.relationship
+        contact.relationship = body.relationship
         if body.is_primary is not None:
             contact.is_primary = body.is_primary
         contact.updated_at = now
@@ -1094,7 +1096,7 @@ async def upsert_trusted_contact(
             user_id=user_id,
             name=body.name,
             phone=body.phone,
-            relation=body.relationship,
+            relationship=body.relationship,
             is_primary=body.is_primary if body.is_primary is not None else False,
             created_at=now,
             updated_at=now,
