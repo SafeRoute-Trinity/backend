@@ -1,6 +1,5 @@
 # pytest services/sos/tests/test_sos.py -v
 
-import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -8,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import services.sos.main as sos_main
+from services.notification import factory as notif_factory
 from services.sos.main import app, get_db
 
 
@@ -102,6 +102,9 @@ class DummyAsyncClientCallOK:
             },
             status_code=200,
         )
+
+
+_AsyncClientProxy = DummyAsyncClientCallOK
 
 
 # ----------------------------

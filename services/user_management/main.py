@@ -9,7 +9,6 @@ Provides endpoints for user registration, authentication, preferences,
 and trusted contact management.
 """
 
-import httpx
 import os
 import sys
 import time
@@ -17,6 +16,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
+import httpx
 from fastapi import Depends, HTTPException, Query, Request, Response, status
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
