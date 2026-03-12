@@ -36,11 +36,31 @@ if backend_env_path.exists():
 
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import ServiceAppConfig
+from libs.rate_limiter import RateLimiter, default_rate_limit_config
 
 # Initialize database factory
 initialize_databases([DatabaseType.POSTGIS])
 
 app = FastAPI()
+
+_rate_limiter = RateLimiter(default_rate_limit_config(), "safety_scoring")
+
+
+@app.middleware("http")
+async def _rate_limit_middleware(request: Request, call_next):
+    rejection = await _rate_limiter.check(request)
+    if rejection is not None:
+        return rejection
+    response = await call_next(request)
+    for k, v in getattr(request.state, "rate_limit_headers", {}).items():
+        response.headers[k] = v
+    return response
+
+
+@app.on_event("shutdown")
+async def _close_rate_limiter():
+    await _rate_limiter.close()
+
 
 # Get database session dependency
 db_factory = get_database_factory()

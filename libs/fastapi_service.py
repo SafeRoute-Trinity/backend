@@ -16,6 +16,8 @@ from prometheus_client import (
     generate_latest,
 )
 
+from libs.rate_limiter import RateLimitConfig, RateLimiter, default_rate_limit_config
+
 
 class ServiceMetrics:
     """Encapsulates Prometheus metrics for a service."""
@@ -88,6 +90,7 @@ class ServiceAppConfig:
         version: str = "1.0.0",
         cors_config: Optional[CORSMiddlewareConfig] = None,
         enable_metrics: bool = True,
+        rate_limit_config: Optional[RateLimitConfig] = None,
     ):
         self.title = title
         self.description = description
@@ -95,6 +98,10 @@ class ServiceAppConfig:
         self.version = version
         self.cors_config = cors_config or CORSMiddlewareConfig()
         self.enable_metrics = enable_metrics
+        # None → use sensible security defaults (auth endpoints are stricter).
+        self.rate_limit_config: RateLimitConfig = (
+            rate_limit_config if rate_limit_config is not None else default_rate_limit_config()
+        )
 
 
 class FastAPIServiceFactory:
@@ -114,6 +121,7 @@ class FastAPIServiceFactory:
         """
         self.config = config
         self.metrics = ServiceMetrics(config.service_name) if config.enable_metrics else None
+        self.rate_limiter = RateLimiter(config.rate_limit_config, config.service_name)
 
     def create_app(self) -> FastAPI:
         """
@@ -141,16 +149,56 @@ class FastAPIServiceFactory:
         # Add health check endpoint (always enabled)
         self._add_health_endpoint(app)
 
+        # Add rate limiting middleware.  Must be registered BEFORE the
+        # Prometheus middleware so that Prometheus (added after = outer) wraps
+        # the rate limiter and therefore records accurate 429 status codes.
+        self._add_rate_limit_middleware(app)
+
         # Add Prometheus metrics middleware if enabled
         if self.config.enable_metrics and self.metrics:
             self._add_metrics_middleware(app)
             self._add_metrics_endpoint(app)
+
+        # Release the Redis connection pool on application shutdown.
+        rate_limiter = self.rate_limiter
+
+        @app.on_event("shutdown")
+        async def _close_rate_limiter() -> None:
+            await rate_limiter.close()
 
         # Store metrics in app state for access in routes
         app.state.metrics = self.metrics
         app.state.service_name = self.config.service_name
 
         return app
+
+    def _add_rate_limit_middleware(self, app: FastAPI):
+        """Add Redis-backed rate limiting middleware to the app.
+
+        The middleware runs *before* the business handler.  When a request
+        exceeds the configured threshold it is rejected immediately with
+        HTTP 429 and ``Retry-After`` / ``X-RateLimit-*`` headers.
+
+        Exempt paths (``/health``, ``/metrics``, docs, CORS preflights) are
+        always passed through without counting against any quota.
+        """
+        limiter = self.rate_limiter  # Capture for closure
+
+        @app.middleware("http")
+        async def rate_limit_middleware(request: Request, call_next):
+            """Enforce rate limits; attach X-RateLimit-* headers to responses."""
+            rejection = await limiter.check(request)
+            if rejection is not None:
+                return rejection
+
+            response = await call_next(request)
+
+            for header_name, header_value in getattr(
+                request.state, "rate_limit_headers", {}
+            ).items():
+                response.headers[header_name] = header_value
+
+            return response
 
     def _add_metrics_middleware(self, app: FastAPI):
         """Add Prometheus metrics middleware to the app."""
