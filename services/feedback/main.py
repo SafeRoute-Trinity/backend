@@ -19,7 +19,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -203,6 +203,12 @@ class FeedbackSubmitRequest(BaseModel):
     location: Optional[dict] = None
     description: Optional[str] = None
     attachments: Optional[list] = None
+
+    @validator("route_id", pre=True)
+    def empty_str_to_none(cls, v):
+        if v == "":
+            return None
+        return v
 
 
 class FeedbackSubmitResponse(BaseModel):
