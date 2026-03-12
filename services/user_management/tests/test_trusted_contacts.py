@@ -123,7 +123,7 @@ def make_contact(
     user_id: str,
     name: str,
     phone: str,
-    relation: str,
+    relationship: str,
     is_primary: bool = False,
     created_at=None,
     updated_at=None,
@@ -133,7 +133,7 @@ def make_contact(
         user_id=user_id,
         name=name,
         phone=phone,
-        relation=relation,
+        relationship=relationship,
         is_primary=is_primary,
         created_at=created_at or datetime.now(timezone.utc),
         updated_at=updated_at or datetime.now(timezone.utc),
@@ -150,7 +150,7 @@ def test_list_trusted_contacts_success(client):
         user_id=uid,
         name="Alice",
         phone="+353111111111",
-        relation="friend",
+        relationship="friend",
         is_primary=True,
     )
     c2 = make_contact(
@@ -158,7 +158,7 @@ def test_list_trusted_contacts_success(client):
         user_id=uid,
         name="Bob",
         phone="+353222222222",
-        relation="family",
+        relationship="family",
         is_primary=False,
     )
 
@@ -228,7 +228,7 @@ def test_upsert_trusted_contact_create_success(client):
     assert data["user_id"] == uid
     assert data["contact"]["phone"] == "+353111111111"
     assert data["contact"]["name"] == "Alice"
-    assert data["contact"]["relation"] == "friend"
+    assert data["contact"]["relationship"] == "friend"
     assert data["contact"]["is_primary"] is True
     assert "updated_at" in data
 
@@ -246,7 +246,7 @@ def test_upsert_trusted_contact_update_success(client):
         user_id=uid,
         name="OldName",
         phone="+353111111111",
-        relation="friend",
+        relationship="friend",
         is_primary=False,
     )
 
@@ -269,7 +269,7 @@ def test_upsert_trusted_contact_update_success(client):
 
     assert data["status"] == "contact_upserted"
     assert data["contact"]["name"] == "NewName"
-    assert data["contact"]["relation"] == "family"
+    assert data["contact"]["relationship"] == "family"
     assert data["contact"]["is_primary"] is True
 
     # update path: no db.add(contact), no flush, add(audit) + commit
