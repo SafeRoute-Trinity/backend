@@ -297,6 +297,10 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
             lon = body.location.lon
             location_dict = {"lat": lat, "lon": lon}
 
+    # Default route_id for testing until routing service provides real values
+    DEFAULT_ROUTE_ID = uuid.UUID("0a0a0000-00a0-00a0-a0a0-000000000000")
+    rid = body.route_id if body.route_id is not None else DEFAULT_ROUTE_ID
+
     # Generate feedback_id and timestamp
     feedback_id = uuid.uuid4()
     now = datetime.utcnow()
@@ -312,7 +316,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
             feedback_id=feedback_id,
             user_id=user_id_str,
             ticket_number=ticket_number,
-            route_id=body.route_id,
+            route_id=rid,
             lat=lat,
             lon=lon,
             type=body.type,
@@ -346,8 +350,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         "user_id": user_id_str,
     }
     # Add optional fields if provided
-    if body.route_id is not None:
-        FEEDBACK[str(feedback_id)]["route_id"] = body.route_id
+    FEEDBACK[str(feedback_id)]["route_id"] = rid
     if location_dict is not None:
         FEEDBACK[str(feedback_id)]["location"] = location_dict
     if body.description is not None:
@@ -369,7 +372,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
             event_type="feedback",
             user_id=parsed_user_id,
             event_id=feedback_id,
-            message=f"feedback.submit feedback_id={feedback_id} ticket={ticket_number} type={body.type} severity={body.severity} route_id={body.route_id}",
+            message=f"feedback.submit feedback_id={feedback_id} ticket={ticket_number} type={body.type} severity={body.severity} route_id={rid}",
             commit=True,
         )
     except Exception:
