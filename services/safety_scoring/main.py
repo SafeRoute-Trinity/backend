@@ -851,8 +851,7 @@ async def get_graph_geojson(
         count_query = text("""
             SELECT COUNT(*) FROM ways
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
-            """
-        )
+            """)
         count_result = await db.execute(count_query, params)
         total = count_result.scalar() or 0
 
@@ -865,8 +864,7 @@ async def get_graph_geojson(
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
             ORDER BY gid
             LIMIT :limit OFFSET :offset
-        """
-        )
+        """)
         result = await db.execute(query, params)
         rows = result.fetchall()
 
