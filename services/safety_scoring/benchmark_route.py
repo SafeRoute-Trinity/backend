@@ -28,16 +28,25 @@ def percentile(values: list[float], p: float) -> float:
 
 async def pick_random_points() -> dict:
     async for db in get_safety_scoring_db():
-        start_row = (await db.execute(text("""
+        start_row = (
+            await db.execute(
+                text(
+                    """
                     SELECT
                       ST_Y(ST_StartPoint(geometry)) AS lat,
                       ST_X(ST_StartPoint(geometry)) AS lng
                     FROM ways TABLESAMPLE SYSTEM (0.2)
                     WHERE geometry IS NOT NULL
                     LIMIT 1
-                    """))).fetchone()
+                    """
+                )
+            )
+        ).fetchone()
         if not start_row:
-            start_row = (await db.execute(text("""
+            start_row = (
+                await db.execute(
+                    text(
+                        """
                         SELECT
                           ST_Y(ST_StartPoint(geometry)) AS lat,
                           ST_X(ST_StartPoint(geometry)) AS lng
@@ -45,18 +54,30 @@ async def pick_random_points() -> dict:
                         WHERE geometry IS NOT NULL
                         ORDER BY gid
                         LIMIT 1
-                        """))).fetchone()
+                        """
+                    )
+                )
+            ).fetchone()
 
-        end_row = (await db.execute(text("""
+        end_row = (
+            await db.execute(
+                text(
+                    """
                     SELECT
                       ST_Y(ST_EndPoint(geometry)) AS lat,
                       ST_X(ST_EndPoint(geometry)) AS lng
                     FROM ways TABLESAMPLE SYSTEM (0.2)
                     WHERE geometry IS NOT NULL
                     LIMIT 1
-                    """))).fetchone()
+                    """
+                )
+            )
+        ).fetchone()
         if not end_row:
-            end_row = (await db.execute(text("""
+            end_row = (
+                await db.execute(
+                    text(
+                        """
                         SELECT
                           ST_Y(ST_EndPoint(geometry)) AS lat,
                           ST_X(ST_EndPoint(geometry)) AS lng
@@ -64,7 +85,10 @@ async def pick_random_points() -> dict:
                         WHERE geometry IS NOT NULL
                         ORDER BY gid DESC
                         LIMIT 1
-                        """))).fetchone()
+                        """
+                    )
+                )
+            ).fetchone()
 
         if not start_row or not end_row:
             raise RuntimeError("ways table is empty")
