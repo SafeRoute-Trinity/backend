@@ -35,7 +35,6 @@ from libs.rate_limiter import (
     default_rate_limit_config,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -124,7 +123,7 @@ def test_rate_limit_headers_present_on_allowed_request():
 
     assert resp.status_code == 200
     assert resp.headers["X-RateLimit-Limit"] == "10"
-    assert resp.headers["X-RateLimit-Remaining"] == "7"   # 10 - 3
+    assert resp.headers["X-RateLimit-Remaining"] == "7"  # 10 - 3
     assert "X-RateLimit-Reset" in resp.headers
     assert resp.headers["X-RateLimit-Window"] == "60"
 
@@ -289,8 +288,8 @@ def test_first_matching_endpoint_limit_wins():
         default_limit=100,
         default_window=60,
         endpoint_limits=[
-            EndpointLimit(path_prefix="/v1/", limit=5, window=60),      # first
-            EndpointLimit(path_prefix="/v1/auth/", limit=2, window=60), # never reached
+            EndpointLimit(path_prefix="/v1/", limit=5, window=60),  # first
+            EndpointLimit(path_prefix="/v1/auth/", limit=2, window=60),  # never reached
         ],
     )
     limiter = RateLimiter(config, "test_svc")
