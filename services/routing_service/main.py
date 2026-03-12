@@ -2,6 +2,7 @@
 # uvicorn services.routing_service.main:app --host 0.0.0.0 --port 20002 --reload
 # Docs: http://127.0.0.1:20002/docs
 
+import json
 import logging
 import os
 import sys
@@ -11,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import Depends, Query, Request, Response
+from fastapi import Depends, HTTPException, Query, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -20,6 +21,8 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel, Field
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Prefer the centralized DB factory if available on newer branches; fall back to
 # the legacy postgis_db dependency for this branch. This allows the service to
@@ -77,6 +80,11 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+ROUTE_SUBGRAPH_EXPAND_DEGREES = float(os.getenv("ROUTE_SUBGRAPH_EXPAND_DEGREES", "0.01"))
+ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES = float(os.getenv("ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES", "0.08"))
+ROUTE_DEFAULT_ALGORITHM: Literal["astar", "dijkstra", "bd_dijkstra"] = "dijkstra"
+WALKING_SPEED_MPS = 1.39
 
 # Create service configuration
 service_config = ServiceAppConfig(
@@ -194,6 +202,21 @@ class Point(BaseModel):
     lon: float
 
 
+class Coordinate(BaseModel):
+    lat: float
+    lng: float
+
+
+class RouteRequest(BaseModel):
+    start: Coordinate
+    end: Coordinate
+
+
+class WeightUpdateRequest(BaseModel):
+    edge_id: int
+    safety_factor: float
+
+
 class RoutePreferences(BaseModel):
     optimize_for: Literal["safety", "time", "distance", "balanced"]
     avoid: Optional[List[str]] = None
@@ -265,6 +288,270 @@ def _total_pages(total: int, page_size: int) -> int:
     return max(0, (total + page_size - 1) // page_size) if page_size > 0 else 0
 
 
+def _routing_algorithm_from_preferences(
+    optimize_for: Literal["safety", "time", "distance", "balanced"],
+) -> Literal["astar", "dijkstra", "bd_dijkstra"]:
+    if optimize_for == "time":
+        return "astar"
+    if optimize_for == "distance":
+        return "bd_dijkstra"
+    return ROUTE_DEFAULT_ALGORITHM
+
+
+def _extract_waypoints_from_geojson(
+    route_geojson: Dict[str, Any], origin: Point, destination: Point
+) -> List[Waypoint]:
+    features = route_geojson.get("features", [])
+    road_coords: List[List[float]] = []
+
+    for feature in features:
+        geometry = feature.get("geometry") or {}
+        properties = feature.get("properties") or {}
+        if geometry.get("type") != "LineString":
+            continue
+        if properties.get("type") in (None, "road", "connector"):
+            road_coords.extend(geometry.get("coordinates") or [])
+
+    if len(road_coords) < 2:
+        return [
+            Waypoint(lat=origin.lat, lon=origin.lon, instruction="Start"),
+            Waypoint(lat=destination.lat, lon=destination.lon, instruction="Arrive"),
+        ]
+
+    max_points = 12
+    step = max(1, len(road_coords) // max_points)
+    sampled = [road_coords[i] for i in range(0, len(road_coords), step)]
+    if sampled[-1] != road_coords[-1]:
+        sampled.append(road_coords[-1])
+
+    waypoints: List[Waypoint] = []
+    for idx, coord in enumerate(sampled):
+        if not isinstance(coord, list) or len(coord) < 2:
+            continue
+        lon, lat = coord[0], coord[1]
+        instruction = None
+        if idx == 0:
+            instruction = "Start"
+        elif idx == len(sampled) - 1:
+            instruction = "Arrive"
+        waypoints.append(Waypoint(lat=lat, lon=lon, instruction=instruction))
+
+    if len(waypoints) < 2:
+        return [
+            Waypoint(lat=origin.lat, lon=origin.lon, instruction="Start"),
+            Waypoint(lat=destination.lat, lon=destination.lon, instruction="Arrive"),
+        ]
+    return waypoints
+
+
+async def _compute_weighted_route_geojson(
+    request: RouteRequest,
+    db: AsyncSession,
+    algorithm: Literal["astar", "dijkstra", "bd_dijkstra"] = "dijkstra",
+) -> Dict[str, Any]:
+    node_query = text(
+        """
+        WITH p AS (
+            SELECT ST_SetSRID(ST_MakePoint(:lng, :lat), 4326) AS pt
+        ),
+        nearest_edge AS (
+            SELECT w.source, w.target, w.geometry, p.pt
+            FROM ways w
+            CROSS JOIN p
+            ORDER BY w.geometry <-> p.pt
+            LIMIT 1
+        )
+        SELECT
+            CASE
+                WHEN ST_Distance(ST_StartPoint(geometry)::geography, pt::geography)
+                   <= ST_Distance(ST_EndPoint(geometry)::geography, pt::geography)
+                THEN source
+                ELSE target
+            END AS id
+        FROM nearest_edge;
+        """
+    )
+
+    start_node_res = (
+        await db.execute(node_query, {"lng": request.start.lng, "lat": request.start.lat})
+    ).fetchone()
+    end_node_res = (
+        await db.execute(node_query, {"lng": request.end.lng, "lat": request.end.lat})
+    ).fetchone()
+
+    if not start_node_res or not end_node_res:
+        raise HTTPException(status_code=404, detail="Could not find nearest road nodes.")
+
+    start_node = start_node_res[0]
+    end_node = end_node_res[0]
+
+    routing_fn = (
+        "pgr_aStar"
+        if algorithm == "astar"
+        else "pgr_bdDijkstra" if algorithm == "bd_dijkstra" else "pgr_dijkstra"
+    )
+    routing_query = text(
+        """
+        SELECT
+            d.seq,
+            d.path_seq,
+            d.node,
+            d.edge,
+            d.cost,
+            d.agg_cost,
+            ST_AsGeoJSON(w.geometry) as geojson,
+            w.length,
+            w.source,
+            w.target
+        FROM """
+        + routing_fn
+        + """(
+            CAST(:sql AS TEXT),
+            CAST(:start_node AS BIGINT),
+            CAST(:end_node AS BIGINT),
+            false
+        ) as d
+        LEFT JOIN ways w ON d.edge = w.gid
+        ORDER BY d.seq;
+        """
+    )
+
+    expanded = max(0.001, ROUTE_SUBGRAPH_EXPAND_DEGREES)
+    max_expand = max(expanded, ROUTE_SUBGRAPH_EXPAND_MAX_DEGREES)
+    expansions: List[float] = []
+    while expanded <= max_expand + 1e-9:
+        expansions.append(round(expanded, 6))
+        expanded *= 2
+
+    routes = []
+    for expand in expansions:
+        cost_sql = f"""
+            WITH route_window AS (
+                SELECT ST_Expand(
+                    ST_Envelope(
+                        ST_Collect(
+                            ST_SetSRID(ST_MakePoint({request.start.lng}, {request.start.lat}), 4326),
+                            ST_SetSRID(ST_MakePoint({request.end.lng}, {request.end.lat}), 4326)
+                        )
+                    ),
+                    {expand}
+                ) AS bbox
+            )
+            SELECT
+                w.gid AS id,
+                w.source,
+                w.target,
+                w.length * w.safety_factor AS cost,
+                w.length * w.safety_factor AS reverse_cost,
+                ST_X(ST_StartPoint(w.geometry)) AS x1,
+                ST_Y(ST_StartPoint(w.geometry)) AS y1,
+                ST_X(ST_EndPoint(w.geometry)) AS x2,
+                ST_Y(ST_EndPoint(w.geometry)) AS y2
+            FROM ways w
+            CROSS JOIN route_window rw
+            WHERE w.geometry && rw.bbox
+        """
+        try:
+            route_res = await db.execute(
+                routing_query, {"sql": cost_sql, "start_node": start_node, "end_node": end_node}
+            )
+            routes = route_res.fetchall()
+            if routes:
+                break
+        except Exception:
+            continue
+
+    if not routes:
+        full_cost_sql = """
+            SELECT
+                gid AS id,
+                source,
+                target,
+                length * safety_factor AS cost,
+                length * safety_factor AS reverse_cost,
+                ST_X(ST_StartPoint(geometry)) AS x1,
+                ST_Y(ST_StartPoint(geometry)) AS y1,
+                ST_X(ST_EndPoint(geometry)) AS x2,
+                ST_Y(ST_EndPoint(geometry)) AS y2
+            FROM ways
+        """
+        route_res = await db.execute(
+            routing_query,
+            {"sql": full_cost_sql, "start_node": start_node, "end_node": end_node},
+        )
+        routes = route_res.fetchall()
+
+    if not routes:
+        raise HTTPException(status_code=404, detail="No path found.")
+
+    features: List[Dict[str, Any]] = []
+    total_distance = 0.0
+    road_coords: List[List[float]] = []
+
+    for route_row in routes:
+        if not route_row.geojson:
+            continue
+        geom = json.loads(route_row.geojson)
+        coords = geom.get("coordinates") or []
+        if route_row.node == route_row.target:
+            coords = list(reversed(coords))
+
+        if not road_coords:
+            road_coords.extend(coords)
+        else:
+            if road_coords[-1] == coords[0]:
+                road_coords.extend(coords[1:])
+            else:
+                road_coords.extend(coords)
+
+        if route_row.length:
+            total_distance += float(route_row.length)
+
+    if not road_coords:
+        raise HTTPException(status_code=404, detail="No route geometry found.")
+
+    features.append(
+        {
+            "type": "Feature",
+            "properties": {"type": "connector"},
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [[request.start.lng, request.start.lat], road_coords[0]],
+            },
+        }
+    )
+    features.append(
+        {
+            "type": "Feature",
+            "properties": {"type": "road"},
+            "geometry": {"type": "LineString", "coordinates": road_coords},
+        }
+    )
+    features.append(
+        {
+            "type": "Feature",
+            "properties": {"type": "connector"},
+            "geometry": {
+                "type": "LineString",
+                "coordinates": [road_coords[-1], [request.end.lng, request.end.lat]],
+            },
+        }
+    )
+
+    duration_seconds = total_distance / WALKING_SPEED_MPS
+    return {
+        "type": "FeatureCollection",
+        "features": features,
+        "properties": {
+            "summary": {
+                "distance_meters": total_distance,
+                "distance_km": round(total_distance / 1000, 2),
+                "duration": duration_seconds,
+            }
+        },
+    }
+
+
 class RouteListItem(BaseModel):
     """Single route entry for list response."""
 
@@ -329,6 +616,191 @@ async def health():
     }
 
 
+@app.get("/api/danger_zones")
+async def get_danger_zones(db: AsyncSession = Depends(get_postgis_db)):
+    try:
+        query = text(
+            """
+            SELECT gid, safety_factor, ST_AsGeoJSON(geometry) AS geojson
+            FROM ways
+            WHERE safety_factor != 1.0
+            """
+        )
+        rows = (await db.execute(query)).fetchall()
+        features = []
+        for row in rows:
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": {
+                        "id": row.gid,
+                        "weight": row.safety_factor,
+                        "type": "edge",
+                    },
+                    "geometry": json.loads(row.geojson),
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+    except Exception as e:
+        logger.exception("Failed to load danger zones")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/v1/routing-debug/danger-zones")
+async def get_danger_zones_v1(db: AsyncSession = Depends(get_postgis_db)):
+    return await get_danger_zones(db=db)
+
+
+@app.post("/api/danger_zones")
+async def update_danger_zone(
+    update: WeightUpdateRequest, db: AsyncSession = Depends(get_postgis_db)
+):
+    try:
+        geom_query = text("SELECT geometry FROM ways WHERE gid = :id")
+        geom_res = (await db.execute(geom_query, {"id": update.edge_id})).fetchone()
+        if not geom_res:
+            raise HTTPException(status_code=404, detail="Edge not found")
+
+        update_query = text(
+            """
+            UPDATE ways
+            SET safety_factor = :w
+            WHERE ST_Equals(geometry, :geom)
+            """
+        )
+        await db.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
+        await db.commit()
+        return {
+            "status": "updated",
+            "id": update.edge_id,
+            "weight": update.safety_factor,
+            "note": "Updated bidirectional edges",
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.exception("Failed to update danger zone")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/v1/routing-debug/danger-zones")
+async def update_danger_zone_v1(
+    update: WeightUpdateRequest, db: AsyncSession = Depends(get_postgis_db)
+):
+    return await update_danger_zone(update=update, db=db)
+
+
+@app.delete("/api/danger_zones/{zone_id}")
+async def reset_danger_zone(zone_id: int, db: AsyncSession = Depends(get_postgis_db)):
+    try:
+        geom_query = text("SELECT geometry FROM ways WHERE gid = :id")
+        geom_res = (await db.execute(geom_query, {"id": zone_id})).fetchone()
+        if not geom_res:
+            raise HTTPException(status_code=404, detail="Edge not found")
+
+        reset_query = text(
+            """
+            UPDATE ways
+            SET safety_factor = 1.0
+            WHERE ST_Equals(geometry, :geom)
+            """
+        )
+        await db.execute(reset_query, {"geom": geom_res[0]})
+        await db.commit()
+        return {"status": "reset", "id": zone_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.exception("Failed to reset danger zone")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.delete("/v1/routing-debug/danger-zones/{zone_id}")
+async def reset_danger_zone_v1(zone_id: int, db: AsyncSession = Depends(get_postgis_db)):
+    return await reset_danger_zone(zone_id=zone_id, db=db)
+
+
+@app.post("/api/route")
+async def get_route(
+    request: RouteRequest,
+    algorithm: Literal["astar", "dijkstra", "bd_dijkstra"] = Query("dijkstra"),
+    db: AsyncSession = Depends(get_postgis_db),
+):
+    return await _compute_weighted_route_geojson(request=request, db=db, algorithm=algorithm)
+
+
+@app.post("/v1/routing-debug/route")
+async def get_route_v1_debug(
+    request: RouteRequest,
+    algorithm: Literal["astar", "dijkstra", "bd_dijkstra"] = Query("dijkstra"),
+    db: AsyncSession = Depends(get_postgis_db),
+):
+    return await get_route(request=request, algorithm=algorithm, db=db)
+
+
+@app.get("/api/graph")
+async def get_graph_geojson(
+    min_lng: float = Query(..., description="Minimum Longitude"),
+    min_lat: float = Query(..., description="Minimum Latitude"),
+    max_lng: float = Query(..., description="Maximum Longitude"),
+    max_lat: float = Query(..., description="Maximum Latitude"),
+    db: AsyncSession = Depends(get_postgis_db),
+):
+    try:
+        query = text(
+            """
+            SELECT gid, source, target, ST_AsGeoJSON(geometry) AS geojson, safety_factor
+            FROM ways
+            WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
+            LIMIT 2000
+            """
+        )
+        rows = (
+            await db.execute(
+                query,
+                {
+                    "min_lng": min_lng,
+                    "min_lat": min_lat,
+                    "max_lng": max_lng,
+                    "max_lat": max_lat,
+                },
+            )
+        ).fetchall()
+
+        features = []
+        for row in rows:
+            features.append(
+                {
+                    "type": "Feature",
+                    "properties": {"type": "edge", "id": row.gid, "weight": row.safety_factor},
+                    "geometry": json.loads(row.geojson),
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+    except Exception as e:
+        logger.exception("Failed to load graph edges")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/v1/routing-debug/graph")
+async def get_graph_geojson_v1(
+    min_lng: float = Query(..., description="Minimum Longitude"),
+    min_lat: float = Query(..., description="Minimum Latitude"),
+    max_lng: float = Query(..., description="Maximum Longitude"),
+    max_lat: float = Query(..., description="Maximum Latitude"),
+    db: AsyncSession = Depends(get_postgis_db),
+):
+    return await get_graph_geojson(
+        min_lng=min_lng,
+        min_lat=min_lat,
+        max_lng=max_lng,
+        max_lat=max_lat,
+        db=db,
+    )
+
+
 @app.get("/v1/routes", response_model=RouteListResponse)
 async def list_routes(
     page: int = Query(1, ge=1, description="Page number (1-based)"),
@@ -391,27 +863,61 @@ async def list_routes(
 
 
 @app.post("/v1/routes/calculate", response_model=RouteCalculateResponse)
-async def calc(body: RouteCalculateRequest, db=Depends(get_db), postgisDB=Depends(get_postgis_db)):
-    # Business metric: initial route calculation
-    ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
-
-    # Business metric: initial route calculation
+async def calc(
+    body: RouteCalculateRequest,
+    db: AsyncSession = Depends(get_db),
+    postgisDB: AsyncSession = Depends(get_postgis_db),
+):
     ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
 
     rid = uuid.uuid4()
     now = datetime.utcnow()
-    opt = RouteOption(
-        route_index=0,
-        is_primary=True,
-        geometry="encoded_polyline_demo",
-        distance_m=2450,
-        duration_s=1800,
-        safety_score=87.5,
-        waypoints=[
-            Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
-            Waypoint(lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"),
-        ],
+    route_geojson: Optional[Dict[str, Any]] = None
+
+    route_request = RouteRequest(
+        start=Coordinate(lat=body.origin.lat, lng=body.origin.lon),
+        end=Coordinate(lat=body.destination.lat, lng=body.destination.lon),
     )
+
+    algorithm = _routing_algorithm_from_preferences(body.preferences.optimize_for)
+
+    try:
+        route_geojson = await _compute_weighted_route_geojson(
+            request=route_request,
+            db=postgisDB,
+            algorithm=algorithm,
+        )
+    except Exception as e:
+        logger.warning("Falling back to default route in /v1/routes/calculate: %s", e)
+
+    if route_geojson:
+        summary = (route_geojson.get("properties") or {}).get("summary") or {}
+        distance_meters = int(round(float(summary.get("distance_meters", 0))))
+        duration_seconds = int(round(float(summary.get("duration", 0))))
+        safety_score = 90.0 if body.preferences.optimize_for == "safety" else 82.0
+        opt = RouteOption(
+            route_index=0,
+            is_primary=True,
+            geometry=json.dumps(route_geojson),
+            distance_m=max(distance_meters, 0),
+            duration_s=max(duration_seconds, 0),
+            safety_score=safety_score,
+            waypoints=_extract_waypoints_from_geojson(route_geojson, body.origin, body.destination),
+        )
+    else:
+        opt = RouteOption(
+            route_index=0,
+            is_primary=True,
+            geometry="encoded_polyline_demo",
+            distance_m=2450,
+            duration_s=1800,
+            safety_score=87.5,
+            waypoints=[
+                Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
+                Waypoint(lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"),
+            ],
+        )
+
     ROUTES[rid] = {
         "route_id": rid,
         "routes": [opt],
