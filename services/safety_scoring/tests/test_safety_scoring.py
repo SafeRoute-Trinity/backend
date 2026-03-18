@@ -9,22 +9,31 @@ import pytest
 from fastapi.testclient import TestClient
 
 import services.safety_scoring.main as sm
-from services.safety_scoring.main import app, get_db, get_postgis_db
+from services.safety_scoring.main import (
+    app,
+    get_db,
+    get_postgis_db,
+    get_safety_scoring_db,
+)
 
 
 # ----------------------------
 # Helpers: fake db + fake result
 # ----------------------------
 class FakeResult:
-    def __init__(self, *, fetchone=None, fetchall=None):
+    def __init__(self, *, fetchone=None, fetchall=None, scalar=None):
         self._fetchone = fetchone
         self._fetchall = fetchall
+        self._scalar = scalar
 
     def fetchone(self):
         return self._fetchone
 
     def fetchall(self):
         return self._fetchall
+
+    def scalar(self):
+        return self._scalar
 
 
 class FakeDB:
@@ -55,9 +64,10 @@ def _override_db(fake_db: FakeDB):
     async def override_get_db():
         yield fake_db
 
-    # safety_scoring code has dependency：get_db / get_postgis_db
+    # safety_scoring code has dependency：get_db / get_postgis_db / get_safety_scoring_db
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_postgis_db] = override_get_db
+    app.dependency_overrides[get_safety_scoring_db] = override_get_db
 
 
 @pytest.fixture()
@@ -188,7 +198,7 @@ def test_get_danger_zones_success(client):
             geojson=json.dumps({"type": "LineString", "coordinates": [[1, 1], [2, 2]]}),
         ),
     ]
-    fake_db = FakeDB(plan=[FakeResult(fetchall=fake_rows)])
+    fake_db = FakeDB(plan=[FakeResult(scalar=2), FakeResult(fetchall=fake_rows)])
     _override_db(fake_db)
 
     r = client.get("/api/danger_zones")
@@ -243,7 +253,7 @@ def test_reset_danger_zone_success(client):
     fake_db = FakeDB(plan=[FakeResult(fetchall=[])])
     _override_db(fake_db)
 
-    r = client.patch("/api/danger_zones/321")
+    r = client.delete("/api/danger_zones/321")
     assert r.status_code == 200, r.text
     assert r.json()["status"] == "reset"
     assert fake_db.committed is True
@@ -264,7 +274,7 @@ def test_get_graph_geojson_success(client):
             safety_factor=1.0,
         )
     ]
-    fake_db = FakeDB(plan=[FakeResult(fetchall=fake_rows)])
+    fake_db = FakeDB(plan=[FakeResult(scalar=1), FakeResult(fetchall=fake_rows)])
     _override_db(fake_db)
 
     r = client.get(

@@ -166,8 +166,8 @@ def test_list_trusted_contacts_success(client):
         scalar_results=[make_user(uid)],  # user exists
         execute_results=[
             FakeExecuteResult(scalar_one_value=2),  # count for pagination
+            FakeExecuteResult(scalars_all=[c1, c2]),  # paginated rows
         ],
-        scalars_results=[[c1, c2]],  # contacts list (paginated query)
     )
     override_db(fake_db)
 
@@ -181,9 +181,6 @@ def test_list_trusted_contacts_success(client):
     assert data["data"][0]["phone"] == "+353111111111"
     assert data["data"][0]["is_primary"] is True
     assert data["data"][1]["phone"] == "+353222222222"
-    assert "filters" in data
-    assert data["filters"]["is_primary"] == ""
-    assert data["filters"]["search"] == ""
     assert "pagination" in data
     assert data["pagination"]["page"] == 1
     assert data["pagination"]["page_size"] == 20

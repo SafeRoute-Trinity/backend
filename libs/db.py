@@ -250,13 +250,13 @@ class DatabaseFactory:
         Args:
             databases: List of database types to initialize. If None, initializes POSTGRES only.
         """
-        if self._initialized:
-            return
-
         if databases is None:
             databases = [DatabaseType.POSTGRES]
 
         for db_type in databases:
+            if db_type in self._connections:
+                continue
+
             if db_type == DatabaseType.POSTGRES:
                 config = self._create_postgres_config()
             elif db_type == DatabaseType.POSTGIS:

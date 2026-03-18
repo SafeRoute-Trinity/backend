@@ -198,13 +198,13 @@ async def prometheus_middleware(request: Request, call_next):
 
 
 class Point(BaseModel):
-    lat: float
-    lon: float
+    lat: float = Field(..., ge=-90, le=90)
+    lon: float = Field(..., ge=-180, le=180)
 
 
 class Coordinate(BaseModel):
-    lat: float
-    lng: float
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
 
 
 class RouteRequest(BaseModel):
@@ -963,7 +963,9 @@ async def recalc(
             destination=body.current_location,
             user_id="recalc-placeholder",
             preferences=RoutePreferences(optimize_for="balanced", transport_mode="walking"),
-        )
+        ),
+        db=db,
+        postgisDB=postgisDB,
     )
 
 
