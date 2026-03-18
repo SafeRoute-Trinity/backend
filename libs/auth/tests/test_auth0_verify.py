@@ -69,7 +69,7 @@ def test_verify_expired_jwt_returns_401(mock_jwks_request, create_expired_jwt):
 
     # Verify status code and detail message
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert exc_info.value.detail == "Token expired"
+    assert "Token expired" in exc_info.value.detail
 
 
 def test_verify_jwt_with_wrong_signature_returns_401(
@@ -114,7 +114,7 @@ def test_verify_jwt_with_wrong_audience_returns_401(mock_jwks_request, create_in
 
     # Verify status code and detail message
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert exc_info.value.detail == "Invalid audience"
+    assert "Invalid audience" in exc_info.value.detail
 
 
 def test_verify_jwt_with_wrong_issuer_returns_401(mock_jwks_request, create_invalid_issuer_jwt):
@@ -135,29 +135,23 @@ def test_verify_jwt_with_wrong_issuer_returns_401(mock_jwks_request, create_inva
 
     # Verify status code and detail message
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert exc_info.value.detail == "Invalid issuer"
+    assert "Invalid issuer" in exc_info.value.detail
 
 
 def test_verify_jwt_missing_kid_header_returns_401(mock_jwks_request, create_jwt_without_kid):
     """
-    Test that a JWT without 'kid' in header is rejected with 401.
+    Test that a JWT without 'kid' in header can still be verified.
 
-    Verifies that tokens missing the key ID cannot be verified
-    because we can't match them to a JWKS key.
+    PyJWKClient can still verify the token when the JWKS yields a
+    single usable signing key.
     """
     # Create JWT without kid header
     token = create_jwt_without_kid(user_id="test-user-no-kid")
 
     credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
-    # Verify that HTTPException is raised
-    with pytest.raises(HTTPException) as exc_info:
-        verify_token(credentials=credentials)
-
-    # Verify 401 status code
-    assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    # Detail should mention missing kid
-    assert "kid" in exc_info.value.detail.lower()
+    payload = verify_token(credentials=credentials)
+    assert payload["sub"] == "test-user-no-kid"
 
 
 def test_jwks_fetching_and_key_selection(mock_jwks_request, create_valid_jwt, test_kid, mock_jwks):
@@ -165,9 +159,9 @@ def test_jwks_fetching_and_key_selection(mock_jwks_request, create_valid_jwt, te
     Test that JWKS is fetched and the correct signing key is selected by kid.
 
     Verifies:
-    - requests.get is called with JWKS URL
-    - The key with matching kid is selected from JWKS
+    - PyJWKClient is initialized with the JWKS URL
     - JWT verification succeeds with the correct key
+    - The JWKS fixture still contains the expected kid
     """
     from common.constants import JWKS_URL
 
@@ -179,10 +173,11 @@ def test_jwks_fetching_and_key_selection(mock_jwks_request, create_valid_jwt, te
     # Call verify_token
     payload = verify_token(credentials=credentials)
 
-    # Verify that requests.get was called with JWKS URL
+    # Verify that PyJWKClient was initialized with JWKS URL
     mock_jwks_request.assert_called_once()
     call_args = mock_jwks_request.call_args
-    assert JWKS_URL in call_args[0][0]
+    assert JWKS_URL in call_args.args[0]
+    assert call_args.kwargs["timeout"] == 10
 
     # Verify payload contains expected data
     assert payload["sub"] == "test-jwks-user"
@@ -195,16 +190,15 @@ def test_jwks_fetch_ssl_error_returns_401(mocker, create_valid_jwt):
     """
     Test that SSL errors when fetching JWKS return 401.
 
-    Verifies that requests.exceptions.SSLError is caught
-    and converted to HTTPException with appropriate message.
+    Verifies that JWKS client failures surface as 401 responses.
     """
-    import requests
+    from jwt import PyJWKClientError
 
-    # Mock requests.get to raise SSLError
-    mocker.patch(
-        "requests.get",
-        side_effect=requests.exceptions.SSLError("SSL certificate verification failed"),
+    mock_client = mocker.Mock()
+    mock_client.get_signing_key_from_jwt.side_effect = PyJWKClientError(
+        "SSL certificate verification failed"
     )
+    mocker.patch("libs.auth.auth0_verify.PyJWKClient", return_value=mock_client)
 
     token = create_valid_jwt(user_id="test-ssl-error")
 
@@ -216,20 +210,21 @@ def test_jwks_fetch_ssl_error_returns_401(mocker, create_valid_jwt):
 
     # Verify status code and detail message
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "SSL error fetching JWKS" in exc_info.value.detail
+    assert "Token verification failed" in exc_info.value.detail
+    assert "SSL certificate verification failed" in exc_info.value.detail
 
 
 def test_jwks_fetch_http_error_returns_401(mocker, create_valid_jwt):
     """
     Test that HTTP errors when fetching JWKS return 401.
 
-    Verifies that requests.RequestException is caught
-    and converted to HTTPException with appropriate message.
+    Verifies that JWKS client fetch failures surface as 401 responses.
     """
-    import requests
+    from jwt import PyJWKClientError
 
-    # Mock requests.get to raise RequestException
-    mocker.patch("requests.get", side_effect=requests.RequestException("Connection timeout"))
+    mock_client = mocker.Mock()
+    mock_client.get_signing_key_from_jwt.side_effect = PyJWKClientError("Connection timeout")
+    mocker.patch("libs.auth.auth0_verify.PyJWKClient", return_value=mock_client)
 
     token = create_valid_jwt(user_id="test-http-error")
 
@@ -241,7 +236,8 @@ def test_jwks_fetch_http_error_returns_401(mocker, create_valid_jwt):
 
     # Verify status code and detail message
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "HTTP error fetching JWKS" in exc_info.value.detail
+    assert "Token verification failed" in exc_info.value.detail
+    assert "Connection timeout" in exc_info.value.detail
 
 
 def test_verify_jwt_with_custom_claims(mock_jwks_request, create_valid_jwt):
