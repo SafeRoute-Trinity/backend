@@ -349,7 +349,8 @@ async def _compute_weighted_route_geojson(
     db: AsyncSession,
     algorithm: Literal["astar", "dijkstra", "bd_dijkstra"] = "dijkstra",
 ) -> Dict[str, Any]:
-    node_query = text("""
+    node_query = text(
+        """
         WITH p AS (
             SELECT ST_SetSRID(ST_MakePoint(:lng, :lat), 4326) AS pt
         ),
@@ -368,7 +369,8 @@ async def _compute_weighted_route_geojson(
                 ELSE target
             END AS id
         FROM nearest_edge;
-        """)
+        """
+    )
 
     start_node_res = (
         await db.execute(node_query, {"lng": request.start.lng, "lat": request.start.lat})
@@ -386,9 +388,7 @@ async def _compute_weighted_route_geojson(
     routing_fn = (
         "pgr_aStar"
         if algorithm == "astar"
-        else "pgr_bdDijkstra"
-        if algorithm == "bd_dijkstra"
-        else "pgr_dijkstra"
+        else "pgr_bdDijkstra" if algorithm == "bd_dijkstra" else "pgr_dijkstra"
     )
     routing_query = text(
         """
@@ -619,11 +619,13 @@ async def health():
 @app.get("/api/danger_zones")
 async def get_danger_zones(db: AsyncSession = Depends(get_postgis_db)):
     try:
-        query = text("""
+        query = text(
+            """
             SELECT gid, safety_factor, ST_AsGeoJSON(geometry) AS geojson
             FROM ways
             WHERE safety_factor != 1.0
-            """)
+            """
+        )
         rows = (await db.execute(query)).fetchall()
         features = []
         for row in rows:
@@ -659,11 +661,13 @@ async def update_danger_zone(
         if not geom_res:
             raise HTTPException(status_code=404, detail="Edge not found")
 
-        update_query = text("""
+        update_query = text(
+            """
             UPDATE ways
             SET safety_factor = :w
             WHERE ST_Equals(geometry, :geom)
-            """)
+            """
+        )
         await db.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
         await db.commit()
         return {
@@ -695,11 +699,13 @@ async def reset_danger_zone(zone_id: int, db: AsyncSession = Depends(get_postgis
         if not geom_res:
             raise HTTPException(status_code=404, detail="Edge not found")
 
-        reset_query = text("""
+        reset_query = text(
+            """
             UPDATE ways
             SET safety_factor = 1.0
             WHERE ST_Equals(geometry, :geom)
-            """)
+            """
+        )
         await db.execute(reset_query, {"geom": geom_res[0]})
         await db.commit()
         return {"status": "reset", "id": zone_id}
@@ -743,12 +749,14 @@ async def get_graph_geojson(
     db: AsyncSession = Depends(get_postgis_db),
 ):
     try:
-        query = text("""
+        query = text(
+            """
             SELECT gid, source, target, ST_AsGeoJSON(geometry) AS geojson, safety_factor
             FROM ways
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
             LIMIT 2000
-            """)
+            """
+        )
         rows = (
             await db.execute(
                 query,

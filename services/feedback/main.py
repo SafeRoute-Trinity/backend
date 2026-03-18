@@ -22,8 +22,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel, EmailStr, Field
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, EmailStr, Field, validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +30,8 @@ from libs.audit_logger import write_audit
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from dotenv import load_dotenv
 
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
@@ -42,7 +43,6 @@ from services.feedback.feedback_factory import get_feedback_factory
 from services.feedback.spam_validator import get_spam_validator_factory
 from services.feedback.types import FeedbackType, SeverityType, Status
 
-from dotenv import load_dotenv
 load_dotenv(".env")
 
 # Initialize database connections
