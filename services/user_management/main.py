@@ -9,6 +9,7 @@ Provides endpoints for user registration, authentication, preferences,
 and trusted contact management.
 """
 
+import hashlib
 import os
 import sys
 import time
@@ -26,7 +27,7 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from models.audit import Audit
@@ -103,6 +104,17 @@ def extract_user_id_from_auth(auth: dict) -> str:
     """
     auth_sub = auth.get("sub", "")
     return auth_sub.split("|", 1)[-1] if "|" in auth_sub else auth_sub
+
+
+def _user_advisory_lock_key(user_id: str) -> int:
+    """
+    Deterministic 63-bit lock key for a user_id.
+
+    Using a fixed numeric literal avoids bound-parameter differences across
+    asyncpg/SQLAlchemy and our unit-test DB fakes.
+    """
+    digest = hashlib.sha256(user_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
 
 
 # ========= Metrics =========
@@ -945,6 +957,10 @@ async def set_trusted_contacts(
     """
     now = datetime.utcnow()
 
+    # Serialize all trusted-contact primary updates for this user.
+    # This prevents cross-request write skew (e.g., two concurrent promotions).
+    await db.execute(text(f"SELECT pg_advisory_xact_lock({_user_advisory_lock_key(user_id)})"))
+
     if sum(1 for c in body.contacts if c.is_primary) > 1:
         raise HTTPException(status_code=400, detail="Only one trusted contact can be primary")
 
@@ -1064,6 +1080,10 @@ async def upsert_trusted_contact(
     Use for adding one contact or editing one by phone; use PUT to replace the whole list.
     """
     now = datetime.utcnow()
+
+    # Serialize all trusted-contact primary updates for this user.
+    # We use a transaction-level advisory lock (no schema changes required).
+    await db.execute(text(f"SELECT pg_advisory_xact_lock({_user_advisory_lock_key(user_id)})"))
 
     # ---- (1) Ensure user exists ----
     user = await db.scalar(select(User).where(User.user_id == user_id))
