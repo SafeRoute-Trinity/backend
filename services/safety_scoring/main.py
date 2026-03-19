@@ -406,15 +406,13 @@ async def get_danger_zones(
         offset = (page - 1) * page_size
         params["limit"] = page_size
         params["offset"] = offset
-        query = text(
-            f"""
+        query = text(f"""
             SELECT gid, safety_factor, ST_AsGeoJSON(geometry) as geojson
             FROM ways
             WHERE {where_clause}
             ORDER BY gid
             LIMIT :limit OFFSET :offset
-            """
-        )
+            """)
         result = await db.execute(query, params)
         rows = result.fetchall()
 
@@ -455,8 +453,7 @@ async def get_danger_zones(
 @app.post("/api/danger_zones")
 async def update_danger_zone(
     update: WeightUpdateRequest,
-    db=Depends(get_db),
-    postgisDb: AsyncSession = Depends(get_postgis_db),
+    db: AsyncSession = Depends(get_safety_scoring_db),
 ):
     """
     Update safety weight for a specific edge and its bidirectional counterpart.
@@ -464,23 +461,21 @@ async def update_danger_zone(
     try:
         # Find the geometry of the selected edge
         geom_query = text("SELECT geometry FROM ways WHERE gid = :id")
-        result = await postgisDb.execute(geom_query, {"id": update.edge_id})
+        result = await db.execute(geom_query, {"id": update.edge_id})
         geom_res = result.fetchone()
 
         if not geom_res:
             raise HTTPException(status_code=404, detail="Edge not found")
 
         # Update ALL edges that share exactly the same geometry (spatial equality)
-        update_query = text(
-            """
+        update_query = text("""
             UPDATE ways 
             SET safety_factor = :w 
             WHERE ST_Equals(geometry, :geom)
-        """
-        )
+        """)
 
-        await postgisDb.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
-        await postgisDb.commit()
+        await db.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
+        await db.commit()
 
         # TODO: add audit when auth is ready
 
@@ -522,24 +517,20 @@ async def update_danger_zone(
     except HTTPException:
         raise
     except Exception as e:
-        await postgisDb.rollback()
+        await db.rollback()
         print(f"Error updating safety_factor: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.patch("/api/danger_zones/{zone_id}")
-async def reset_danger_zone(
-    zone_id: int,
-    db: AsyncSession = Depends(get_db),
-    postgisDb: AsyncSession = Depends(get_postgis_db),
-):
+@app.delete("/api/danger_zones/{zone_id}")
+async def reset_danger_zone(zone_id: int, db: AsyncSession = Depends(get_safety_scoring_db)):
     """
     Reset safety_factor(weight) for a zone to default (1.0).
     """
     try:
         query = text("UPDATE ways SET safety_factor = 1.0 WHERE gid = :id")
-        await postgisDb.execute(query, {"id": zone_id})
-        await postgisDb.commit()
+        await db.execute(query, {"id": zone_id})
+        await db.commit()
 
         # TODO: add audit when auth is ready
 
@@ -557,18 +548,15 @@ async def reset_danger_zone(
 
         return {"status": "reset"}
     except Exception as e:
-        await postgisDb.rollback()
+        await db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/route")
 async def get_route(
     request: RouteRequest,
-    db: AsyncSession = Depends(get_db),
-    postgisDb: AsyncSession = Depends(get_postgis_db),
-    algorithm: str = Query(
-        "dijkstra", description="Routing algorithm: ch, dijkstra, astar, bd_dijkstra"
-    ),
+    algorithm: Literal["ch", "astar", "dijkstra", "bd_dijkstra"] = Query("dijkstra"),
+    db: AsyncSession = Depends(get_safety_scoring_db),
 ):
     """
     Calculate route using pgRouting with safety weights.
@@ -587,8 +575,7 @@ async def get_route(
 
         # 1. Find nearest graph node by snapping to nearest edge endpoint.
         # This avoids scanning huge start/end-point candidate sets.
-        node_query = text(
-            """
+        node_query = text("""
         WITH p AS (
             SELECT ST_SetSRID(ST_MakePoint(:lng, :lat), 4326) AS pt
         ),
@@ -607,17 +594,14 @@ async def get_route(
                 ELSE target
             END AS id
         FROM nearest_edge;
-        """
-        )
+        """)
 
-        start_res = await postgisDb.execute(
+        start_res = await db.execute(
             node_query, {"lng": request.start.lng, "lat": request.start.lat}
         )
         start_node_res = start_res.fetchone()
 
-        end_res = await postgisDb.execute(
-            node_query, {"lng": request.end.lng, "lat": request.end.lat}
-        )
+        end_res = await db.execute(node_query, {"lng": request.end.lng, "lat": request.end.lat})
         end_node_res = end_res.fetchone()
 
         if not start_node_res or not end_node_res:
@@ -693,7 +677,7 @@ async def get_route(
                 WHERE w.geometry && rw.bbox
             """
             try:
-                route_res = await postgisDb.execute(
+                route_res = await db.execute(
                     routing_query, {"sql": cost_sql, "start_node": start_node, "end_node": end_node}
                 )
                 routes = route_res.fetchall()
@@ -836,13 +820,13 @@ async def get_route(
 
 @app.get("/api/graph")
 async def get_graph_geojson(
-    min_lng: float = Query(..., description="Minimum Longitude(-180 ~ 180)"),
-    min_lat: float = Query(..., description="Minimum Latitude(-90 ~ 90)"),
-    max_lng: float = Query(..., description="Maximum Longitude(-180 ~ 180)"),
-    max_lat: float = Query(..., description="Maximum Latitude(-90 ~ 90)"),
+    min_lng: float = Query(..., description="Minimum Longitude"),
+    min_lat: float = Query(..., description="Minimum Latitude"),
+    max_lng: float = Query(..., description="Maximum Longitude"),
+    max_lat: float = Query(..., description="Maximum Latitude"),
+    db: AsyncSession = Depends(get_safety_scoring_db),
     page: int = Query(1, ge=1, description="Page number (1-based)"),
     page_size: int = Query(100, ge=1, le=2000, description="Items per page"),
-    postgisDb: AsyncSession = Depends(get_postgis_db),
 ):
     """
     Return graph edges in bbox. Paginated. Response follows convention: data, filters, pagination.
@@ -862,28 +846,24 @@ async def get_graph_geojson(
         }
 
         # Total count in bbox
-        count_query = text(
-            """
+        count_query = text("""
             SELECT COUNT(*) FROM ways
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
-            """
-        )
-        count_result = await postgisDb.execute(count_query, params)
+            """)
+        count_result = await db.execute(count_query, params)
         total = count_result.scalar() or 0
 
         offset = (page - 1) * page_size
         params["limit"] = page_size
         params["offset"] = offset
-        query = text(
-            """
+        query = text("""
             SELECT gid, source, target, ST_AsGeoJSON(geometry) as geojson, safety_factor
             FROM ways
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
             ORDER BY gid
             LIMIT :limit OFFSET :offset
-        """
-        )
-        result = await postgisDb.execute(query, params)
+        """)
+        result = await db.execute(query, params)
         rows = result.fetchall()
 
         features = []

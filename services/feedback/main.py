@@ -1,16 +1,19 @@
 # fmt: off
 # Run:
-# uvicorn services.feedback.main:app --host 0.0.0.0 --port 20004 --reload
+# uvicorn services.feedback.main:app --host 0.0.0.0 --port 20004 --reload --env-file .env
 # Docs: http://127.0.0.1:20004/docs
 
 import logging
 import os
+import smtplib
 import sys
 import time
 import uuid
 from datetime import datetime
+from email.mime.text import MIMEText
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
+import httpx
 from fastapi import Depends, HTTPException, Query, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -19,14 +22,17 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field, validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
+from libs.auth.auth0_verify import verify_token
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from dotenv import load_dotenv
 
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
@@ -37,6 +43,8 @@ from libs.fastapi_service import (
 from services.feedback.feedback_factory import get_feedback_factory
 from services.feedback.spam_validator import get_spam_validator_factory
 from services.feedback.types import FeedbackType, SeverityType, Status
+
+load_dotenv(".env")
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -139,6 +147,12 @@ FEEDBACK_STATUS_CHECKS_TOTAL = Counter(
     registry=registry,
 )
 
+SYSTEM_FEEDBACK_SUBMISSIONS_TOTAL = Counter(
+    "system_feedback_submissions_total",
+    "Total system feedback submissions received",
+    registry=registry,
+)
+
 
 @app.middleware("http")
 async def prometheus_middleware(request: Request, call_next):
@@ -171,6 +185,30 @@ async def prometheus_middleware(request: Request, call_next):
 
 logger = logging.getLogger(__name__)
 
+# ========= SYSTEM FEEDBACK CONFIG =========
+
+RECAPTCHA_VERIFY_URL = "https://www.google.com/recaptcha/api/siteverify"
+RECAPTCHA_SECRET_KEY = os.getenv("RECAPTCHA_SECRET_KEY")
+
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USERNAME = os.getenv("SMTP_USERNAME", "saferouteapp2025@gmail.com")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
+SYSTEM_FEEDBACK_TO_EMAIL = os.getenv(
+    "SYSTEM_FEEDBACK_TO_EMAIL", "saferouteapp2025@gmail.com"
+)
+
+# Dev/test only
+ENABLE_CAPTCHA_BYPASS = os.getenv("ENABLE_CAPTCHA_BYPASS", "false").lower() == "true"
+CAPTCHA_BYPASS_TOKEN = os.getenv("CAPTCHA_BYPASS_TOKEN", "dev-bypass-token")
+
+
+
+
+
+
+
+
 
 def _maybe_uuid(val):
     try:
@@ -187,8 +225,93 @@ def _maybe_uuid(val):
     return None
 
 
-# ========= MODELS =========
+async def verify_recaptcha(token: str, remote_ip: Optional[str] = None) -> dict:
+    if ENABLE_CAPTCHA_BYPASS and token == CAPTCHA_BYPASS_TOKEN:
+        return {"success": True, "bypass": True}
 
+    if not RECAPTCHA_SECRET_KEY:
+        raise HTTPException(status_code=500, detail="RECAPTCHA_SECRET_KEY is not configured")
+
+    payload = {
+        "secret": RECAPTCHA_SECRET_KEY,
+        "response": token,
+    }
+    if remote_ip:
+        payload["remoteip"] = remote_ip
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(RECAPTCHA_VERIFY_URL, data=payload)
+            resp.raise_for_status()
+            result = resp.json()
+    except Exception as e:
+        logger.exception("Failed to verify captcha")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Captcha verification request failed: {str(e)}",
+        )
+
+    if not result.get("success", False):
+        raise HTTPException(status_code=400, detail="Captcha verification failed")
+
+    return result
+
+def send_system_feedback_email(
+    *,
+    user_id: Optional[str],
+    user_email: Optional[str],
+    subject: Optional[str],
+    content: str,
+    page_url: Optional[str],
+    user_agent: Optional[str],
+):
+    if not SMTP_USERNAME or not SMTP_PASSWORD:
+        raise RuntimeError("SMTP credentials are not configured")
+
+    mail_subject = f"[SafeRoute][System Feedback] {subject or 'New App Feedback'}"
+
+    body = f"""
+New system feedback received
+
+Content:
+{content}
+
+User ID: {user_id or ""}
+User Email: {user_email or ""}
+User Agent: {user_agent or ""}
+
+""".strip()
+
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = mail_subject
+    msg["From"] = SMTP_USERNAME
+    msg["To"] = SYSTEM_FEEDBACK_TO_EMAIL
+
+    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
+        server.starttls()
+        server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        server.sendmail(SMTP_USERNAME, [SYSTEM_FEEDBACK_TO_EMAIL], msg.as_string())
+
+
+
+
+# ========= MODELS =========
+class SystemFeedbackSubmitRequest(BaseModel):
+    user_id: Optional[str] = None
+    email: Optional[EmailStr] = None
+    subject: Optional[str] = None
+    content: str = Field(..., min_length=1, max_length=5000)
+
+    privacy_accepted: bool
+    captcha_token: str
+
+    page_url: Optional[str] = None
+    user_agent: Optional[str] = None
+
+
+class SystemFeedbackSubmitResponse(BaseModel):
+    status: str
+    message: str
 
 class FeedbackLocation(BaseModel):
     lat: float
@@ -203,6 +326,12 @@ class FeedbackSubmitRequest(BaseModel):
     location: Optional[dict] = None
     description: Optional[str] = None
     attachments: Optional[list] = None
+
+    @validator("route_id", pre=True)
+    def empty_str_to_none(cls, v):
+        if v == "":
+            return None
+        return v
 
 
 class FeedbackSubmitResponse(BaseModel):
@@ -297,6 +426,10 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
             lon = body.location.lon
             location_dict = {"lat": lat, "lon": lon}
 
+    # Default route_id for testing until routing service provides real values
+    DEFAULT_ROUTE_ID = uuid.UUID("0a0a0000-00a0-00a0-a0a0-000000000000")
+    rid = body.route_id if body.route_id is not None else DEFAULT_ROUTE_ID
+
     # Generate feedback_id and timestamp
     feedback_id = uuid.uuid4()
     now = datetime.utcnow()
@@ -312,7 +445,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
             feedback_id=feedback_id,
             user_id=user_id_str,
             ticket_number=ticket_number,
-            route_id=body.route_id,
+            route_id=rid,
             lat=lat,
             lon=lon,
             type=body.type,
@@ -346,8 +479,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         "user_id": user_id_str,
     }
     # Add optional fields if provided
-    if body.route_id is not None:
-        FEEDBACK[str(feedback_id)]["route_id"] = body.route_id
+    FEEDBACK[str(feedback_id)]["route_id"] = rid
     if location_dict is not None:
         FEEDBACK[str(feedback_id)]["location"] = location_dict
     if body.description is not None:
@@ -369,7 +501,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
             event_type="feedback",
             user_id=parsed_user_id,
             event_id=feedback_id,
-            message=f"feedback.submit feedback_id={feedback_id} ticket={ticket_number} type={body.type} severity={body.severity} route_id={body.route_id}",
+            message=f"feedback.submit feedback_id={feedback_id} ticket={ticket_number} type={body.type} severity={body.severity} route_id={rid}",
             commit=True,
         )
     except Exception:
@@ -411,8 +543,6 @@ async def list_feedback(
     data = []
     for row in feedbacks:
         api_type = row.type if row.type else None
-        if api_type == "others":
-            api_type = "other"
 
         data.append(
             FeedbackStatusResponse(
@@ -528,8 +658,6 @@ async def status(feedback_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="feedback not found")
 
     api_type = row["feedback_type"]
-    if api_type == "others":
-        api_type = "other"
 
     # Extract user_id from the feedback record and parse it for audit logging
     user_id_str = row.get("user_id")
@@ -568,6 +696,66 @@ async def status(feedback_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         logger.exception("Failed to write audit for feedback.status_check")
 
     return res
+
+
+@app.post("/v1/system-feedback/submit", response_model=SystemFeedbackSubmitResponse)
+async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Request):
+    SYSTEM_FEEDBACK_SUBMISSIONS_TOTAL.inc()
+
+    # Try to extract user identity from JWT token if present
+    user_id = body.user_id
+    user_email = body.email
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        try:
+            token = auth_header.split(" ", 1)[1]
+            payload = verify_token(
+                type("Creds", (), {"credentials": token})()
+            )
+            user_id = payload.get("sub", user_id)
+            user_email = payload.get("email", user_email)
+        except Exception:
+            logger.debug("Could not decode JWT for system feedback, using body fields")
+
+    if not body.privacy_accepted:
+        raise HTTPException(status_code=400, detail="Privacy policy must be accepted")
+
+    await verify_recaptcha(
+        token=body.captcha_token,
+        remote_ip=request.client.host if request.client else None,
+    )
+
+    try:
+        send_system_feedback_email(
+            user_id=user_id,
+            user_email=user_email,
+            subject=body.subject,
+            content=body.content,
+            page_url=body.page_url,
+            user_agent=body.user_agent,
+        )
+    except Exception as e:
+        logger.exception("Failed to send system feedback email")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to send feedback email: {str(e)}",
+        )
+
+    return SystemFeedbackSubmitResponse(
+        status="received",
+        message="System feedback submitted successfully",
+    )
+
+
+
+
+
+
+
+
+
+
+
 
 
 # ========= PROMETHEUS METRICS ENDPOINT =========

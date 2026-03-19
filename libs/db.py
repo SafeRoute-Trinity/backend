@@ -250,13 +250,13 @@ class DatabaseFactory:
         Args:
             databases: List of database types to initialize. If None, initializes POSTGRES only.
         """
-        if self._initialized:
-            return
-
         if databases is None:
             databases = [DatabaseType.POSTGRES]
 
         for db_type in databases:
+            if db_type in self._connections:
+                continue
+
             if db_type == DatabaseType.POSTGRES:
                 config = self._create_postgres_config()
             elif db_type == DatabaseType.POSTGIS:
@@ -332,6 +332,29 @@ class DatabaseFactory:
                 yield session
 
         return _get_session
+
+    def get_serializable_session_dependency(self, db_type: DatabaseType):
+        """
+        Get a FastAPI dependency for SERIALIZABLE-isolated database sessions.
+
+        Issues SET TRANSACTION ISOLATION LEVEL SERIALIZABLE on the underlying
+        connection before the first SQL operation, preventing phantom reads and
+        write skew on critical paths (e.g. SOS trigger chain).
+
+        Args:
+            db_type: Type of database to get session for
+
+        Returns:
+            Async generator function for FastAPI dependency injection
+        """
+
+        async def _get_serializable_session():
+            connection = self.get_connection(db_type)
+            async with connection.session_maker() as session:
+                await session.connection(execution_options={"isolation_level": "SERIALIZABLE"})
+                yield session
+
+        return _get_serializable_session
 
 
 # Global database factory instance
