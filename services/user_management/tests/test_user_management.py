@@ -253,7 +253,7 @@ def test_sync_auth0_user_create_success(client, monkeypatch):
     assert res.status_code == 200, res.text
     data = res.json()
     assert data["status"] == "synced"
-    assert data["user_id"] == "auth0|newuser456"
+    assert data["user_id"] == "newuser456"
     assert fake_db.committed is True
     assert len(fake_db.added) >= 1  # User + Audit
     assert counter.count == 1
@@ -272,7 +272,7 @@ def test_sync_auth0_user_update_success(client, monkeypatch):
     counter = _Counter()
     monkeypatch.setattr(um, "USER_REGISTRATION_TOTAL", counter, raising=False)
 
-    existing_user = make_user("auth0|existing789", email="old@example.com", name="Old Name")
+    existing_user = make_user("existing789", email="old@example.com", name="Old Name")
     fake_db = FakeDB(plan=[FakeResult(existing_user)])  # user exists → update
     _override_db(fake_db)
 
@@ -439,15 +439,16 @@ def test_list_trusted_contacts_success(client):
         make_contact(uid, name="Bob", phone="+222", is_primary=False),
     ]
 
-    # list_trusted_contacts uses: db.scalar(select User), db.scalars(select TrustedContact)
-    fake_db = FakeDB(plan=[FakeResult(fake_user), FakeResult(contacts)])
+    # list_trusted_contacts uses: db.scalar(select User), db.execute(count), db.execute(rows)
+    fake_db = FakeDB(plan=[FakeResult(fake_user), FakeResult(2), FakeResult(contacts)])
     _override_db(fake_db)
 
     res = client.get(f"/v1/users/{uid}/trusted-contacts")
     assert res.status_code == 200, res.text
     data = res.json()
     assert data["user_id"] == uid
-    assert len(data["contacts"]) == 2
+    assert len(data["data"]) == 2
+    assert data["pagination"]["total"] == 2
 
 
 def test_list_trusted_contacts_user_not_found_404(client):
@@ -462,13 +463,13 @@ def test_list_trusted_contacts_user_not_found_404(client):
 def test_list_trusted_contacts_empty(client):
     uid = "auth0|lonely"
     fake_user = make_user(uid)
-    fake_db = FakeDB(plan=[FakeResult(fake_user), FakeResult([])])
+    fake_db = FakeDB(plan=[FakeResult(fake_user), FakeResult(0), FakeResult([])])
     _override_db(fake_db)
 
     res = client.get(f"/v1/users/{uid}/trusted-contacts")
     assert res.status_code == 200
     data = res.json()
-    assert data["contacts"] == []
+    assert data["data"] == []
 
 
 # ----------------------------

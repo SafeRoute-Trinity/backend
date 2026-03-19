@@ -25,7 +25,7 @@ DOCS_SERVICE = ("docs.main", 8080)
 # ========= Auth Configuration =========
 # Auth0 configuration
 AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "saferouteapp.eu.auth0.com")
-API_AUDIENCE = os.getenv("API_AUDIENCE", "https://saferouteapp.eu.auth0.com/api/v2/")
+API_AUDIENCE = os.getenv("API_AUDIENCE", "https://saferouteapp.eu.auth0.com/api/v2")
 ISSUER = f"https://{AUTH0_DOMAIN}/"
 JWKS_URL = f"{ISSUER}.well-known/jwks.json"
 ALGORITHMS = ["RS256"]

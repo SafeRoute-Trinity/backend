@@ -70,18 +70,19 @@ async def write_audit(
         message=msg,
     )
 
+    # Wrap the audit INSERT in a SAVEPOINT so that a write failure only rolls
+    # back the audit row, leaving any surrounding business-logic writes intact.
+    # This replaces the old pattern of calling db.rollback() on audit failure,
+    # which would have wiped the entire session's pending work.
+    log_id: Optional[uuid.UUID] = None
     try:
-        db.add(audit_row)
-        # flush：生成 log_id，但不提交事务
-        await db.flush()
-
-        if commit:
-            await db.commit()
-
-        return audit_row.log_id
-
+        async with db.begin_nested():
+            db.add(audit_row)
+            # flush assigns log_id via the Python-side default (uuid.uuid4)
+            await db.flush()
+        log_id = audit_row.log_id
     except Exception as exc:
-        # 审计失败不应该影响主业务
+        # Audit failure must not affect the caller's business transaction.
         logger.exception(
             "Audit write failed: event_type=%s user_id=%s event_id=%s error=%s",
             et,
@@ -101,10 +102,10 @@ async def write_audit(
                 }
             )
         except Exception:
-            # best-effort only
             logger.exception("Failed to append audit to in-memory fallback")
-        try:
-            await db.rollback()
-        except Exception:
-            pass
         return None
+
+    if commit:
+        await db.commit()
+
+    return log_id

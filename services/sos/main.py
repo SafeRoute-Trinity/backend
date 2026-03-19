@@ -48,9 +48,13 @@ service_config = ServiceAppConfig(
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
 
-# Get database session dependency
+# Get database session dependencies
 db_factory = get_database_factory()
 get_db = db_factory.get_session_dependency(DatabaseType.POSTGRES)
+# SERIALIZABLE isolation for the SOS trigger chain: the trusted-contact read
+# and the Emergency+Audit co-write must form a single consistent snapshot so
+# that no concurrent is_primary flip or Emergency insert can interleave.
+get_serializable_db = db_factory.get_serializable_session_dependency(DatabaseType.POSTGRES)
 
 # Create factory and build app
 factory = FastAPIServiceFactory(service_config)
@@ -161,25 +165,20 @@ async def root():
 
 
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
-async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
+async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serializable_db)):
+    # SERIALIZABLE isolation is already active on `db` (set by get_serializable_db).
+    # All reads in this handler are part of that snapshot; any concurrent
+    # is_primary flip or conflicting Emergency write will cause a serialization
+    # error at commit time rather than silently producing skewed data.
     now = datetime.utcnow()
     emergency_id = uuid.uuid4()
 
-    call_row = Emergency(
-        emergency_id=emergency_id,
-        user_id=body.user_id,
-        route_id=body.route_id,
-        lat=body.lat,
-        lon=body.lon,
-        trigger_type=body.trigger_type,
-        messaging_id=None,  # Messaging ID: Twilio SID
-        message=f"SOS {body.trigger_type}",
-    )
-    db.add(call_row)
+    # ---- (1) Dispatch to notification service OUTSIDE the DB write path ----
+    notification_failed = False
+    notification_error: Optional[httpx.HTTPError] = None
+    data: dict = {}
+    call_status = "failed"
 
-    await db.flush()
-
-    # call notification service (payload must match notification's EmergencyCallRequest schema)
     try:
         notification_payload = {
             "emergency_id": str(emergency_id),
@@ -194,61 +193,48 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
             )
             resp.raise_for_status()
             data = resp.json()
+            call_status = data.get("status", "failed")
     except httpx.HTTPError as e:
         logger.exception(
             "Notification service call failed for emergency_id=%s error=%s",
             emergency_id,
             repr(e),
         )
+        notification_failed = True
+        notification_error = e
 
-        call_row.updated_at = datetime.utcnow()
-
-        # Audit（failed）
-        db.add(
-            Audit(
-                log_id=uuid.uuid4(),
-                user_id=body.user_id,
-                event_type="emergency",
-                event_id=emergency_id,
-                message=(
-                    f"sos_call_failed emergency_id={emergency_id} "
-                    f"trigger_type={body.trigger_type} error={str(e)}"
-                ),
-                created_at=now,
-                updated_at=now,
-            )
+    # ---- (3) Write Emergency row + Audit row in a single atomic commit ----
+    # Both succeed or both fail — no orphaned Emergency without an audit trail
+    # and no audit row without a matching Emergency row.
+    if notification_failed:
+        audit_message = (
+            f"sos_call_failed emergency_id={emergency_id} "
+            f"trigger_type={body.trigger_type} error={str(notification_error)}"
         )
+        audit_user_id = body.user_id
+    else:
+        audit_message = f"sos_call_initiated emergency_id={emergency_id} status={call_status}"
+        audit_user_id = None
 
-        try:
-            await db.commit()
-        except Exception:
-            await db.rollback()
-
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to dispatch SOS call via notification service: {str(e)}",
+    db.add(
+        Emergency(
+            emergency_id=emergency_id,
+            user_id=body.user_id,
+            route_id=body.route_id,
+            lat=body.lat,
+            lon=body.lon,
+            trigger_type=body.trigger_type,
+            messaging_id=_uuid_or_none(data.get("call_id")),
+            message=f"SOS {body.trigger_type}",
         )
-
-    call_status = data.get("status", "failed")
-
-    # Persist the Twilio call SID back to the emergency record (only if valid UUID)
-    call_row.messaging_id = _uuid_or_none(data.get("call_id"))
-    call_row.updated_at = datetime.utcnow()
-
-    STATUS[emergency_id] = {
-        "emergency_id": emergency_id,
-        "call_status": call_status,
-        "sms_status": "not_sent",
-        "last_update": datetime.utcnow(),
-    }
-
+    )
     db.add(
         Audit(
             log_id=uuid.uuid4(),
-            user_id=None,
+            user_id=audit_user_id,
             event_type="emergency",
             event_id=emergency_id,
-            message=f"sos_call_initiated emergency_id={emergency_id} status={call_status}",
+            message=audit_message,
             created_at=now,
             updated_at=now,
         )
@@ -262,6 +248,22 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
             status_code=400,
             detail=f"Could not create emergency call record: {e}",
         )
+    except Exception:
+        await db.rollback()
+        raise
+
+    if notification_failed:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to dispatch SOS call via notification service: {str(notification_error)}",
+        )
+
+    STATUS[emergency_id] = {
+        "emergency_id": emergency_id,
+        "call_status": call_status,
+        "sms_status": "not_sent",
+        "last_update": datetime.utcnow(),
+    }
 
     SOS_CALLS_TOTAL.inc()
     data["emergency_id"] = emergency_id
@@ -319,9 +321,9 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     # Update status
     now = datetime.utcnow()
     s = STATUS.setdefault(
-        body.sos_id,
+        str(parsed_sos_id),
         {
-            "emergency_id": body.sos_id,
+            "emergency_id": parsed_sos_id,
             "call_status": "not_triggered",
             "sms_status": "not_sent",
             "last_update": now,
