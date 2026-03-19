@@ -302,7 +302,10 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     except httpx.HTTPError as e:
         logger.exception(
             "Notification service SMS call failed for sos_id=%s user_id=%s recipient=%s: %s",
-            body.sos_id, body.user_id, body.emergency_contact.phone, repr(e),
+            body.sos_id,
+            body.user_id,
+            body.emergency_contact.phone,
+            repr(e),
         )
 
         try:
@@ -356,7 +359,11 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     return EmergencySMSResponse(
         emergency_id=parsed_sos_id,
         status=data.get("status", "failed"),
-        sms_id=uuid.uuid4() if not _uuid_or_none(data.get("sms_id", "")) else _uuid_or_none(data.get("sms_id", "")),
+        sms_id=(
+            uuid.uuid4()
+            if not _uuid_or_none(data.get("sms_id", ""))
+            else _uuid_or_none(data.get("sms_id", ""))
+        ),
         timestamp=data.get("timestamp", datetime.utcnow().isoformat()),
         message_sent=data.get("message_sent", ""),
         recipient=data.get("recipient", body.emergency_contact.phone),
