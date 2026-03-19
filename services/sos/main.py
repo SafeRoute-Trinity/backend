@@ -13,7 +13,6 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Path
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +20,6 @@ from libs.audit_logger import write_audit
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from models.audit import Audit
 from models.emergency import Emergency
-from models.user_models import TrustedContact
 
 logger = logging.getLogger(__name__)
 
@@ -92,11 +90,11 @@ class Point(BaseModel):
 
 class EmergencyCallRequest(BaseModel):
     user_id: str
-    route_id: Optional[uuid.UUID]
+    route_id: Optional[uuid.UUID] = None
     lat: float
     lon: float
     trigger_type: Literal["manual", "automatic"]
-    message: Optional[str] = None
+    phone: str  # E.164 format, e.g. +353831234567
 
 
 class EmergencyCallResponse(BaseModel):
@@ -175,29 +173,19 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
         lon=body.lon,
         trigger_type=body.trigger_type,
         messaging_id=None,  # Messaging ID: Twilio SID
-        message=body.message,  # optional
+        message=f"SOS {body.trigger_type}",
     )
     db.add(call_row)
 
     await db.flush()
 
-    # Fetch trusted contact phone from DB (same schema as user-management service)
-    trusted_contact_stmt = (
-        select(TrustedContact)
-        .where(TrustedContact.user_id == str(body.user_id))
-        .order_by(TrustedContact.is_primary.desc().nulls_last())
-        .limit(1)
-    )
-    trusted_contact = (await db.execute(trusted_contact_stmt)).scalars().first()
-    trusted_phone = trusted_contact.phone if trusted_contact else ""
-
     # call notification service (payload must match notification's EmergencyCallRequest schema)
     try:
         notification_payload = {
             "emergency_id": str(emergency_id),
-            "phone_number": trusted_phone,
+            "phone_number": body.phone,
             "user_location": {"lat": body.lat, "lon": body.lon},
-            "call_reason": body.message or f"SOS {body.trigger_type}",
+            "call_reason": f"SOS {body.trigger_type}",
         }
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
@@ -206,7 +194,6 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
             )
             resp.raise_for_status()
             data = resp.json()
-            data["emergency_id"] = parsed_sos_id
     except httpx.HTTPError as e:
         logger.exception(
             "Notification service call failed for emergency_id=%s error=%s",
@@ -244,6 +231,8 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
 
     call_status = data.get("status", "failed")
 
+    # Persist the Twilio call SID back to the emergency record (only if valid UUID)
+    call_row.messaging_id = _uuid_or_none(data.get("call_id"))
     call_row.updated_at = datetime.utcnow()
 
     STATUS[emergency_id] = {
