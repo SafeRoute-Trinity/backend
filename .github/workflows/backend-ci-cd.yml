@@ -29,6 +29,22 @@ jobs:
             echo "No requirements file found" && exit 1
           fi
 
+      - name: Debug checkout state
+        run: |
+          echo "event=$GITHUB_EVENT_NAME"
+          echo "ref=$GITHUB_REF"
+          echo "sha=$GITHUB_SHA"
+          git rev-parse HEAD
+          git log --oneline -1
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("services/sos/main.py")
+          lines = path.read_text().splitlines()
+          for i in range(200, 212):
+              if i <= len(lines):
+                  print(f"{i}: {lines[i-1]}")
+          PY
+
       - name: Run Black (check only)
         run: black --check .
 
@@ -56,6 +72,22 @@ jobs:
           else
             echo "No requirements file found" && exit 1
           fi
+
+      - name: Debug checkout state
+        run: |
+          echo "event=$GITHUB_EVENT_NAME"
+          echo "ref=$GITHUB_REF"
+          echo "sha=$GITHUB_SHA"
+          git rev-parse HEAD
+          git log --oneline -1
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("services/sos/main.py")
+          lines = path.read_text().splitlines()
+          for i in range(200, 212):
+              if i <= len(lines):
+                  print(f"{i}: {lines[i-1]}")
+          PY
 
       - name: Run pytest with coverage
         run: pytest --cov=libs --cov=services --cov-report=term-missing --cov-report=html --cov-report=xml --cov-fail-under=80
