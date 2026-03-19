@@ -1,6 +1,7 @@
 # pytest services/user_management/tests/test_trusted_contacts.py -q
 # pytest services/user_management/tests/test_trusted_contacts.py -k test_list_trusted_contacts_success -q
 
+from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
@@ -209,8 +210,9 @@ def test_upsert_trusted_contact_create_success(client):
 
     # scalar() calls order inside endpoint:
     # (1) user exists -> user
-    # (2) contact lookup -> None  => create
-    fake_db = FakeDB(scalar_results=[make_user(uid), None])
+    # (2) contact lookup (with FOR UPDATE) -> None  => create
+    # (3) demote-primary check (is_primary=True) -> None  => no existing primary
+    fake_db = FakeDB(scalar_results=[make_user(uid), None, None])
     override_db(fake_db)
 
     payload = {
@@ -252,8 +254,9 @@ def test_upsert_trusted_contact_update_success(client):
 
     # scalar() order:
     # (1) user exists
-    # (2) contact exists -> update
-    fake_db = FakeDB(scalar_results=[make_user(uid), existing])
+    # (2) contact exists (with FOR UPDATE) -> update
+    # (3) demote-primary check (is_primary=True) -> None => no other primary to demote
+    fake_db = FakeDB(scalar_results=[make_user(uid), existing, None])
     override_db(fake_db)
 
     payload = {
@@ -298,8 +301,10 @@ def test_upsert_trusted_contact_user_not_found_404(client):
 def test_upsert_trusted_contact_integrity_error_400(client):
     uid = "test-user-contacts-004"
 
+    # scalar() order:
+    # (1) user exists, (2) contact not found -> create, (3) no existing primary
     fake_db = FakeDB(
-        scalar_results=[make_user(uid), None],  # user exists, contact not exists -> create
+        scalar_results=[make_user(uid), None, None],
         commit_raises=IntegrityError("stmt", "params", Exception("orig")),
     )
     override_db(fake_db)
@@ -315,3 +320,64 @@ def test_upsert_trusted_contact_integrity_error_400(client):
     assert res.status_code == 400, res.text
     assert res.json()["detail"] == "Could not upsert trusted contact"
     assert fake_db.rolled_back is True
+
+
+def test_upsert_trusted_contact_demotes_existing_primary(client):
+    """
+    When a new contact is created with is_primary=True, any previously-primary
+    contact for the same user must have its is_primary flag lowered to False.
+    """
+    uid = "test-user-contacts-005"
+    old_primary = make_contact(
+        contact_id=uuid.uuid4(),
+        user_id=uid,
+        name="OldPrimary",
+        phone="+353333333333",
+        relationship="friend",
+        is_primary=True,
+    )
+
+    # scalar() order:
+    # (1) user exists
+    # (2) contact lookup (new phone) -> None => create path
+    # (3) demote-primary check -> old_primary (should be demoted)
+    fake_db = FakeDB(scalar_results=[make_user(uid), None, old_primary])
+    override_db(fake_db)
+
+    payload = {
+        "name": "NewPrimary",
+        "phone": "+353444444444",
+        "relationship": "family",
+        "is_primary": True,
+    }
+
+    res = client.post(f"/v1/users/{uid}/trusted-contacts", json=payload)
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["contact"]["is_primary"] is True
+    # The previously-primary contact must have been demoted
+    assert old_primary.is_primary is False
+
+
+def test_upsert_trusted_contact_no_demote_when_not_primary(client):
+    """
+    When is_primary is False (or not set), the demote-primary check is skipped
+    entirely — no extra scalar() call is made.
+    """
+    uid = "test-user-contacts-006"
+
+    # Only 2 scalar() calls: user lookup + contact lookup (no demote check)
+    fake_db = FakeDB(scalar_results=[make_user(uid), None])
+    override_db(fake_db)
+
+    payload = {
+        "name": "SecondaryContact",
+        "phone": "+353555555555",
+        "relationship": "colleague",
+        "is_primary": False,
+    }
+
+    res = client.post(f"/v1/users/{uid}/trusted-contacts", json=payload)
+    assert res.status_code == 200, res.text
+    assert res.json()["contact"]["is_primary"] is False
+    assert fake_db.committed is True
