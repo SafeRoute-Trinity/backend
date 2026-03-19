@@ -1,6 +1,8 @@
 import uuid
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import services.feedback.main as feedback_main
@@ -78,6 +80,42 @@ class FakeFeedbackFactory:
             "route_id": route_id,
             **kwargs,
         }
+
+    async def get_feedbacks(
+        self,
+        db,
+        user_id=None,
+        status=None,
+        feedback_type=None,
+        skip=0,
+        limit=10,
+    ):
+        """Return (total_count, list of row-like objects) for list_feedback."""
+        items = list(self.fake_db.rows.values())
+        if user_id is not None:
+            items = [r for r in items if r.get("user_id") == user_id]
+        if status is not None:
+            status_val = status.value if hasattr(status, "value") else status
+            items = [r for r in items if r.get("status") == status_val]
+        if feedback_type is not None:
+            type_val = feedback_type.value if hasattr(feedback_type, "value") else feedback_type
+            items = [r for r in items if r.get("feedback_type") == type_val]
+        items = sorted(items, key=lambda r: r.get("created_at") or "", reverse=True)
+        total = len(items)
+        page = items[skip : skip + limit]
+        rows = [
+            SimpleNamespace(
+                feedback_id=v["feedback_id"],
+                ticket_number=v["ticket_number"],
+                status=v["status"],
+                type=v.get("feedback_type"),
+                severity=v.get("severity"),
+                created_at=v["created_at"],
+                updated_at=v["updated_at"],
+            )
+            for v in page
+        ]
+        return total, rows
 
 
 @pytest.fixture(autouse=True)
@@ -288,3 +326,210 @@ def test_metrics_endpoint():
     response = client.get("/metrics")
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
+
+
+# ---------- Coverage: submit branches (main.py submit) ----------
+# - test_submit_feedback_empty_user_id_400: submit() ~404-405 (user_id required -> 400)
+# - test_submit_feedback_auth0_prefix_ok: submit() ~408-411 (auth0| / auth0_ prefix stripping)
+# - test_submit_feedback_db_failure_500: submit() ~467-470 (create_feedback/commit exception -> 500)
+
+
+def test_submit_feedback_empty_user_id_400():
+    """Empty user_id is rejected with 400 (handler check after Pydantic)."""
+    r = client.post(
+        "/v1/feedback/submit",
+        json={
+            "user_id": "",
+            "type": "safety_issue",
+            "description": "Test",
+            "severity": "low",
+        },
+    )
+    assert r.status_code == 400
+    assert "user_id" in (r.json().get("detail") or "").lower()
+
+
+def test_submit_feedback_auth0_prefix_ok():
+    """Auth0-style user_id (auth0|id and auth0_id) is accepted and stripped."""
+    for user_id in ["auth0|usr123", "auth0_usr456"]:
+        r = client.post(
+            "/v1/feedback/submit",
+            json={
+                "user_id": user_id,
+                "type": "safety_issue",
+                "description": "Auth0 user",
+                "severity": "low",
+            },
+        )
+        assert r.status_code == 200
+        assert r.json().get("ticket_number", "").startswith("TKT-")
+
+
+def test_submit_feedback_db_failure_500(monkeypatch):
+    """DB/create_feedback failure returns 500 and rolls back."""
+
+    class FailingFactory:
+        async def create_feedback(self, *args, **kwargs):
+            raise RuntimeError("db connection failed")
+
+    monkeypatch.setattr(feedback_main, "get_feedback_factory", lambda: FailingFactory())
+    r = client.post(
+        "/v1/feedback/submit",
+        json={
+            "user_id": str(uuid.uuid4()),
+            "type": "safety_issue",
+            "description": "Test",
+            "severity": "low",
+        },
+    )
+    assert r.status_code == 500
+    assert "Failed to submit feedback" in (r.json().get("detail") or "")
+
+
+# ---------- Coverage: list_feedback (main.py list_feedback) ----------
+
+
+def test_list_feedback_success():
+    """GET /v1/feedback returns paginated list and uses get_feedbacks."""
+    r = client.get("/v1/feedback?page=1&page_size=10")
+    assert r.status_code == 200
+    data = r.json()
+    assert "data" in data
+    assert "pagination" in data
+    assert "filters" in data
+    assert data["pagination"]["page"] == 1
+    assert data["pagination"]["page_size"] == 10
+    assert data["pagination"]["total"] >= 0
+    assert data["pagination"]["total_pages"] >= 0
+
+
+def test_list_feedback_invalid_page_422():
+    """page < 1 yields 422 (Query validation)."""
+    r = client.get("/v1/feedback?page=0&page_size=10")
+    assert r.status_code == 422
+
+
+# ---------- Coverage: validate exception fallback (main.py validate ~602-612) ----------
+
+
+def test_validate_feedback_spam_validator_exception_fallback(monkeypatch):
+    """When spam validator raises, fallback to frequency check (recent_submissions_count > 10)."""
+
+    class FailingValidator:
+        async def validate(self, **kwargs):
+            raise RuntimeError("spam service unavailable")
+
+    class FailingValidatorFactory:
+        def get_validator(self):
+            return FailingValidator()
+
+    monkeypatch.setattr(
+        feedback_main,
+        "get_spam_validator_factory",
+        lambda: FailingValidatorFactory(),
+    )
+    r = client.post(
+        "/v1/feedback/validate",
+        json={
+            "user_id": "usr1",
+            "content": "some content",
+            "recent_submissions_count": 15,
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data["allow_submission"] is False
+    assert data["is_spam"] is True
+    assert "high_frequency" in data["flags"]
+    assert "Too many" in data["reason"]
+
+
+# ---------- Coverage: system-feedback (main.py submit_system_feedback, verify_recaptcha, send_system_feedback_email) ----------
+
+
+def test_system_feedback_privacy_not_accepted_400():
+    """Privacy must be accepted for system feedback."""
+    r = client.post(
+        "/v1/system-feedback/submit",
+        json={
+            "user_id": "u",
+            "content": "Feedback text",
+            "privacy_accepted": False,
+            "captcha_token": "token",
+        },
+    )
+    assert r.status_code == 400
+    assert "privacy" in (r.json().get("detail") or "").lower()
+
+
+def test_system_feedback_success(monkeypatch):
+    """System feedback success when captcha and email are mocked."""
+
+    async def fake_verify(*args, **kwargs):
+        return {"success": True}
+
+    def fake_send_email(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(feedback_main, "verify_recaptcha", fake_verify)
+    monkeypatch.setattr(feedback_main, "send_system_feedback_email", fake_send_email)
+    r = client.post(
+        "/v1/system-feedback/submit",
+        json={
+            "user_id": "u",
+            "content": "Great app",
+            "privacy_accepted": True,
+            "captcha_token": "bypass",
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert data.get("status") == "received"
+    assert "success" in (data.get("message") or "").lower()
+
+
+def test_system_feedback_captcha_failure_400(monkeypatch):
+    """Captcha verification failure returns 400."""
+
+    async def fake_verify_fail(*args, **kwargs):
+        raise HTTPException(status_code=400, detail="Captcha verification failed")
+
+    monkeypatch.setattr(feedback_main, "verify_recaptcha", fake_verify_fail)
+    r = client.post(
+        "/v1/system-feedback/submit",
+        json={
+            "user_id": "u",
+            "content": "Feedback",
+            "privacy_accepted": True,
+            "captcha_token": "bad",
+        },
+    )
+    assert r.status_code == 400
+    assert "captcha" in (r.json().get("detail") or "").lower()
+
+
+def test_system_feedback_email_failure_500(monkeypatch):
+    """Email send failure returns 500."""
+
+    async def fake_verify_ok(*args, **kwargs):
+        return {"success": True}
+
+    def fake_send_email_fail(*args, **kwargs):
+        raise RuntimeError("SMTP unavailable")
+
+    monkeypatch.setattr(feedback_main, "verify_recaptcha", fake_verify_ok)
+    monkeypatch.setattr(feedback_main, "send_system_feedback_email", fake_send_email_fail)
+    r = client.post(
+        "/v1/system-feedback/submit",
+        json={
+            "user_id": "u",
+            "content": "Feedback",
+            "privacy_accepted": True,
+            "captcha_token": "t",
+        },
+    )
+    assert r.status_code == 500
+    assert (
+        "email" in (r.json().get("detail") or "").lower()
+        or "feedback" in (r.json().get("detail") or "").lower()
+    )
