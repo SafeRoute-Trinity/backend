@@ -37,9 +37,7 @@ class AzureJsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         payload: Dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(
-                record.created, tz=timezone.utc
-            ).isoformat(),
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "service": self.service_name,
             "level": record.levelname,
             "trace_id": trace_id_var.get(""),
@@ -50,9 +48,7 @@ class AzureJsonFormatter(logging.Formatter):
         }
 
         if record.exc_info and record.exc_info[1]:
-            payload["exception"] = "".join(
-                traceback.format_exception(*record.exc_info)
-            )
+            payload["exception"] = "".join(traceback.format_exception(*record.exc_info))
 
         return json.dumps(payload, default=str)
 
