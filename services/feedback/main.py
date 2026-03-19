@@ -28,6 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
+from libs.auth.auth0_verify import verify_token
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
@@ -267,19 +268,18 @@ def send_system_feedback_email(
     if not SMTP_USERNAME or not SMTP_PASSWORD:
         raise RuntimeError("SMTP credentials are not configured")
 
-    mail_subject = f"[SafeRoute][System Feedback] {subject or 'New feedback'}"
+    mail_subject = f"[SafeRoute][System Feedback] {subject or 'New App Feedback'}"
 
     body = f"""
 New system feedback received
 
-User ID: {user_id or ""}
-User Email: {user_email or ""}
-Subject: {subject or ""}
-Page URL: {page_url or ""}
-User Agent: {user_agent or ""}
-
 Content:
 {content}
+
+User ID: {user_id or ""}
+User Email: {user_email or ""}
+User Agent: {user_agent or ""}
+
 """.strip()
 
     msg = MIMEText(body, "plain", "utf-8")
@@ -706,6 +706,21 @@ async def status(feedback_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Request):
     SYSTEM_FEEDBACK_SUBMISSIONS_TOTAL.inc()
 
+    # Try to extract user identity from JWT token if present
+    user_id = body.user_id
+    user_email = body.email
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        try:
+            token = auth_header.split(" ", 1)[1]
+            payload = verify_token(
+                type("Creds", (), {"credentials": token})()
+            )
+            user_id = payload.get("sub", user_id)
+            user_email = payload.get("email", user_email)
+        except Exception:
+            logger.debug("Could not decode JWT for system feedback, using body fields")
+
     if not body.privacy_accepted:
         raise HTTPException(status_code=400, detail="Privacy policy must be accepted")
 
@@ -716,8 +731,8 @@ async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Req
 
     try:
         send_system_feedback_email(
-            user_id=body.user_id,
-            user_email=body.email,
+            user_id=user_id,
+            user_email=user_email,
             subject=body.subject,
             content=body.content,
             page_url=body.page_url,
