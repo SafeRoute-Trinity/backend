@@ -9,15 +9,12 @@ Environment variables (with safe defaults for local dev):
     API_AUDIENCE: API audience identifier (e.g., https://api.saferoute.dev)
 """
 
-import json
 import os
 
-import certifi
 import jwt
-import requests
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer
-from jwt.algorithms import RSAAlgorithm
+from jwt import PyJWKClient
 
 from common.constants import ALGORITHMS, API_AUDIENCE, ISSUER, JWKS_URL
 
@@ -59,26 +56,13 @@ def verify_token(
     """
     token = credentials.credentials
     try:
-        # Fetch JWKS with trusted CA bundle
-        resp = requests.get(JWKS_URL, timeout=5, verify=certifi.where())
-        resp.raise_for_status()
-        jwks = resp.json()
-
-        # Match JWK by kid from token header
-        header = jwt.get_unverified_header(token)
-        kid = header.get("kid")
-        if not kid:
-            raise ValueError("Missing 'kid' in token header")
-        key_dict = next((k for k in jwks["keys"] if k.get("kid") == kid), None)
-        if not key_dict:
-            raise ValueError("No matching JWK for token 'kid'")
-
-        # Build public key and decode token
-        public_key = RSAAlgorithm.from_jwk(json.dumps(key_dict))
+        # Use PyJWKClient to fetch JWKS and get the signing key (no RSAAlgorithm needed)
+        jwks_client = PyJWKClient(JWKS_URL, timeout=10)
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
         print("[Auth0] Attempting to decode token...")
         payload = jwt.decode(
             token,
-            public_key,
+            signing_key.key,
             algorithms=ALGORITHMS,
             audience=API_AUDIENCE,
             issuer=ISSUER,
@@ -86,18 +70,6 @@ def verify_token(
         print(f"[Auth0] Token verified successfully for user: {payload.get('sub')}")
         return payload
 
-    except requests.exceptions.SSLError as e:
-        print(f"[Auth0] Token verification failed (SSL error fetching JWKS): {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"SSL error fetching JWKS: {e}",
-        ) from e
-    except requests.RequestException as e:
-        print(f"[Auth0] Token verification failed (HTTP error fetching JWKS): {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"HTTP error fetching JWKS: {e}",
-        ) from e
     except jwt.ExpiredSignatureError as e:
         print(f"[Auth0] Token expired: {e}")
         raise HTTPException(

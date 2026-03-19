@@ -8,7 +8,7 @@ from typing import Literal, Optional
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
 
 # Add parent directory to path for imports
@@ -20,6 +20,27 @@ if backend_env_path.exists():
     load_dotenv(backend_env_path)
 
 app = FastAPI(title="GraphHopper Proxy Service", description="GraphHopper CH route proxy.")
+
+from libs.rate_limiter import RateLimiter, default_rate_limit_config
+
+_rate_limiter = RateLimiter(default_rate_limit_config(), "graphhopper_proxy")
+
+
+@app.middleware("http")
+async def _rate_limit_middleware(request: Request, call_next):
+    rejection = await _rate_limiter.check(request)
+    if rejection is not None:
+        return rejection
+    response = await call_next(request)
+    for k, v in getattr(request.state, "rate_limit_headers", {}).items():
+        response.headers[k] = v
+    return response
+
+
+@app.on_event("shutdown")
+async def _close_rate_limiter():
+    await _rate_limiter.close()
+
 
 GRAPHHOPPER_BASE_URL = os.getenv("GRAPHHOPPER_BASE_URL", "http://127.0.0.1:8989")
 GRAPHHOPPER_ROUTE_PATH = os.getenv("GRAPHHOPPER_ROUTE_PATH", "/route")

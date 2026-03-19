@@ -40,6 +40,20 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_DB = int(os.getenv("REDIS_DB", "0"))
 # Note: REDIS_PASSWORD should be read from env in redis_client, not here (security)
 
+# ========= Rate Limiting Configuration =========
+# All values can be overridden via environment variables.
+
+# Default global rate limit applied to every endpoint (requests per window)
+RATE_LIMIT_DEFAULT_LIMIT = int(os.getenv("RATE_LIMIT_DEFAULT_LIMIT", "100"))
+
+# Default window size in seconds for the global limit
+RATE_LIMIT_DEFAULT_WINDOW = int(os.getenv("RATE_LIMIT_DEFAULT_WINDOW", "60"))
+
+# Stricter limit for authentication endpoints (login, register) to prevent
+# brute-force and credential-stuffing attacks
+RATE_LIMIT_AUTH_LIMIT = int(os.getenv("RATE_LIMIT_AUTH_LIMIT", "10"))
+RATE_LIMIT_AUTH_WINDOW = int(os.getenv("RATE_LIMIT_AUTH_WINDOW", "60"))
+
 # ========= Token Blacklist Configuration =========
 # Blacklist key prefix for revoked tokens
 BLACKLIST_KEY_PREFIX = "auth:revoked:"

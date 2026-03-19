@@ -25,7 +25,7 @@ class Emergency(Base):
     )
 
     user_id = Column(
-        UUID(as_uuid=True),
+        String(255),
         ForeignKey("saferoute.users.user_id"),
         nullable=False,
         index=True,

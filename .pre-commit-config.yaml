@@ -1,26 +1,29 @@
 repos:
   - repo: https://github.com/psf/black
-    rev: 24.8.0
+    rev: 26.3.1
     hooks:
       - id: black
+        language_version: python3.11
         pass_filenames: false
         always_run: true
         args: ["."]
         stages: [pre-commit]
 
   - repo: https://github.com/charliermarsh/ruff-pre-commit
-    rev: v0.6.3
+    rev: v0.15.6
     hooks:
       - id: ruff
+        language_version: python3.11
         pass_filenames: false
         always_run: true
         args: ["--fix"]
         stages: [pre-commit] 
 
   - repo: https://github.com/PyCQA/isort
-    rev: 5.13.2
+    rev: 8.0.1
     hooks:
       - id: isort
+        language_version: python3.11
         stages: [pre-commit]
         args: ["--profile", "black"] 
 

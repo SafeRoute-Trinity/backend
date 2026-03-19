@@ -9,6 +9,7 @@ Provides endpoints for user registration, authentication, preferences,
 and trusted contact management.
 """
 
+import hashlib
 import os
 import sys
 import time
@@ -16,6 +17,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
+import httpx
 from fastapi import Depends, HTTPException, Query, Request, Response, status
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -25,7 +27,7 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import desc, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from models.audit import Audit
@@ -41,7 +43,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-from models.user_models import TrustedContact, User, UserPreferences
+from models.user_models import Contact, TrustedContact, User, UserPreferences
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -91,18 +93,28 @@ def extract_user_id_from_auth(auth: dict) -> str:
     """
     Extract user_id from Auth0 authentication token.
 
-    Auth0 'sub' claim format can be:
-    - "auth0|user_id" (with provider prefix)
-    - "user_id" (without prefix)
+    Strips the provider prefix (e.g. "auth0|") so the DB stores
+    only the raw user ID (e.g. "6979e8045f101df3ab8cff1c").
 
     Args:
         auth: Authentication dictionary containing JWT claims
 
     Returns:
-        Extracted user_id string
+        Stripped user_id string for DB storage/lookup
     """
-    auth_sub = auth.get("sub")
-    return auth_sub.split("|")[-1] if auth_sub and "|" in auth_sub else auth_sub
+    auth_sub = auth.get("sub", "")
+    return auth_sub.split("|", 1)[-1] if "|" in auth_sub else auth_sub
+
+
+def _user_advisory_lock_key(user_id: str) -> int:
+    """
+    Deterministic 63-bit lock key for a user_id.
+
+    Using a fixed numeric literal avoids bound-parameter differences across
+    asyncpg/SQLAlchemy and our unit-test DB fakes.
+    """
+    digest = hashlib.sha256(user_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
 
 
 # ========= Metrics =========
@@ -182,6 +194,56 @@ class AuditLogResponse(BaseModel):
     event_id: Optional[uuid.UUID] = None
     message: str
     created_at: datetime
+    updated_at: datetime
+
+
+# ======== Contact Models ===========================
+class ContactItem(BaseModel):
+    name: str
+    phone: str
+    relationship: Optional[str] = None
+    is_primary: Optional[bool] = False
+
+
+class ContactsSetRequest(BaseModel):
+    contacts: List[ContactItem]
+
+
+class ContactDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    contact_id: uuid.UUID
+    user_id: str
+    name: str
+    phone: str
+    relationship: Optional[str] = None
+    is_primary: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ContactsSetResponse(BaseModel):
+    user_id: str
+    status: Literal["contacts_set"]
+    contacts: List[ContactDTO]
+    updated_at: datetime
+
+
+class TrustedContactDTO(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    contact_id: uuid.UUID
+    user_id: str
+    name: str
+    phone: str
+    relationship: Optional[str] = None
+    is_primary: Optional[bool] = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TrustedContactsSetResponse(BaseModel):
+    user_id: str
+    status: Literal["trusted_contacts_set"]
+    contacts: List[TrustedContactDTO]
     updated_at: datetime
 
 
@@ -296,6 +358,8 @@ class PreferencesResponse(BaseModel):
 class TrustedContactUpsertRequest(BaseModel):
     """Request model for creating/updating trusted contacts."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     phone: str
     relationship: Optional[str] = None
@@ -311,7 +375,7 @@ class TrustedContactDTO(BaseModel):
     user_id: str
     name: str
     phone: str
-    relationship: Optional[str] = Field(default=None, alias="relation")
+    relationship: Optional[str] = None
     is_primary: bool
     created_at: datetime
     updated_at: datetime
@@ -327,6 +391,14 @@ class TrustedContactUpsertResponse(BaseModel):
 class TrustedContactsListResponse(BaseModel):
     user_id: str
     contacts: List[TrustedContactDTO]
+
+
+class TrustedContactsListPaginatedResponse(BaseModel):
+    """Paginated list of trusted contacts for a user."""
+
+    user_id: str
+    data: List[TrustedContactDTO]
+    pagination: PaginationMeta
 
 
 # ========= User Management Endpoints =========
@@ -417,6 +489,114 @@ async def list_users(
             total=total,
             total_pages=_total_pages(total, page_size),
         ),
+    )
+
+
+@app.get(
+    "/v1/users/me",
+    response_model=UserResponse,
+    tags=["User Management"],
+    summary="Get current user information (protected)",
+)
+async def get_current_user(
+    request: Request,
+    auth: dict = Depends(verify_token),
+    db=Depends(get_db),
+):
+    """
+    Get current user information (protected endpoint example).
+
+    This endpoint demonstrates how to use verify_token for stateless auth:
+    - Requires valid JWT token
+    - Validates token against Auth0 JWKS
+
+    Mobile app must send:
+    - Authorization: Bearer <access_token>
+
+    Args:
+        auth: Enhanced auth object from verify_token dependency
+            Contains JWT claims
+        db: Database session dependency
+
+    Returns:
+        UserResponse with user information
+
+    Raises:
+        HTTPException: 401 if JWT is invalid
+        HTTPException: 404 if user not found in database
+    """
+    # Extract user_id — full sub claim (e.g. "auth0|6979e8...")
+    user_id = extract_user_id_from_auth(auth)
+
+    print(f"[UserMgmt] get_current_user called for: {user_id}")
+
+    # Query PostgreSQL database for user
+    result = await db.execute(select(User).where(User.user_id == user_id))
+    user = result.scalar_one_or_none()
+
+    # Auto-create user on first login — fetch profile from Auth0 /userinfo
+    if not user:
+        print(f"[UserMgmt] User {user_id} not found, auto-creating from Auth0 /userinfo")
+
+        # Fetch profile from Auth0 /userinfo using the bearer token
+        profile = {}
+        auth0_domain = os.getenv("AUTH0_DOMAIN", "saferouteapp.eu.auth0.com")
+        try:
+            token = request.headers.get("Authorization", "").replace("Bearer ", "")
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(
+                    f"https://{auth0_domain}/userinfo",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if resp.status_code == 200:
+                    profile = resp.json()
+                    print("something here")
+                    print(f"[UserMgmt] Got Auth0 profile: email={profile.get('email')}")
+                else:
+                    print(f"[UserMgmt] /userinfo returned {resp.status_code}")
+        except Exception as e:
+            print(f"[UserMgmt] Failed to fetch /userinfo: {e}")
+
+        now = datetime.utcnow()
+        user = User(
+            user_id=user_id,
+            email=profile.get("email") or f"{user_id}@unknown",
+            name=profile.get("name") or profile.get("nickname") or None,
+            phone=profile.get("phone")
+            or auth.get("https://saferouteapp.eu.auth0.com/phone")
+            or None,
+            created_at=now,
+            updated_at=now,
+            last_login=now,
+        )
+        db.add(user)
+        try:
+            await db.commit()
+            await db.refresh(user)
+            USER_REGISTRATION_TOTAL.inc()
+            print(f"[UserMgmt] Auto-created user {user_id}")
+        except Exception as e:
+            await db.rollback()
+            print(f"[UserMgmt] Failed to auto-create user {user_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create user: {e}",
+            )
+
+    # Update last_login
+    user.last_login = datetime.utcnow()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+
+    return UserResponse(
+        user_id=user.user_id,
+        name=user.name,
+        email=user.email,
+        phone=user.phone,
+        created_at=user.created_at,
+        last_login=user.last_login,
     )
 
 
@@ -516,19 +696,24 @@ async def sync_auth0_user(
     if not expected_secret or secret != expected_secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
 
+    # Strip auth0| prefix for DB storage
+    raw_user_id = payload.user_id.split("|", 1)[-1] if "|" in payload.user_id else payload.user_id
+
     # Upsert: create if new, update if exists
-    result = await db.execute(select(User).where(User.user_id == payload.user_id))
+    result = await db.execute(select(User).where(User.user_id == raw_user_id))
     user = result.scalar_one_or_none()
 
     now = datetime.utcnow()
+    is_update = user is not None
     if user:
         user.email = payload.email
         user.name = payload.name
+        user.phone = payload.phone
         user.last_login = now
         user.updated_at = now
     else:
         user = User(
-            user_id=payload.user_id,
+            user_id=raw_user_id,
             email=payload.email,
             name=payload.name,
             phone=payload.phone,
@@ -539,9 +724,9 @@ async def sync_auth0_user(
     # Audit log
     audit = Audit(
         log_id=uuid.uuid4(),
-        user_id=payload.user_id,
+        user_id=raw_user_id,
         event_type="authentication",
-        message=f"Auth0 sync ({'update' if user else 'create'})",
+        message=f"Auth0 sync ({'update' if is_update else 'create'})",
         created_at=now,
         updated_at=now,
     )
@@ -559,7 +744,7 @@ async def sync_auth0_user(
     # Business metric
     USER_REGISTRATION_TOTAL.inc()
 
-    return {"status": "synced", "user_id": payload.user_id}
+    return {"status": "synced", "user_id": raw_user_id}
 
 
 @app.get(
@@ -690,51 +875,161 @@ async def save_preferences(
 
 @app.get(
     "/v1/users/{user_id}/trusted-contacts",
-    response_model=TrustedContactsListResponse,
+    response_model=TrustedContactsListPaginatedResponse,
     tags=["User Management"],
-    summary="List trusted contacts (paginated, filterable)",
+    summary="List trusted contacts (paginated)",
 )
 async def list_trusted_contacts(
     user_id: str,
     page: int = Query(1, ge=1, description="Page number (1-based)"),
-    page_size: int = Query(20, ge=1, le=100, description="Items per page"),
-    is_primary: Optional[bool] = Query(None, description="Filter by primary contact (true/false)"),
-    search: Optional[str] = Query(None, description="Filter by name (case-insensitive contains)"),
+    page_size: int = Query(20, ge=1, le=200, description="Items per page"),
     db=Depends(get_db),
 ):
     """
-    List trusted contacts for a user from PostgreSQL (saferoute.contacts).
-    Supports pagination and optional filters (is_primary, name search).
+    List trusted contacts for a user with pagination.
+    Use GET when you need to read the current list (e.g. for display or before editing).
     """
-
-    # ---- (1) Ensure user exists ----
+    # Ensure user exists
     user = await db.scalar(select(User).where(User.user_id == user_id))
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-
-    # ---- (2) Query contacts ----
+    # Total count
+    count_stmt = (
+        select(func.count()).select_from(TrustedContact).where(TrustedContact.user_id == user_id)
+    )
+    total = (await db.execute(count_stmt)).scalar_one()
+    # Paginated query (primary first, then by created_at)
     offset = (page - 1) * page_size
     stmt = (
         select(TrustedContact)
         .where(TrustedContact.user_id == user_id)
         .order_by(
-            desc(TrustedContact.is_primary),
+            TrustedContact.is_primary.desc().nulls_last(),
             TrustedContact.created_at.asc(),
         )
         .offset(offset)
         .limit(page_size)
     )
-    contacts = (await db.scalars(stmt)).all()
-
-    # ---- (3) ORM → DTO ----
-    items = [TrustedContactDTO.model_validate(c) for c in contacts]
-
-    return TrustedContactsListResponse(
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    return TrustedContactsListPaginatedResponse(
         user_id=user_id,
-        contacts=items,
+        data=[TrustedContactDTO.model_validate(r) for r in rows],
+        pagination=PaginationMeta(
+            page=page,
+            page_size=page_size,
+            total=total,
+            total_pages=_total_pages(total, page_size),
+        ),
+    )
+
+
+@app.put(
+    "/v1/users/{user_id}/trusted-contacts",
+    response_model=TrustedContactsSetResponse,
+    tags=["User Management"],
+)
+async def set_trusted_contacts(
+    user_id: str,
+    body: ContactsSetRequest,
+    db=Depends(get_db),
+):
+    """
+    Replace the entire trusted contacts list for the user.
+    Deletes all existing trusted contacts and inserts the given list.
+    Use when the client has the full list (e.g. after editing all contacts at once).
+    For adding or updating a single contact, use POST instead.
+    """
+    now = datetime.utcnow()
+
+    # Serialize all trusted-contact primary updates for this user.
+    # This prevents cross-request write skew (e.g., two concurrent promotions).
+    await db.execute(text(f"SELECT pg_advisory_xact_lock({_user_advisory_lock_key(user_id)})"))
+
+    if sum(1 for c in body.contacts if c.is_primary) > 1:
+        raise HTTPException(status_code=400, detail="Only one trusted contact can be primary")
+
+    # 1) delete old
+    await db.execute(delete(TrustedContact).where(TrustedContact.user_id == user_id))
+
+    # 2) insert new
+    rows = [
+        TrustedContact(
+            contact_id=uuid.uuid4(),  #
+            user_id=user_id,
+            name=c.name,
+            phone=c.phone,
+            relationship=c.relationship,
+            is_primary=c.is_primary,  #
+            created_at=now,  #
+            updated_at=now,  #
+        )
+        for c in body.contacts
+    ]
+    db.add_all(rows)
+    await db.flush()
+
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail=f"Could not set trusted contacts: {e}")
+
+    return TrustedContactsSetResponse(
+        user_id=user_id,
+        status="trusted_contacts_set",
+        contacts=[TrustedContactDTO.model_validate(r) for r in rows],
+        updated_at=now,
+    )
+
+
+@app.put(
+    "/v1/users/{user_id}/contacts",
+    response_model=ContactsSetResponse,
+    tags=["User Management"],
+)
+async def set_contacts(
+    user_id: str,
+    body: ContactsSetRequest,
+    db=Depends(get_db),
+):
+    now = datetime.utcnow()
+
+    # 可选：最多一个 primary
+    if sum(1 for c in body.contacts if c.is_primary) > 1:
+        raise HTTPException(status_code=400, detail="Only one contact can be primary")
+
+    # 1) delete old
+    await db.execute(delete(Contact).where(Contact.user_id == user_id))
+
+    # 2) insert new (contacts 表：contact_id/created_at/updated_at 都有默认，可不手动填)
+    rows = [
+        Contact(
+            user_id=user_id,
+            name=c.name,
+            phone=c.phone,
+            relationship=c.relationship,
+            is_primary=bool(c.is_primary),
+        )
+        for c in body.contacts
+    ]
+    db.add_all(rows)
+    await db.flush()
+
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=400, detail="Could not set contacts")
+
+    return ContactsSetResponse(
+        user_id=user_id,
+        status="contacts_set",
+        contacts=[ContactDTO.model_validate(r) for r in rows],
+        updated_at=now,
     )
 
 
@@ -767,10 +1062,16 @@ async def upsert_trusted_contact(
     db=Depends(get_db),
 ):
     """
-    If a contact with same (user_id + phone) exists -> update.
-    Otherwise -> create new contact with new UUID.
+    Add or update a single trusted contact (upsert by phone).
+    If a contact with the same (user_id + phone) exists -> update it.
+    Otherwise -> create a new contact.
+    Use for adding one contact or editing one by phone; use PUT to replace the whole list.
     """
     now = datetime.utcnow()
+
+    # Serialize all trusted-contact primary updates for this user.
+    # We use a transaction-level advisory lock (no schema changes required).
+    await db.execute(text(f"SELECT pg_advisory_xact_lock({_user_advisory_lock_key(user_id)})"))
 
     # ---- (1) Ensure user exists ----
     user = await db.scalar(select(User).where(User.user_id == user_id))
@@ -780,18 +1081,22 @@ async def upsert_trusted_contact(
             detail="User not found",
         )
 
-    # ---- (2) Try find existing contact (by phone) ----
+    # ---- (2) Try find existing contact (by phone), acquiring a row lock ----
+    # FOR UPDATE prevents a concurrent upsert on the same (user_id, phone) from
+    # racing between the read and the subsequent write below.
     contact = await db.scalar(
-        select(TrustedContact).where(
+        select(TrustedContact)
+        .where(
             TrustedContact.user_id == user_id,
             TrustedContact.phone == body.phone,
         )
+        .with_for_update()
     )
 
     # ---- (3) Update if exists ----
     if contact:
         contact.name = body.name
-        contact.relation = body.relationship
+        contact.relationship = body.relationship
         if body.is_primary is not None:
             contact.is_primary = body.is_primary
         contact.updated_at = now
@@ -803,13 +1108,30 @@ async def upsert_trusted_contact(
             user_id=user_id,
             name=body.name,
             phone=body.phone,
-            relation=body.relationship,
+            relationship=body.relationship,
             is_primary=body.is_primary if body.is_primary is not None else False,
             created_at=now,
             updated_at=now,
         )
         db.add(contact)
         await db.flush()
+
+    # ---- (4.5) Demote any other primary when this contact becomes primary ----
+    # Lock the competing row with FOR UPDATE so a concurrent request cannot
+    # simultaneously promote a different contact, leaving two primaries.
+    if body.is_primary:
+        existing_primary = await db.scalar(
+            select(TrustedContact)
+            .where(
+                TrustedContact.user_id == user_id,
+                TrustedContact.is_primary == True,  # noqa: E712
+                TrustedContact.contact_id != contact.contact_id,
+            )
+            .with_for_update()
+        )
+        if existing_primary:
+            existing_primary.is_primary = False
+            existing_primary.updated_at = now
 
     # ---- (5) Audit ----
     audit = Audit(
@@ -949,60 +1271,3 @@ async def metrics_endpoint():
     Prometheus will scrape this endpoint inside the cluster.
     """
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
-
-
-@app.get(
-    "/v1/users/me",
-    response_model=UserResponse,
-    tags=["User Management"],
-    summary="Get current user information (protected)",
-)
-async def get_current_user(
-    auth: dict = Depends(verify_token),
-    db=Depends(get_db),
-):
-    """
-    Get current user information (protected endpoint example).
-
-    This endpoint demonstrates how to use verify_token for stateless auth:
-    - Requires valid JWT token
-    - Validates token against Auth0 JWKS
-
-    Mobile app must send:
-    - Authorization: Bearer <access_token>
-
-    Args:
-        auth: Enhanced auth object from verify_token dependency
-            Contains JWT claims
-        db: Database session dependency
-
-    Returns:
-        UserResponse with user information
-
-    Raises:
-        HTTPException: 401 if JWT is invalid
-        HTTPException: 404 if user not found in database
-    """
-    # Extract user_id from sub (format: "auth0|user_id" or just "user_id")
-    user_id = extract_user_id_from_auth(auth)
-
-    print(f"[UserMgmt] get_current_user called for: {user_id}")
-
-    # Query PostgreSQL database for user
-    result = await db.execute(select(User).where(User.user_id == user_id))
-    user = result.scalar_one_or_none()
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User {user_id} not found in database",
-        )
-
-    return UserResponse(
-        user_id=user.user_id,
-        name=user.name,
-        email=user.email,
-        phone=user.phone,
-        created_at=user.created_at,
-        last_login=user.last_login,
-    )

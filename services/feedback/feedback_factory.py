@@ -58,7 +58,7 @@ class FeedbackFactory:
         feedback_id: uuid.UUID,
         user_id: str,
         ticket_number: str,
-        route_id: Optional[str] = None,
+        route_id: Optional[uuid.UUID] = None,
         lat: Optional[float] = None,
         lon: Optional[float] = None,
         type: Optional[FeedbackType] = None,
@@ -77,7 +77,7 @@ class FeedbackFactory:
             feedback_id: UUID for the feedback
             user_id: User ID string (VARCHAR)
             ticket_number: Unique ticket number string for the feedback
-            route_id: Optional route ID string
+            route_id: Optional route ID UUID
             lat: Optional latitude coordinate
             lon: Optional longitude coordinate
             type: Optional feedback type enum

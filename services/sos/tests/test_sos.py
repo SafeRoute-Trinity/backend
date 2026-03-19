@@ -1,5 +1,3 @@
-# pytest services/sos/tests/test_sos.py -v
-
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -11,11 +9,25 @@ import services.sos.main as sos_main
 from services.sos.main import app, get_db
 
 
-# ----------------------------
-# Fake db session (async)
-# ----------------------------
+class FakeScalarsResult:
+    def __init__(self, item):
+        self._item = item
+
+    def first(self):
+        return self._item
+
+
+class FakeExecuteResult:
+    def __init__(self, item):
+        self._item = item
+
+    def scalars(self):
+        return FakeScalarsResult(self._item)
+
+
 class FakeDB:
-    def __init__(self, *, commit_raises: Exception | None = None):
+    def __init__(self, *, trusted_contact=None, commit_raises: Exception | None = None):
+        self.trusted_contact = trusted_contact or SimpleNamespace(phone="+353800000111")
         self.added = []
         self.flushed = False
         self.committed = False
@@ -24,6 +36,9 @@ class FakeDB:
 
     def add(self, obj):
         self.added.append(obj)
+
+    async def execute(self, stmt):
+        return FakeExecuteResult(self.trusted_contact)
 
     async def flush(self):
         self.flushed = True
@@ -44,26 +59,6 @@ def _override_db(fake_db: FakeDB):
     app.dependency_overrides[get_db] = override_get_db
 
 
-@pytest.fixture()
-def client():
-    yield TestClient(app)
-    app.dependency_overrides.clear()
-
-
-# ----------------------------
-# Metrics mock
-# ----------------------------
-class Counter:
-    def __init__(self):
-        self.count = 0
-
-    def inc(self):
-        self.count += 1
-
-
-# ----------------------------
-# httpx AsyncClient mocks
-# ----------------------------
 class DummyResponse:
     def __init__(self, payload: dict, status_code: int = 200):
         self._payload = payload
@@ -83,7 +78,7 @@ class DummyResponse:
         return self._payload
 
 
-class DummyAsyncClientCallOK:
+class DummyAsyncClient:
     def __init__(self, timeout=10.0):
         self.timeout = timeout
 
@@ -94,49 +89,48 @@ class DummyAsyncClientCallOK:
         return False
 
     async def post(self, url, json):
-        return DummyResponse(
-            {
-                "status": "initiated",
-                "call_id": "twilio_sid_123",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            status_code=200,
-        )
+        now = datetime.now(timezone.utc).isoformat()
+        if url.endswith("/v1/notifications/sos/call"):
+            return DummyResponse(
+                {
+                    "status": "initiated",
+                    "call_id": "twilio_sid_123",
+                    "timestamp": now,
+                }
+            )
+
+        if url.endswith("/v1/notifications/sos/sms"):
+            return DummyResponse(
+                {
+                    "emergency_id": json["sos_id"],
+                    "status": "sent",
+                    "sms_id": str(uuid.uuid4()),
+                    "timestamp": now,
+                    "message_sent": "Test SOS message",
+                    "recipient": json["emergency_contact"]["phone"],
+                }
+            )
+
+        return DummyResponse({}, status_code=404)
 
 
-class DummyAsyncClientSmsOK:
-    """Mock AsyncClient for SMS endpoint: returns success payload."""
-
-    def __init__(self, timeout=10.0):
-        self.timeout = timeout
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    async def post(self, url, json):
-        return DummyResponse(
-            {
-                "emergency_id": str(uuid.uuid4()),
-                "status": "sent",
-                "sms_id": str(uuid.uuid4()),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "message_sent": "test",
-                "recipient": json.get("emergency_contact", {}).get("phone", ""),
-            },
-            status_code=200,
-        )
+@pytest.fixture()
+def fake_db():
+    db = FakeDB()
+    _override_db(db)
+    yield db
+    app.dependency_overrides.clear()
+    sos_main.STATUS.clear()
 
 
-_AsyncClientProxy = DummyAsyncClientCallOK
+@pytest.fixture()
+def client(monkeypatch, fake_db):
+    monkeypatch.setattr(sos_main.httpx, "AsyncClient", DummyAsyncClient)
+    with TestClient(app) as test_client:
+        yield test_client
 
 
-# ----------------------------
-# Root / health
-# ----------------------------
-def test_root():
+def test_root(client):
     r = client.get("/")
     assert r.status_code == 200
     data = r.json()
@@ -144,17 +138,14 @@ def test_root():
     assert data["status"] == "running"
 
 
-# ----------------------------
-# Emergency call
-# ----------------------------
-def test_emergency_call_success(monkeypatch):
-    monkeypatch.setattr(sos_main.httpx, "AsyncClient", _AsyncClientProxy)
-
+def test_emergency_call_success(client, fake_db):
     call_req = {
-        "user_id": "550e8400-e29b-41d4-a716-446655440000",
+        "user_id": "auth0|calluser",
+        "route_id": None,
         "lat": 53.34,
         "lon": -6.26,
         "trigger_type": "manual",
+        "message": "Test emergency",
     }
     r = client.post("/v1/emergency/call", json=call_req)
     assert r.status_code == 200
@@ -162,23 +153,20 @@ def test_emergency_call_success(monkeypatch):
     assert data["status"] == "initiated"
     assert "call_id" in data
     assert "timestamp" in data
+    assert "emergency_id" in data
+    assert fake_db.committed is True
 
 
-def test_emergency_call_missing_fields():
-    payload = {"sos_id": "SOS-MISSING"}
+def test_emergency_call_missing_fields(client):
+    payload = {"user_id": "missing-user"}
     r = client.post("/v1/emergency/call", json=payload)
     assert r.status_code == 422
 
 
-# ----------------------------
-# Emergency SMS
-# ----------------------------
-def test_emergency_sms_success(monkeypatch):
-    monkeypatch.setattr(sos_main.httpx, "AsyncClient", DummyAsyncClientSmsOK)
-
+def test_emergency_sms_success(client):
     sms_req = {
-        "sos_id": "550e8400-e29b-41d4-a716-446655440002",
-        "user_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sos_id": str(uuid.uuid4()),
+        "user_id": "auth0|smsuser",
         "location": {"lat": 53.34, "lon": -6.26},
         "emergency_contact": {"name": "Alice", "phone": "+353800000222"},
         "notification_type": "sos",
@@ -188,65 +176,56 @@ def test_emergency_sms_success(monkeypatch):
     r = client.post("/v1/emergency/sms", json=sms_req)
     assert r.status_code == 200
     data = r.json()
-    assert data["status"] in ["sent", "failed"]
+    assert data["status"] == "sent"
+    assert data["recipient"] == "+353800000222"
+    assert data["emergency_id"] == sms_req["sos_id"]
 
 
-def test_emergency_sms_missing_fields():
-    payload = {"sos_id": "SOS-INCOMPLETE"}
+def test_emergency_sms_missing_fields(client):
+    payload = {"sos_id": str(uuid.uuid4())}
     r = client.post("/v1/emergency/sms", json=payload)
     assert r.status_code == 422
 
 
-# ----------------------------
-# Status check
-# ----------------------------
-def test_emergency_status_not_triggered():
-    # Use a valid UUID that was never used -> returns default not_triggered / not_sent
-    r = client.get("/v1/emergency/550e8400-e29b-41d4-a716-446655440099/status")
+def test_emergency_status_not_triggered(client):
+    emergency_id = str(uuid.uuid4())
+    r = client.get(f"/v1/emergency/{emergency_id}/status")
     assert r.status_code == 200
     data = r.json()
-    assert data["emergency_id"] == "550e8400-e29b-41d4-a716-446655440099"
-    assert data["call_status"] in ["not_triggered", "initiated", "connected", "failed"]
-    assert data["sms_status"] in ["not_sent", "sent", "failed"]
+    assert data["emergency_id"] == emergency_id
+    assert data["call_status"] == "not_triggered"
+    assert data["sms_status"] == "not_sent"
 
 
-# ----------------------------
-# Full flow: call → sms → status
-# ----------------------------
-def test_full_emergency_flow(monkeypatch):
-    # Mock that handles both call and SMS POSTs
-    class _CombinedClient(DummyAsyncClientCallOK):
-        async def post(self, url, json_payload=None):
-            json_payload = json_payload or {}
-            if "emergency_contact" in json_payload:
-                return await DummyAsyncClientSmsOK(timeout=self.timeout).post(url, json_payload)
-            return await DummyAsyncClientCallOK.post(self, url, json_payload)
-
-    monkeypatch.setattr(sos_main.httpx, "AsyncClient", _CombinedClient)
-
+def test_full_emergency_flow(client):
     call_req = {
-        "user_id": "550e8400-e29b-41d4-a716-446655440000",
+        "user_id": "auth0|flowuser",
+        "route_id": None,
         "lat": 53.34,
         "lon": -6.26,
         "trigger_type": "manual",
+        "message": "Test emergency",
     }
+
+    r1 = client.post("/v1/emergency/call", json=call_req)
+    assert r1.status_code == 200
+    emergency_id = str(r1.json()["emergency_id"])
+
     sms_req = {
-        "sos_id": "550e8400-e29b-41d4-a716-446655440001",
-        "user_id": "550e8400-e29b-41d4-a716-446655440000",
+        "sos_id": emergency_id,
+        "user_id": "auth0|flowuser",
         "location": {"lat": 53.34, "lon": -6.26},
         "emergency_contact": {"name": "Bob", "phone": "+353800000333"},
         "notification_type": "sos",
         "locale": "en",
         "variables": {"name": "Bob"},
     }
-
-    r1 = client.post("/v1/emergency/call", json=call_req)
-    assert r1.status_code == 200
-    emergency_id = str(r1.json()["emergency_id"])
     r2 = client.post("/v1/emergency/sms", json=sms_req)
     assert r2.status_code == 200
+
     r3 = client.get(f"/v1/emergency/{emergency_id}/status")
     assert r3.status_code == 200
     d = r3.json()
     assert d["emergency_id"] == emergency_id
-    assert d["sms_status"] in ["sent", "failed", "not_sent"]
+    assert d["call_status"] == "initiated"
+    assert d["sms_status"] == "sent"

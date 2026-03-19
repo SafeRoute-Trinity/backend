@@ -1,8 +1,14 @@
 
 # Project dependencies
 fastapi>=0.100.0
+# redis>=4.2.0 is required: the rate limiter uses redis.asyncio (ships with
+# redis>=4.2).  Declaring it explicitly ensures the correct version is
+# installed even if no other transitive dependency pins it.
+redis>=4.2.0
 uvicorn[standard]>=0.24.0
 pydantic>=2.0.0
+email-validator>=2.3.0
+pydantic[email]>=2.0.0
 python-multipart>=0.0.6
 geopy>=2.4.0
 sqlalchemy>=2.0.0
@@ -28,11 +34,11 @@ python-jose[cryptography]>=3.3.0
 cryptography>=41.0.0
 
 # --- Dev Tools ---
-black>=24.10.0 # Linter
+black==26.3.1 # Linter
 flake8>=7.1.0 # Linter
-isort>=5.13.2 # Sort import
+isort==8.0.1 # Sort import
 mypy>=1.10.0 # Check types
-ruff>=0.14.5 # Formatter
+ruff==0.15.6 # Formatter
 
 # --- Lint & Formatting Helper ---
 pre-commit>=3.8.0
