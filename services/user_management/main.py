@@ -1073,12 +1073,16 @@ async def upsert_trusted_contact(
             detail="User not found",
         )
 
-    # ---- (2) Try find existing contact (by phone) ----
+    # ---- (2) Try find existing contact (by phone), acquiring a row lock ----
+    # FOR UPDATE prevents a concurrent upsert on the same (user_id, phone) from
+    # racing between the read and the subsequent write below.
     contact = await db.scalar(
-        select(TrustedContact).where(
+        select(TrustedContact)
+        .where(
             TrustedContact.user_id == user_id,
             TrustedContact.phone == body.phone,
         )
+        .with_for_update()
     )
 
     # ---- (3) Update if exists ----
@@ -1103,6 +1107,23 @@ async def upsert_trusted_contact(
         )
         db.add(contact)
         await db.flush()
+
+    # ---- (4.5) Demote any other primary when this contact becomes primary ----
+    # Lock the competing row with FOR UPDATE so a concurrent request cannot
+    # simultaneously promote a different contact, leaving two primaries.
+    if body.is_primary:
+        existing_primary = await db.scalar(
+            select(TrustedContact)
+            .where(
+                TrustedContact.user_id == user_id,
+                TrustedContact.is_primary == True,  # noqa: E712
+                TrustedContact.contact_id != contact.contact_id,
+            )
+            .with_for_update()
+        )
+        if existing_primary:
+            existing_primary.is_primary = False
+            existing_primary.updated_at = now
 
     # ---- (5) Audit ----
     audit = Audit(
