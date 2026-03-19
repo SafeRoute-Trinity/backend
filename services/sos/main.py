@@ -13,7 +13,6 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Path
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,7 +20,6 @@ from libs.audit_logger import write_audit
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from models.audit import Audit
 from models.emergency import Emergency
-from models.user_models import TrustedContact
 
 logger = logging.getLogger(__name__)
 
@@ -96,11 +94,11 @@ class Point(BaseModel):
 
 class EmergencyCallRequest(BaseModel):
     user_id: str
-    route_id: Optional[uuid.UUID]
+    route_id: Optional[uuid.UUID] = None
     lat: float
     lon: float
     trigger_type: Literal["manual", "automatic"]
-    message: Optional[str] = None
+    phone: str  # E.164 format, e.g. +353831234567
 
 
 class EmergencyCallResponse(BaseModel):
@@ -175,19 +173,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
     now = datetime.utcnow()
     emergency_id = uuid.uuid4()
 
-    # ---- (1) Read the primary trusted contact inside the SERIALIZABLE snapshot ----
-    trusted_contact_stmt = (
-        select(TrustedContact)
-        .where(TrustedContact.user_id == str(body.user_id))
-        .order_by(TrustedContact.is_primary.desc().nulls_last())
-        .limit(1)
-    )
-    trusted_contact = (await db.execute(trusted_contact_stmt)).scalars().first()
-    trusted_phone = trusted_contact.phone if trusted_contact else ""
-
-    # ---- (2) Dispatch to notification service OUTSIDE the DB write path ----
-    # The HTTP call happens here — no DB writes are pending yet, so no
-    # connection-hold during network I/O beyond the initial read above.
+    # ---- (1) Dispatch to notification service OUTSIDE the DB write path ----
     notification_failed = False
     notification_error: Optional[httpx.HTTPError] = None
     data: dict = {}
@@ -196,9 +182,9 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
     try:
         notification_payload = {
             "emergency_id": str(emergency_id),
-            "phone_number": trusted_phone,
+            "phone_number": body.phone,
             "user_location": {"lat": body.lat, "lon": body.lon},
-            "call_reason": body.message or f"SOS {body.trigger_type}",
+            "call_reason": f"SOS {body.trigger_type}",
         }
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
@@ -238,8 +224,8 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
             lat=body.lat,
             lon=body.lon,
             trigger_type=body.trigger_type,
-            messaging_id=None,
-            message=body.message,
+            messaging_id=_uuid_or_none(data.get("call_id")),
+            message=f"SOS {body.trigger_type}",
         )
     )
     db.add(
