@@ -1,5 +1,6 @@
 ##pytest services/notification/tests/test_main.py -q
 
+import os
 import uuid
 
 from fastapi.testclient import TestClient
@@ -7,6 +8,10 @@ from fastapi.testclient import TestClient
 from services.notification.main import app
 
 client = TestClient(app)
+
+
+def _enable_test_sms_mode():
+    os.environ["NOTIFICATION_SMS_MODE"] = "test"
 
 
 # ========== Test Cases ==========
@@ -47,6 +52,7 @@ def test_create_and_get_notification_status():
 
 def test_emergency_sms_endpoint():
     """Test emergency SMS endpoint"""
+    _enable_test_sms_mode()
     sos_id = str(uuid.uuid4())
     user_id = str(uuid.uuid4())
 
@@ -75,10 +81,10 @@ def test_emergency_sms_endpoint():
 
 def test_emergency_call_endpoint():
     """Test emergency call endpoint"""
-    sos_id = str(uuid.uuid4())
+    emergency_id = str(uuid.uuid4())
 
     payload = {
-        "sos_id": sos_id,
+        "emergency_id": emergency_id,
         "phone_number": "+112",
         "user_location": {"lat": 53.34, "lon": -6.26},
         "call_reason": "Safety emergency",
@@ -174,6 +180,7 @@ def test_test_sms_missing_fields():
 
 def test_notification_status_check_multiple_times():
     """Test checking notification status multiple times"""
+    _enable_test_sms_mode()
     req = {
         "sos_id": "SOS-MULTI",
         "user_id": "usr_demo",

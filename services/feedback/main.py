@@ -22,8 +22,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel, EmailStr, Field
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, EmailStr, Field, validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +31,8 @@ from libs.auth.auth0_verify import verify_token
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+
+from dotenv import load_dotenv
 
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
@@ -543,8 +544,6 @@ async def list_feedback(
     data = []
     for row in feedbacks:
         api_type = row.type if row.type else None
-        if api_type == "others":
-            api_type = "other"
 
         data.append(
             FeedbackStatusResponse(
@@ -660,8 +659,6 @@ async def status(feedback_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="feedback not found")
 
     api_type = row["feedback_type"]
-    if api_type == "others":
-        api_type = "other"
 
     # Extract user_id from the feedback record and parse it for audit logging
     user_id_str = row.get("user_id")

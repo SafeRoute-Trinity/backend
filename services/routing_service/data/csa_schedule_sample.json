@@ -1,0 +1,102 @@
+{
+  "version": "dublin-sample-v1",
+  "stops": [
+    {
+      "id": "stop_trinity",
+      "name": "Trinity College",
+      "lat": 53.3438,
+      "lon": -6.2546
+    },
+    {
+      "id": "stop_oconnell",
+      "name": "O'Connell Street",
+      "lat": 53.3493,
+      "lon": -6.2603
+    },
+    {
+      "id": "stop_pearse",
+      "name": "Pearse Street",
+      "lat": 53.3446,
+      "lon": -6.2492
+    },
+    {
+      "id": "stop_heuston",
+      "name": "Heuston Station",
+      "lat": 53.3463,
+      "lon": -6.2922
+    }
+  ],
+  "connections": [
+    {
+      "id": "c1",
+      "trip_id": "trip_39a_0800",
+      "route_id": "39A",
+      "from_stop_id": "stop_trinity",
+      "to_stop_id": "stop_oconnell",
+      "departure": "08:00:00",
+      "arrival": "08:06:00"
+    },
+    {
+      "id": "c2",
+      "trip_id": "trip_39a_0800",
+      "route_id": "39A",
+      "from_stop_id": "stop_oconnell",
+      "to_stop_id": "stop_heuston",
+      "departure": "08:08:00",
+      "arrival": "08:18:00"
+    },
+    {
+      "id": "c3",
+      "trip_id": "trip_15_0805",
+      "route_id": "15",
+      "from_stop_id": "stop_trinity",
+      "to_stop_id": "stop_pearse",
+      "departure": "08:05:00",
+      "arrival": "08:10:00"
+    },
+    {
+      "id": "c4",
+      "trip_id": "trip_15_0805",
+      "route_id": "15",
+      "from_stop_id": "stop_pearse",
+      "to_stop_id": "stop_heuston",
+      "departure": "08:12:00",
+      "arrival": "08:26:00"
+    },
+    {
+      "id": "c5",
+      "trip_id": "trip_90_0810",
+      "route_id": "90",
+      "from_stop_id": "stop_oconnell",
+      "to_stop_id": "stop_heuston",
+      "departure": "08:15:00",
+      "arrival": "08:24:00"
+    }
+  ],
+  "footpaths": [
+    {
+      "from_stop_id": "stop_trinity",
+      "to_stop_id": "stop_oconnell",
+      "duration_s": 500,
+      "distance_m": 700
+    },
+    {
+      "from_stop_id": "stop_oconnell",
+      "to_stop_id": "stop_trinity",
+      "duration_s": 500,
+      "distance_m": 700
+    },
+    {
+      "from_stop_id": "stop_trinity",
+      "to_stop_id": "stop_pearse",
+      "duration_s": 360,
+      "distance_m": 500
+    },
+    {
+      "from_stop_id": "stop_pearse",
+      "to_stop_id": "stop_trinity",
+      "duration_s": 360,
+      "distance_m": 500
+    }
+  ]
+}
