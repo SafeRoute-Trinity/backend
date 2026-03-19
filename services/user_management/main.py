@@ -550,6 +550,7 @@ async def get_current_user(
                 )
                 if resp.status_code == 200:
                     profile = resp.json()
+                    print("something here")
                     print(f"[UserMgmt] Got Auth0 profile: email={profile.get('email')}")
                 else:
                     print(f"[UserMgmt] /userinfo returned {resp.status_code}")
@@ -700,27 +701,14 @@ async def sync_auth0_user(
 
     # Upsert: create if new, update if exists
     result = await db.execute(select(User).where(User.user_id == raw_user_id))
-
-    """
-    Auth0 calls this on every login (including first login after sign-up).
-    Creates the user if new, updates fields if existing.
-
-    Security: Validates shared secret via X-Auth0-Webhook-Secret header.
-    """
-    # Verify webhook secret
-    secret = request.headers.get("X-Auth0-Webhook-Secret")
-    expected_secret = os.getenv("AUTH0_WEBHOOK_SECRET")
-    if not expected_secret or secret != expected_secret:
-        raise HTTPException(status_code=401, detail="Invalid webhook secret")
-
-    # Upsert: create if new, update if exists
-    result = await db.execute(select(User).where(User.user_id == payload.user_id))
     user = result.scalar_one_or_none()
 
     now = datetime.utcnow()
+    is_update = user is not None
     if user:
         user.email = payload.email
         user.name = payload.name
+        user.phone = payload.phone
         user.last_login = now
         user.updated_at = now
     else:
@@ -738,7 +726,7 @@ async def sync_auth0_user(
         log_id=uuid.uuid4(),
         user_id=raw_user_id,
         event_type="authentication",
-        message=f"Auth0 sync ({'update' if user else 'create'})",
+        message=f"Auth0 sync ({'update' if is_update else 'create'})",
         created_at=now,
         updated_at=now,
     )

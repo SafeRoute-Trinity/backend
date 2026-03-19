@@ -335,9 +335,9 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     # Update status
     now = datetime.utcnow()
     s = STATUS.setdefault(
-        body.sos_id,
+        str(parsed_sos_id),
         {
-            "emergency_id": body.sos_id,
+            "emergency_id": parsed_sos_id,
             "call_status": "not_triggered",
             "sms_status": "not_sent",
             "last_update": now,

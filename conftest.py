@@ -10,6 +10,7 @@ This module provides reusable fixtures for:
 """
 
 import time
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.backends import default_backend
@@ -326,24 +327,23 @@ def create_jwt_without_kid(rsa_key_pair):
 
 
 @pytest.fixture
-def mock_jwks_request(mocker, mock_jwks):
+def mock_jwks_request(mocker, rsa_key_pair):
     """
-    Mock requests.get to return mock JWKS without hitting Auth0.
+    Mock PyJWKClient so unit tests do not hit Auth0.
 
     Args:
         mocker: pytest-mock mocker fixture
-        mock_jwks: Mock JWKS fixture
+        rsa_key_pair: RSA key pair fixture
 
     Returns:
-        Mocked requests.get function
+        Mocked PyJWKClient class
     """
-    mock_response = mocker.Mock()
-    mock_response.json.return_value = mock_jwks
-    mock_response.raise_for_status = mocker.Mock()
-
-    # Patch where requests.get is used, not where it's defined
-    mock_get = mocker.patch("libs.auth.auth0_verify.requests.get", return_value=mock_response)
-    return mock_get
+    mock_client = mocker.Mock()
+    mock_client.get_signing_key_from_jwt.return_value = SimpleNamespace(
+        key=rsa_key_pair["public_key"]
+    )
+    mock_cls = mocker.patch("libs.auth.auth0_verify.PyJWKClient", return_value=mock_client)
+    return mock_cls
 
 
 @pytest.fixture
