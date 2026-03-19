@@ -15,10 +15,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.9
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: "3.11"
 
       - name: Install dependencies
         run: |
@@ -35,12 +35,46 @@ jobs:
       - name: Run Ruff (check only)
         run: ruff check .
 
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
+          else
+            echo "No requirements file found" && exit 1
+          fi
+
+      - name: Run pytest with coverage
+        run: pytest --cov=libs --cov=services --cov-report=term-missing --cov-report=html --cov-report=xml --cov-fail-under=80
+
+      - name: Upload coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            htmlcov
+            coverage.xml
+
   build-and-push:
     name: Build & Push Docker Images
     runs-on: ubuntu-latest
     # Only run on push to main (after PR merge)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: lint
+    needs: [lint, test]
 
     steps:
       - name: Checkout repository
