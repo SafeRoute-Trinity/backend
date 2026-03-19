@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -34,6 +36,7 @@ jobs:
           echo "event=$GITHUB_EVENT_NAME"
           echo "ref=$GITHUB_REF"
           echo "sha=$GITHUB_SHA"
+          echo "pr_head_sha=${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'n/a' }}"
           git rev-parse HEAD
           git log --oneline -1
           python - <<'PY'
@@ -58,6 +61,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -78,6 +83,7 @@ jobs:
           echo "event=$GITHUB_EVENT_NAME"
           echo "ref=$GITHUB_REF"
           echo "sha=$GITHUB_SHA"
+          echo "pr_head_sha=${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || 'n/a' }}"
           git rev-parse HEAD
           git log --oneline -1
           python - <<'PY'
