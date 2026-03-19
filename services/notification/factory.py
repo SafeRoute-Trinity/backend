@@ -1,6 +1,8 @@
 import os
 from typing import Dict, Union
 
+from twilio.twiml.voice_response import VoiceResponse
+
 from libs.twilio_client import get_twilio_client
 from services.notification.schemas import (
     CallNotificationResponse,
@@ -84,23 +86,60 @@ class SmsSender(BaseSender):
 
 
 class CallSender(BaseSender):
-    """Call notification sender"""
+    """Call notification sender — uses Twilio Voice with inline TwiML."""
 
     async def send(self, payload: Dict) -> CallNotificationResponse:
         """
-        Send call notification.
+        Place a voice call via Twilio using inline TwiML.
 
         Args:
-            payload: Dictionary with to_phone, sos_id
+            payload: Dictionary with:
+                - to_phone: E.164 phone number to call
+                - call_reason: text to speak when the call is answered
+                - locale: BCP-47 language tag (default "en")
 
         Returns:
-            CallNotificationResponse matching Swagger API definition
+            CallNotificationResponse
         """
-        # Placeholder until call flow (TwiML URL) is defined.
+        to_phone = payload.get("to_phone", "")
+        call_reason = payload.get("call_reason", "Emergency SOS alert")
+        locale = payload.get("locale", "en")
+
+        if not to_phone:
+            return CallNotificationResponse(
+                status="failed",
+                sid=None,
+                error="missing_phone_number",
+            )
+
+        mode = os.getenv("NOTIFICATION_CALL_MODE", "").lower()
+        if mode in {"dummy", "dev", "test"}:
+            return CallNotificationResponse(
+                status="initiated",
+                sid="CALL-DUMMY",
+                error=None,
+            )
+
+        # Build TwiML: repeat the emergency message twice so the recipient
+        # has time to process it.
+        resp = VoiceResponse()
+        resp.say(call_reason, voice="alice", language=locale, loop=2)
+        resp.pause(length=1)
+        resp.say(
+            "This is an automated SafeRoute emergency call. "
+            "Please check your SMS for location details.",
+            voice="alice",
+            language="en",
+        )
+        twiml_str = str(resp)
+
+        twilio = get_twilio_client()
+        result = twilio.make_call_twiml(to_phone=to_phone, twiml=twiml_str)
+
         return CallNotificationResponse(
-            status="not_triggered",
-            sid=None,
-            error="call_not_configured",
+            status=result["status"],
+            sid=result.get("sid"),
+            error=result.get("error"),
         )
 
 

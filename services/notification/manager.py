@@ -224,10 +224,29 @@ class NotificationManager:
         )
 
     async def send_emergency_call(self, body: EmergencyCallRequest) -> EmergencyCallResponse:
-        call_id = f"CALL-{uuid.uuid4().hex[:6]}"
-        # Call delivery is not implemented yet; keep current behavior.
+        """Place an emergency voice call via Twilio (inline TwiML)."""
+        try:
+            sender = self._factory.get_sender("call")
+            result = await sender.send(
+                {
+                    "to_phone": body.phone_number,
+                    "call_reason": body.call_reason,
+                }
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to place emergency call: {str(e)}")
+
+        status = (
+            EmergencyStatus.INITIATED.value
+            if result.status == "initiated"
+            else EmergencyStatus.FAILED.value
+        )
+        call_id = result.sid or f"CALL-{uuid.uuid4().hex[:6]}"
+
         return EmergencyCallResponse(
-            status=EmergencyStatus.INITIATED.value, call_id=call_id, timestamp=datetime.utcnow()
+            status=status,
+            call_id=call_id,
+            timestamp=datetime.utcnow(),
         )
 
     def get_status(self, notification_id: str) -> StatusResp:
