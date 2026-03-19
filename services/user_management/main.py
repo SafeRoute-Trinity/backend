@@ -538,6 +538,7 @@ async def get_current_user(
                 )
                 if resp.status_code == 200:
                     profile = resp.json()
+                    print("something here")
                     print(f"[UserMgmt] Got Auth0 profile: email={profile.get('email')}")
                 else:
                     print(f"[UserMgmt] /userinfo returned {resp.status_code}")
