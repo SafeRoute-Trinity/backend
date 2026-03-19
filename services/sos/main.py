@@ -20,6 +20,7 @@ from libs.audit_logger import write_audit
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from models.audit import Audit
 from models.emergency import Emergency
+from models.user_models import User  # noqa: F401 — registers 'users' table for FK resolution
 
 logger = logging.getLogger(__name__)
 
