@@ -614,9 +614,7 @@ async def get_route(
         routing_fn = (
             "pgr_aStar"
             if algorithm == "astar"
-            else "pgr_bdDijkstra"
-            if algorithm == "bd_dijkstra"
-            else "pgr_dijkstra"
+            else "pgr_bdDijkstra" if algorithm == "bd_dijkstra" else "pgr_dijkstra"
         )
         routing_query = text(
             """

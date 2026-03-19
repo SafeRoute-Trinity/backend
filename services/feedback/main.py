@@ -44,7 +44,6 @@ from services.feedback.feedback_factory import get_feedback_factory
 from services.feedback.spam_validator import get_spam_validator_factory
 from services.feedback.types import FeedbackType, SeverityType, Status
 
-from dotenv import load_dotenv
 load_dotenv(".env")
 
 # Initialize database connections

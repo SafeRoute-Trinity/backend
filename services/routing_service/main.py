@@ -1299,9 +1299,7 @@ async def _compute_weighted_route_geojson(
     routing_fn = (
         "pgr_aStar"
         if algorithm == "astar"
-        else "pgr_bdDijkstra"
-        if algorithm == "bd_dijkstra"
-        else "pgr_dijkstra"
+        else "pgr_bdDijkstra" if algorithm == "bd_dijkstra" else "pgr_dijkstra"
     )
     routing_query = text(
         """
