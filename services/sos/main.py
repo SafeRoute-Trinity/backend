@@ -131,7 +131,7 @@ class EmergencySMSRequest(BaseModel):
 class EmergencySMSResponse(BaseModel):
     emergency_id: uuid.UUID
     status: Literal["sent", "failed"]
-    sms_id: uuid.UUID
+    sms_id: str
     timestamp: datetime
     message_sent: str
     recipient: str
@@ -206,6 +206,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
             )
             resp.raise_for_status()
             data = resp.json()
+            data["emergency_id"] = parsed_sos_id
     except httpx.HTTPError as e:
         logger.exception(
             "Notification service call failed for emergency_id=%s error=%s",
@@ -297,6 +298,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
             )
             response.raise_for_status()
             data = response.json()
+            data["emergency_id"] = parsed_sos_id
     except httpx.HTTPError as e:
         # Log and audit SMS failure
         logger.exception(
