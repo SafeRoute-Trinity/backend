@@ -26,7 +26,7 @@ from prometheus_client import (
     generate_latest,
 )
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from models.audit import Audit
@@ -1080,6 +1080,17 @@ async def upsert_trusted_contact(
             TrustedContact.phone == body.phone,
         )
     )
+
+    # ---- (2b) If setting as primary, unset any existing primary first ----
+    if body.is_primary:
+        await db.execute(
+            update(TrustedContact)
+            .where(
+                TrustedContact.user_id == user_id,
+                TrustedContact.is_primary == True,  # noqa: E712
+            )
+            .values(is_primary=False, updated_at=now)
+        )
 
     # ---- (3) Update if exists ----
     if contact:

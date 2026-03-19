@@ -91,7 +91,7 @@ class Point(BaseModel):
 
 
 class EmergencyCallRequest(BaseModel):
-    user_id: uuid.UUID
+    user_id: str
     route_id: Optional[uuid.UUID]
     lat: float
     lon: float
@@ -119,7 +119,7 @@ class SOSContact(BaseModel):
 
 class EmergencySMSRequest(BaseModel):
     sos_id: str  # SOS/emergency identifier (UUID string) for status correlation
-    user_id: uuid.UUID
+    user_id: str
     location: Optional[Location] = None
     emergency_contact: SOSContact
     message_template: Optional[str] = None
@@ -184,7 +184,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
     # Fetch trusted contact phone from DB (same schema as user-management service)
     trusted_contact_stmt = (
         select(TrustedContact)
-        .where(TrustedContact.user_id == str(body.user_id))
+        .where(TrustedContact.user_id == body.user_id)
         .order_by(TrustedContact.is_primary.desc().nulls_last())
         .limit(1)
     )
@@ -289,22 +289,25 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     if parsed_sos_id is None:
         raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
 
+    data: dict = {}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
                 json=body.model_dump(mode="json"),
             )
-            response.raise_for_status()
-            data = response.json()
+            try:
+                data = response.json()
+            except Exception:
+                data = {}
+
+            # Only raise if the response has no usable SMS data
+            if not response.is_success and "status" not in data:
+                response.raise_for_status()
     except httpx.HTTPError as e:
-        # Log and audit SMS failure
         logger.exception(
-            "Notification service SMS call failed for emergency_id=%s user_id=%s recipient=%s: %s",
-            body.sos_id,
-            body.user_id,
-            body.emergency_contact.phone,
-            repr(e),
+            "Notification service SMS call failed for sos_id=%s user_id=%s recipient=%s: %s",
+            body.sos_id, body.user_id, body.emergency_contact.phone, repr(e),
         )
 
         try:
@@ -317,7 +320,6 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
                 commit=True,
             )
         except Exception:
-            # Audit failures should not block the main error
             pass
 
         raise HTTPException(
@@ -356,7 +358,14 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         # don't let audit failures affect response
         pass
 
-    return EmergencySMSResponse(**data)
+    return EmergencySMSResponse(
+        emergency_id=parsed_sos_id,
+        status=data.get("status", "failed"),
+        sms_id=uuid.uuid4() if not _uuid_or_none(data.get("sms_id", "")) else _uuid_or_none(data.get("sms_id", "")),
+        timestamp=data.get("timestamp", datetime.utcnow().isoformat()),
+        message_sent=data.get("message_sent", ""),
+        recipient=data.get("recipient", body.emergency_contact.phone),
+    )
 
 
 @app.get("/v1/emergency/{emergency_id}/status", response_model=EmergencyStatusResponse)
