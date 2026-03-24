@@ -38,8 +38,22 @@ class FakeDB:
         self.rows = {}
         self.committed = False
         self.rolled_back = False
+        self.execute_raises = None
 
     async def execute(self, stmt, params=None):
+        if self.execute_raises:
+            raise self.execute_raises
+
+        sql = str(stmt)
+        if "UPDATE saferoute.feedback" in sql:
+            feedback_id = params.get("fid") if params else None
+            row = self.rows.get(feedback_id)
+            if not row:
+                return _FakeExecuteResult(None)
+            row["status"] = params.get("status")
+            row["updated_at"] = datetime.utcnow()
+            return _FakeExecuteResult(row)
+
         feedback_id = params.get("fid") if params else None
         return _FakeExecuteResult(self.rows.get(feedback_id))
 
@@ -442,3 +456,78 @@ def test_list_feedback_executes_loop_and_maps_type_from_db_row(
 def test_metrics_endpoint_executes_return_path():
     r = client.get("/metrics")
     assert r.status_code == 200
+
+
+def test_update_feedback_status_success(override_feedback_dependencies, monkeypatch):
+    fake_db: FakeDB = override_feedback_dependencies
+
+    feedback_id = uuid.uuid4()
+    fake_db.rows[str(feedback_id)] = {
+        "feedback_id": feedback_id,
+        "user_id": "user-1",
+        "ticket_number": "TKT-100",
+        "status": Status.RECEIVED.value,
+        "feedback_type": FeedbackType.SAFETY_ISSUE.value,
+        "severity": SeverityType.HIGH.value,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+
+    monkeypatch.setattr(feedback_main, "write_audit", AsyncMock(return_value=None))
+
+    r = client.put(f"/v1/feedback/{feedback_id}/status", json={"status": "resolved"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["feedback_id"] == str(feedback_id)
+    assert data["status"] == "resolved"
+    assert fake_db.committed is True
+
+
+def test_update_feedback_status_not_found_404(override_feedback_dependencies):
+    fake_id = uuid.uuid4()
+    r = client.put(f"/v1/feedback/{fake_id}/status", json={"status": "resolved"})
+    assert r.status_code == 404
+    assert "not found" in r.json()["detail"].lower()
+
+
+def test_update_feedback_status_invalid_status_422():
+    fake_id = uuid.uuid4()
+    r = client.put(f"/v1/feedback/{fake_id}/status", json={"status": "unknown_status"})
+    assert r.status_code == 422
+
+
+def test_update_feedback_status_db_failure_500(override_feedback_dependencies):
+    fake_db: FakeDB = override_feedback_dependencies
+    fake_db.execute_raises = RuntimeError("db update failed")
+
+    feedback_id = uuid.uuid4()
+    r = client.put(f"/v1/feedback/{feedback_id}/status", json={"status": "rejected"})
+    assert r.status_code == 500
+    assert "Failed to update feedback status" in r.json()["detail"]
+    assert fake_db.rolled_back is True
+
+
+def test_update_feedback_status_write_audit_failure_is_swallowed(
+    override_feedback_dependencies, monkeypatch
+):
+    fake_db: FakeDB = override_feedback_dependencies
+
+    feedback_id = uuid.uuid4()
+    fake_db.rows[str(feedback_id)] = {
+        "feedback_id": feedback_id,
+        "user_id": "user-2",
+        "ticket_number": "TKT-101",
+        "status": Status.RECEIVED.value,
+        "feedback_type": FeedbackType.OTHERS.value,
+        "severity": SeverityType.LOW.value,
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+
+    monkeypatch.setattr(
+        feedback_main, "write_audit", AsyncMock(side_effect=RuntimeError("audit fail"))
+    )
+
+    r = client.put(f"/v1/feedback/{feedback_id}/status", json={"status": "rejected"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "rejected"
