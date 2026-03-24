@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from common.constants import QUEUE_SOS_NOTIFICATION
 from libs.audit_logger import write_audit
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
@@ -26,6 +27,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
+from libs.rabbitmq import RabbitMQClient
 from libs.twilio_client import get_twilio_client
 from services.notification.manager import NotificationManager
 from services.notification.schemas import (
@@ -76,6 +78,56 @@ manager = NotificationManager(NOTIFICATIONS)
 import logging
 
 logger = logging.getLogger(__name__)
+
+# RabbitMQ client
+_mq = RabbitMQClient()
+
+
+async def _handle_sos_message(payload: dict) -> None:
+    """Process a message from the sos.notification queue."""
+    msg_type = payload.get("type")
+
+    if msg_type == "sms":
+        from services.notification.schemas import EmergencySMSRequest
+        try:
+            body = EmergencySMSRequest(**{k: v for k, v in payload.items() if k != "type"})
+            await manager.send_emergency_sms(body)
+            logger.info(
+                "RabbitMQ consumer: SMS sent sos_id=%s recipient=%s",
+                payload.get("sos_id"),
+                payload.get("emergency_contact", {}).get("phone"),
+            )
+        except Exception as exc:
+            logger.error("RabbitMQ consumer: SMS failed: %s", exc)
+            raise
+
+    elif msg_type == "call":
+        from services.notification.schemas import EmergencyCallRequest
+        try:
+            body = EmergencyCallRequest(**{k: v for k, v in payload.items() if k != "type"})
+            await manager.send_emergency_call(body)
+            logger.info(
+                "RabbitMQ consumer: call initiated emergency_id=%s",
+                payload.get("emergency_id"),
+            )
+        except Exception as exc:
+            logger.error("RabbitMQ consumer: call failed: %s", exc)
+            raise
+
+    else:
+        logger.warning("RabbitMQ consumer: unknown message type '%s', skipping.", msg_type)
+
+
+@app.on_event("startup")
+async def _startup():
+    connected = await _mq.connect()
+    if connected:
+        await _mq.consume(QUEUE_SOS_NOTIFICATION, _handle_sos_message)
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    await _mq.close()
 
 
 def _maybe_uuid(val):

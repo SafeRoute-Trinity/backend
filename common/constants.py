@@ -54,6 +54,16 @@ RATE_LIMIT_DEFAULT_WINDOW = int(os.getenv("RATE_LIMIT_DEFAULT_WINDOW", "60"))
 RATE_LIMIT_AUTH_LIMIT = int(os.getenv("RATE_LIMIT_AUTH_LIMIT", "10"))
 RATE_LIMIT_AUTH_WINDOW = int(os.getenv("RATE_LIMIT_AUTH_WINDOW", "60"))
 
+# ========= RabbitMQ Configuration =========
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
+RABBITMQ_USER = os.getenv("RABBITMQ_USER", "guest")
+RABBITMQ_PASSWORD = os.getenv("RABBITMQ_PASSWORD", "guest")
+RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
+
+# Queue names
+QUEUE_SOS_NOTIFICATION = "sos.notification"
+
 # ========= Token Blacklist Configuration =========
 # Blacklist key prefix for revoked tokens
 BLACKLIST_KEY_PREFIX = "auth:revoked:"
