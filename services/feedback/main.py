@@ -365,6 +365,10 @@ class FeedbackStatusResponse(BaseModel):
     updated_at: datetime
 
 
+class FeedbackStatusUpdateRequest(BaseModel):
+    status: Status
+
+
 class PaginationMeta(BaseModel):
     """Metadata for paginated list responses."""
 
@@ -696,6 +700,76 @@ async def status(feedback_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
         logger.exception("Failed to write audit for feedback.status_check")
 
     return res
+
+
+@app.put("/v1/feedback/{feedback_id}/status", response_model=FeedbackStatusResponse)
+async def update_status(
+    feedback_id: uuid.UUID,
+    body: FeedbackStatusUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        row = (
+            (
+                await db.execute(
+                    text("""
+                    UPDATE saferoute.feedback
+                    SET status = :status, updated_at = NOW()
+                    WHERE feedback_id = :fid
+                    RETURNING
+                        feedback_id,
+                        user_id,
+                        ticket_number,
+                        status,
+                        type AS feedback_type,
+                        severity,
+                        created_at,
+                        updated_at
+                    """),
+                    {"fid": str(feedback_id), "status": body.status.value},
+                )
+            )
+            .mappings()
+            .first()
+        )
+    except Exception as e:
+        await db.rollback()
+        logger.exception("Failed to update feedback status")
+        raise HTTPException(status_code=500, detail=f"Failed to update feedback status: {str(e)}")
+
+    if not row:
+        raise HTTPException(status_code=404, detail="feedback not found")
+
+    await db.commit()
+
+    parsed_user_id = _maybe_uuid(row.get("user_id"))
+    feedback_id_uuid = row["feedback_id"] if isinstance(row["feedback_id"], uuid.UUID) else feedback_id
+
+    try:
+        await write_audit(
+            db=db,
+            event_type="feedback",
+            user_id=parsed_user_id,
+            event_id=feedback_id_uuid,
+            message=f"feedback.status_update feedback_id={feedback_id} status={row.get('status')}",
+            commit=True,
+        )
+    except Exception:
+        logger.exception("Failed to write audit for feedback.status_update")
+
+    return FeedbackStatusResponse(
+        feedback_id=str(row["feedback_id"]),
+        ticket_number=(
+            str(row["ticket_number"])
+            if row["ticket_number"] is not None
+            else f"TKT-{datetime.utcnow().year}-DB"
+        ),
+        status=row["status"],
+        type=row["feedback_type"],
+        severity=row["severity"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
 
 
 @app.post("/v1/system-feedback/submit", response_model=SystemFeedbackSubmitResponse)
