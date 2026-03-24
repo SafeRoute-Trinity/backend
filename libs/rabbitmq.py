@@ -73,9 +73,7 @@ class RabbitMQClient:
             logger.info("RabbitMQ connected: %s:%s", RABBITMQ_HOST, RABBITMQ_PORT)
             return True
         except Exception as exc:
-            logger.warning(
-                "RabbitMQ unavailable (%s). Messaging disabled until reconnect.", exc
-            )
+            logger.warning("RabbitMQ unavailable (%s). Messaging disabled until reconnect.", exc)
             self._connection = None
             self._channel = None
             return False
@@ -111,9 +109,7 @@ class RabbitMQClient:
                 delivery_mode=DeliveryMode.PERSISTENT,
                 content_type="application/json",
             )
-            await self._channel.default_exchange.publish(
-                message, routing_key=queue_name
-            )
+            await self._channel.default_exchange.publish(message, routing_key=queue_name)
             logger.debug("Published to '%s': %s", queue_name, payload)
             return True
         except Exception as exc:
@@ -136,9 +132,7 @@ class RabbitMQClient:
         If the handler raises, the message is nack'd (requeued once).
         """
         if self._channel is None:
-            logger.warning(
-                "RabbitMQ not connected. Cannot start consumer for '%s'.", queue_name
-            )
+            logger.warning("RabbitMQ not connected. Cannot start consumer for '%s'.", queue_name)
             return
 
         queue = await self._channel.declare_queue(queue_name, durable=True)
@@ -149,9 +143,7 @@ class RabbitMQClient:
                     payload = json.loads(message.body.decode())
                     await handler(payload)
                 except Exception as exc:
-                    logger.error(
-                        "Consumer error on queue '%s': %s", queue_name, exc
-                    )
+                    logger.error("Consumer error on queue '%s': %s", queue_name, exc)
                     raise  # triggers requeue via process(requeue=True)
 
         await queue.consume(_on_message)

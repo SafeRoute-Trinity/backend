@@ -89,6 +89,7 @@ async def _handle_sos_message(payload: dict) -> None:
 
     if msg_type == "sms":
         from services.notification.schemas import EmergencySMSRequest
+
         try:
             body = EmergencySMSRequest(**{k: v for k, v in payload.items() if k != "type"})
             await manager.send_emergency_sms(body)
@@ -103,6 +104,7 @@ async def _handle_sos_message(payload: dict) -> None:
 
     elif msg_type == "call":
         from services.notification.schemas import EmergencyCallRequest
+
         try:
             body = EmergencyCallRequest(**{k: v for k, v in payload.items() if k != "type"})
             await manager.send_emergency_call(body)

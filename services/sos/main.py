@@ -76,6 +76,7 @@ async def _startup():
 async def _shutdown():
     await _mq.close()
 
+
 # Add business-specific metrics
 SOS_CALLS_TOTAL = factory.add_business_metric(
     "sos_calls_total",
