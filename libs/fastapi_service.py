@@ -17,6 +17,8 @@ from prometheus_client import (
 )
 
 from libs.rate_limiter import RateLimitConfig, RateLimiter, default_rate_limit_config
+from libs.structured_logging import setup_structured_logging
+from libs.trace_context import TRACE_HEADER, get_or_create_trace_id, trace_id_var
 
 
 class ServiceMetrics:
@@ -146,6 +148,13 @@ class FastAPIServiceFactory:
             allow_headers=self.config.cors_config.allow_headers,
         )
 
+        # Structured JSON logging to stdout (Azure Monitor scrapes this)
+        self._setup_structured_logging()
+
+        # Trace-ID middleware — must be the innermost middleware so that
+        # trace_id_var is available to all subsequent handlers / loggers.
+        self._add_trace_middleware(app)
+
         # Add health check endpoint (always enabled)
         self._add_health_endpoint(app)
 
@@ -171,6 +180,23 @@ class FastAPIServiceFactory:
         app.state.service_name = self.config.service_name
 
         return app
+
+    def _setup_structured_logging(self):
+        """Switch the root logger to structured JSON output for Azure Monitor."""
+        setup_structured_logging(self.config.service_name)
+
+    def _add_trace_middleware(self, app: FastAPI):
+        """Inject/propagate X-Trace-ID on every request."""
+
+        @app.middleware("http")
+        async def trace_middleware(request: Request, call_next):
+            incoming = request.headers.get(TRACE_HEADER)
+            tid = get_or_create_trace_id(incoming)
+            trace_id_var.set(tid)
+
+            response = await call_next(request)
+            response.headers[TRACE_HEADER] = tid
+            return response
 
     def _add_rate_limit_middleware(self, app: FastAPI):
         """Add Redis-backed rate limiting middleware to the app.
