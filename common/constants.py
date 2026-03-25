@@ -63,6 +63,7 @@ RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
 
 # Queue names
 QUEUE_SOS_NOTIFICATION = "sos.notification"
+QUEUE_FEEDBACK_EMAIL = "feedback.email"
 
 # ========= Token Blacklist Configuration =========
 # Blacklist key prefix for revoked tokens

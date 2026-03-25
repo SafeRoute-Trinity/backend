@@ -28,12 +28,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
 from libs.auth.auth0_verify import verify_token
+from libs.rabbitmq import RabbitMQClient
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from dotenv import load_dotenv
 
+from common.constants import QUEUE_FEEDBACK_EMAIL
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -45,6 +47,9 @@ from services.feedback.spam_validator import get_spam_validator_factory
 from services.feedback.types import FeedbackType, SeverityType, Status
 
 load_dotenv(".env")
+
+# RabbitMQ client
+_mq = RabbitMQClient()
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -84,6 +89,23 @@ FEEDBACK_STATUS_CHECKS_TOTAL = factory.add_business_metric(
 FEEDBACK = {}
 
 
+async def _handle_email_message(payload: dict) -> None:
+    """Consume feedback.email queue and send the email."""
+    try:
+        send_system_feedback_email(
+            user_id=payload.get("user_id"),
+            user_email=payload.get("user_email"),
+            subject=payload.get("subject"),
+            content=payload.get("content"),
+            page_url=payload.get("page_url"),
+            user_agent=payload.get("user_agent"),
+        )
+        logger.info("RabbitMQ consumer: feedback email sent to=%s", payload.get("user_email"))
+    except Exception as exc:
+        logger.error("RabbitMQ consumer: feedback email failed: %s", exc)
+        raise
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup."""
@@ -104,6 +126,15 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to initialize feedback factory: {e}")
         # Continue startup even if feedback factory fails
+
+    connected = await _mq.connect()
+    if connected:
+        await _mq.consume(QUEUE_FEEDBACK_EMAIL, _handle_email_message)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await _mq.close()
 
 
 # ========= PROMETHEUS METRICS =========
@@ -799,21 +830,27 @@ async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Req
         remote_ip=request.client.host if request.client else None,
     )
 
-    try:
-        send_system_feedback_email(
-            user_id=user_id,
-            user_email=user_email,
-            subject=body.subject,
-            content=body.content,
-            page_url=body.page_url,
-            user_agent=body.user_agent,
-        )
-    except Exception as e:
-        logger.exception("Failed to send system feedback email")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to send feedback email: {str(e)}",
-        )
+    email_payload = {
+        "user_id": user_id,
+        "user_email": user_email,
+        "subject": body.subject,
+        "content": body.content,
+        "page_url": body.page_url,
+        "user_agent": body.user_agent,
+    }
+
+    published = await _mq.publish(QUEUE_FEEDBACK_EMAIL, email_payload)
+
+    if not published:
+        # RabbitMQ unavailable — fall back to sending directly
+        try:
+            send_system_feedback_email(**email_payload)
+        except Exception as e:
+            logger.exception("Failed to send system feedback email")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to send feedback email: {str(e)}",
+            )
 
     return SystemFeedbackSubmitResponse(
         status="received",
