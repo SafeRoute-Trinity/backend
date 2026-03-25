@@ -25,6 +25,10 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      # Enables outbox consumption worker inside the notification service.
+      # Keep default disabled in unit tests to avoid DB dependencies.
+      - OUTBOX_WORKER_ENABLED=true
+      - OUTBOX_POLL_INTERVAL_SECONDS=2
     restart: unless-stopped
 
   routing-service:
@@ -113,6 +117,20 @@ services:
     platform: linux/amd64
     ports:
       - "20006:80"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PORT=80
+    restart: unless-stopped
+
+  coordinator-service:
+    build:
+      context: .
+      dockerfile: services/coordinator/dockerfile
+    image: saferoute/coordinator:latest
+    container_name: saferoute-coordinator
+    platform: linux/amd64
+    ports:
+      - "20008:80"
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80

@@ -17,6 +17,7 @@ SERVICES = {
     "feedback": ("services.feedback.main", 20004),
     "data_cleaner": ("services.data_cleaner.main", 20005),
     "sos": ("services.sos.main", 20006),
+    "coordinator": ("services.coordinator.main", 20008),
 }
 
 # Docs service (service discovery)

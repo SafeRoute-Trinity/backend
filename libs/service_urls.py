@@ -23,6 +23,7 @@ LOCAL_PORTS = {
     "feedback": 20004,
     "graphhopper_proxy": 20007,
     "sos": 20006,
+    "coordinator": 20008,
     "user_management": 20000,
 }
 
@@ -53,6 +54,7 @@ ROUTING_SERVICE_URL = _get_service_url("routing", LOCAL_PORTS["routing"])
 SAFETY_SCORING_SERVICE_URL = _get_service_url("safety_scoring", LOCAL_PORTS["safety_scoring"])
 FEEDBACK_SERVICE_URL = _get_service_url("feedback", LOCAL_PORTS["feedback"])
 SOS_SERVICE_URL = _get_service_url("sos", LOCAL_PORTS["sos"])
+COORDINATOR_SERVICE_URL = _get_service_url("coordinator", LOCAL_PORTS["coordinator"])
 USER_MANAGEMENT_SERVICE_URL = _get_service_url("user_management", LOCAL_PORTS["user_management"])
 GRAPHHOPPER_PROXY_SERVICE_URL = _get_service_url(
     "graphhopper_proxy", LOCAL_PORTS["graphhopper_proxy"]
