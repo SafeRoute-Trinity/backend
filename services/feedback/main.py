@@ -35,7 +35,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../.
 
 from dotenv import load_dotenv
 
-from common.constants import QUEUE_FEEDBACK_EMAIL
+from common.constants import QUEUE_FEEDBACK_EMAIL, QUEUE_FEEDBACK_SUBMIT
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -106,6 +106,39 @@ async def _handle_email_message(payload: dict) -> None:
         raise
 
 
+async def _handle_feedback_submit(payload: dict) -> None:
+    """Consume feedback.submit queue and write the ticket to the database."""
+    feedback_factory = get_feedback_factory()
+    async for db in get_db():
+        try:
+            await feedback_factory.create_feedback(
+                db=db,
+                feedback_id=uuid.UUID(payload["feedback_id"]),
+                user_id=payload["user_id"],
+                ticket_number=payload["ticket_number"],
+                route_id=uuid.UUID(payload["route_id"]) if payload.get("route_id") else None,
+                lat=payload.get("lat"),
+                lon=payload.get("lon"),
+                type=payload.get("type"),
+                severity=payload.get("severity"),
+                description=payload.get("description"),
+                location=payload.get("location"),
+                attachments=payload.get("attachments"),
+                status=Status.RECEIVED,
+                created_at=datetime.fromisoformat(payload["created_at"]),
+            )
+            await db.commit()
+            logger.info(
+                "RabbitMQ consumer: feedback ticket written feedback_id=%s ticket=%s",
+                payload["feedback_id"],
+                payload["ticket_number"],
+            )
+        except Exception as exc:
+            await db.rollback()
+            logger.error("RabbitMQ consumer: feedback submit failed: %s", exc)
+            raise
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup."""
@@ -130,6 +163,7 @@ async def startup_event():
     connected = await _mq.connect()
     if connected:
         await _mq.consume(QUEUE_FEEDBACK_EMAIL, _handle_email_message)
+        await _mq.consume(QUEUE_FEEDBACK_SUBMIT, _handle_feedback_submit)
 
 
 @app.on_event("shutdown")
@@ -472,36 +506,51 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     # Generate ticket number as string (format: TKT-YYYY-XXXXXX)
     ticket_number = f"TKT-{now.year}-{uuid.uuid4().hex[:6]}"
 
-    # Get feedback factory and create feedback record in database
-    feedback_factory = get_feedback_factory()
-    try:
-        await feedback_factory.create_feedback(
-            db=db,
-            feedback_id=feedback_id,
-            user_id=user_id_str,
-            ticket_number=ticket_number,
-            route_id=rid,
-            lat=lat,
-            lon=lon,
-            type=body.type,
-            severity=body.severity,
-            description=body.description,
-            location=location_dict,
-            attachments=body.attachments,
-            status=Status.RECEIVED,
-            created_at=now,
-        )
+    submit_payload = {
+        "feedback_id": str(feedback_id),
+        "user_id": user_id_str,
+        "ticket_number": ticket_number,
+        "route_id": str(rid),
+        "lat": lat,
+        "lon": lon,
+        "type": body.type.value if body.type else None,
+        "severity": body.severity.value if body.severity else None,
+        "description": body.description,
+        "location": location_dict,
+        "attachments": [str(a) for a in body.attachments] if body.attachments else None,
+        "created_at": now.isoformat(),
+    }
 
-        # Commit the transaction
-        await db.commit()
+    published = await _mq.publish(QUEUE_FEEDBACK_SUBMIT, submit_payload)
 
-        logger.info(
-            f"Feedback created successfully: feedback_id={feedback_id} ticket={ticket_number}"
-        )
-    except Exception as e:
-        await db.rollback()
-        logger.exception(f"Failed to create feedback in database: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to submit feedback: {str(e)}")
+    if not published:
+        # RabbitMQ unavailable — fall back to writing directly
+        feedback_factory = get_feedback_factory()
+        try:
+            await feedback_factory.create_feedback(
+                db=db,
+                feedback_id=feedback_id,
+                user_id=user_id_str,
+                ticket_number=ticket_number,
+                route_id=rid,
+                lat=lat,
+                lon=lon,
+                type=body.type,
+                severity=body.severity,
+                description=body.description,
+                location=location_dict,
+                attachments=body.attachments,
+                status=Status.RECEIVED,
+                created_at=now,
+            )
+            await db.commit()
+            logger.info(
+                f"Feedback created successfully: feedback_id={feedback_id} ticket={ticket_number}"
+            )
+        except Exception as e:
+            await db.rollback()
+            logger.exception(f"Failed to create feedback in database: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to submit feedback: {str(e)}")
 
     # Also store in in-memory cache for backward compatibility
     FEEDBACK[str(feedback_id)] = {

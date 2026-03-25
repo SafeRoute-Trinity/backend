@@ -24,11 +24,13 @@ from typing import Any, Callable, Coroutine, Optional
 import aio_pika
 from aio_pika import DeliveryMode, Message
 
+import os
+
 from common.constants import (
     QUEUE_FEEDBACK_EMAIL,
+    QUEUE_FEEDBACK_SUBMIT,
     QUEUE_SOS_NOTIFICATION,
     RABBITMQ_HOST,
-    RABBITMQ_PASSWORD,
     RABBITMQ_PORT,
     RABBITMQ_USER,
     RABBITMQ_VHOST,
@@ -38,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # All known durable queues - declared on connect so they exist before any
 # publisher or consumer tries to use them.
-_QUEUES = [QUEUE_SOS_NOTIFICATION, QUEUE_FEEDBACK_EMAIL]
+_QUEUES = [QUEUE_SOS_NOTIFICATION, QUEUE_FEEDBACK_EMAIL, QUEUE_FEEDBACK_SUBMIT]
 
 
 class RabbitMQClient:
@@ -61,8 +63,9 @@ class RabbitMQClient:
 
         Returns True on success, False if RabbitMQ is unreachable.
         """
+        rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
         url = (
-            f"amqp://{RABBITMQ_USER}:{RABBITMQ_PASSWORD}"
+            f"amqp://{RABBITMQ_USER}:{rabbitmq_password}"
             f"@{RABBITMQ_HOST}:{RABBITMQ_PORT}{RABBITMQ_VHOST}"
         )
         try:
