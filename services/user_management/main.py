@@ -29,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
+from libs.cas_logger import Op, cas_log
 from models.audit import Audit
 
 # Add parent directory to path to import libs and models
@@ -513,20 +514,16 @@ async def get_current_user(
         HTTPException: 401 if JWT is invalid
         HTTPException: 404 if user not found in database
     """
-    # Extract user_id — full sub claim (e.g. "auth0|6979e8...")
     user_id = extract_user_id_from_auth(auth)
+    cas_log.begin(Op.USER_PROFILE_FETCH, {"user_id": user_id})
+    cas_log.transition(Op.USER_PROFILE_FETCH, "INIT", "TOKEN_VERIFIED")
 
-    print(f"[UserMgmt] get_current_user called for: {user_id}")
-
-    # Query PostgreSQL database for user
     result = await db.execute(select(User).where(User.user_id == user_id))
     user = result.scalar_one_or_none()
 
-    # Auto-create user on first login — fetch profile from Auth0 /userinfo
     if not user:
-        print(f"[UserMgmt] User {user_id} not found, auto-creating from Auth0 /userinfo")
-
-        # Fetch profile from Auth0 /userinfo using the bearer token
+        cas_log.transition(Op.USER_PROFILE_FETCH, "TOKEN_VERIFIED", "USER_NOT_FOUND")
+        logger.info("User %s not found, auto-creating from Auth0 /userinfo", user_id)
         profile = {}
         auth0_domain = os.getenv("AUTH0_DOMAIN", "saferouteapp.eu.auth0.com")
         try:
@@ -542,8 +539,9 @@ async def get_current_user(
                 else:
                     print(f"[UserMgmt] /userinfo returned {resp.status_code}")
         except Exception as e:
-            print(f"[UserMgmt] Failed to fetch /userinfo: {e}")
+            logger.warning("Failed to fetch /userinfo: %s", e)
 
+        cas_log.transition(Op.USER_PROFILE_FETCH, "USER_NOT_FOUND", "PROFILE_FETCHED")
         now = datetime.utcnow()
         user = User(
             user_id=user_id,
@@ -557,20 +555,24 @@ async def get_current_user(
             last_login=now,
         )
         db.add(user)
+        cas_log.transition(Op.USER_PROFILE_FETCH, "PROFILE_FETCHED", "USER_CREATED")
         try:
             await db.commit()
             await db.refresh(user)
             USER_REGISTRATION_TOTAL.inc()
-            print(f"[UserMgmt] Auto-created user {user_id}")
+            cas_log.transition(Op.USER_PROFILE_FETCH, "USER_CREATED", "COMMITTED")
         except Exception as e:
             await db.rollback()
-            print(f"[UserMgmt] Failed to auto-create user {user_id}: {e}")
+            cas_log.transition(
+                Op.USER_PROFILE_FETCH, "USER_CREATED", "COMMIT_FAILED", {"error": str(e)}
+            )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to create user: {e}",
             )
+    else:
+        cas_log.transition(Op.USER_PROFILE_FETCH, "TOKEN_VERIFIED", "USER_FOUND")
 
-    # Update last_login
     user.last_login = datetime.utcnow()
     try:
         await db.commit()
@@ -671,38 +673,18 @@ async def sync_auth0_user(
 ):
     """
     Webhook called by Auth0 Post-Login Action to upsert user data.
-
-    Auth0 calls this on every login (including first login after sign-up).
-    Creates the user if new, updates fields if existing.
-
-    Security: Validates shared secret via X-Auth0-Webhook-Secret header.
     """
-    # Verify webhook secret
+    cas_log.begin(Op.USER_SYNC, {"user_id": payload.user_id})
+
     secret = request.headers.get("X-Auth0-Webhook-Secret")
     expected_secret = os.getenv("AUTH0_WEBHOOK_SECRET")
     if not expected_secret or secret != expected_secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
+    cas_log.transition(Op.USER_SYNC, "INIT", "SECRET_VERIFIED")
 
-    # Strip auth0| prefix for DB storage
     raw_user_id = payload.user_id.split("|", 1)[-1] if "|" in payload.user_id else payload.user_id
 
-    # Upsert: create if new, update if exists
     result = await db.execute(select(User).where(User.user_id == raw_user_id))
-
-    """
-    Auth0 calls this on every login (including first login after sign-up).
-    Creates the user if new, updates fields if existing.
-
-    Security: Validates shared secret via X-Auth0-Webhook-Secret header.
-    """
-    # Verify webhook secret
-    secret = request.headers.get("X-Auth0-Webhook-Secret")
-    expected_secret = os.getenv("AUTH0_WEBHOOK_SECRET")
-    if not expected_secret or secret != expected_secret:
-        raise HTTPException(status_code=401, detail="Invalid webhook secret")
-
-    # Upsert: create if new, update if exists
-    result = await db.execute(select(User).where(User.user_id == payload.user_id))
     user = result.scalar_one_or_none()
 
     now = datetime.utcnow()
@@ -731,19 +713,21 @@ async def sync_auth0_user(
         updated_at=now,
     )
     db.add(audit)
+    cas_log.transition(Op.USER_SYNC, "SECRET_VERIFIED", "USER_UPSERTED")
 
     try:
         await db.commit()
+        cas_log.transition(Op.USER_SYNC, "USER_UPSERTED", "COMMITTED")
     except IntegrityError:
         await db.rollback()
+        cas_log.transition(Op.USER_SYNC, "USER_UPSERTED", "COMMIT_FAILED")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not sync user",
         )
 
-    # Business metric
     USER_REGISTRATION_TOTAL.inc()
-
+    cas_log.transition(Op.USER_SYNC, "COMMITTED", "COMPLETED")
     return {"status": "synced", "user_id": raw_user_id}
 
 
@@ -812,9 +796,9 @@ async def save_preferences(
       - units varchar(20) not null default 'metric' (metric|imperial)
       - created_at/updated_at timestamptz not null default now()
     """
+    cas_log.begin(Op.PREFERENCES_SAVE, {"user_id": user_id})
     now = datetime.utcnow()
 
-    # Ensure user exists
     result = await db.execute(select(User).where(User.user_id == user_id))
     user = result.scalar_one_or_none()
     if not user:
@@ -822,8 +806,7 @@ async def save_preferences(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-
-    # ---- (1) Upsert into user_preferences ----
+    cas_log.transition(Op.PREFERENCES_SAVE, "INIT", "USER_VERIFIED")
     result = await db.execute(select(UserPreferences).where(UserPreferences.user_id == user_id))
     pref = result.scalar_one_or_none()
 
@@ -851,17 +834,20 @@ async def save_preferences(
         updated_at=now,
     )
     db.add(audit)
+    cas_log.transition(Op.PREFERENCES_SAVE, "USER_VERIFIED", "PREFERENCES_UPSERTED")
 
-    # ---- (3) Commit ----
     try:
         await db.commit()
+        cas_log.transition(Op.PREFERENCES_SAVE, "PREFERENCES_UPSERTED", "COMMITTED")
     except IntegrityError:
         await db.rollback()
+        cas_log.transition(Op.PREFERENCES_SAVE, "PREFERENCES_UPSERTED", "COMMIT_FAILED")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not update preference",
         )
 
+    cas_log.transition(Op.PREFERENCES_SAVE, "COMMITTED", "COMPLETED")
     return PreferencesResponse(
         user_id=user_id,
         status="preferences_saved",
@@ -1063,17 +1049,16 @@ async def upsert_trusted_contact(
     Otherwise -> create a new contact.
     Use for adding one contact or editing one by phone; use PUT to replace the whole list.
     """
+    cas_log.begin(Op.TRUSTED_CONTACT_UPSERT, {"user_id": user_id, "phone": body.phone})
     now = datetime.utcnow()
 
-    # ---- (1) Ensure user exists ----
     user = await db.scalar(select(User).where(User.user_id == user_id))
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
-
-    # ---- (2) Try find existing contact (by phone) ----
+    cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "INIT", "USER_VERIFIED")
     contact = await db.scalar(
         select(TrustedContact).where(
             TrustedContact.user_id == user_id,
@@ -1104,7 +1089,6 @@ async def upsert_trusted_contact(
         db.add(contact)
         await db.flush()
 
-    # ---- (5) Audit ----
     audit = Audit(
         log_id=uuid.uuid4(),
         user_id=user_id,
@@ -1114,18 +1098,20 @@ async def upsert_trusted_contact(
         updated_at=now,
     )
     db.add(audit)
+    cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "USER_VERIFIED", "CONTACT_UPSERTED")
 
-    # ---- (6) Commit ----
     try:
         await db.commit()
+        cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "CONTACT_UPSERTED", "COMMITTED")
     except IntegrityError:
         await db.rollback()
+        cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "CONTACT_UPSERTED", "COMMIT_FAILED")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not upsert trusted contact",
         )
 
-    # ---- (7) Response ----
+    cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "COMMITTED", "COMPLETED")
     return TrustedContactUpsertResponse(
         user_id=user_id,
         status="contact_upserted",

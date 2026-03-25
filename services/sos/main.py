@@ -18,12 +18,20 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
+from libs.cas_logger import Op, cas_log
 from libs.db import DatabaseType, get_database_factory, initialize_databases
+from libs.trace_context import TRACE_HEADER, trace_id_var
 from models.audit import Audit
 from models.emergency import Emergency
 from models.user_models import TrustedContact
 
 logger = logging.getLogger(__name__)
+
+
+def _trace_headers() -> dict:
+    """Build outbound headers with the current trace ID."""
+    tid = trace_id_var.get("")
+    return {TRACE_HEADER: tid} if tid else {}
 
 
 # Load environment variables from .env file
@@ -164,6 +172,8 @@ async def root():
 
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
 async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
+    cas_log.begin(Op.EMERGENCY_CALL, {"user_id": body.user_id})
+
     now = datetime.utcnow()
     emergency_id = uuid.uuid4()
 
@@ -180,8 +190,10 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
     db.add(call_row)
 
     await db.flush()
+    cas_log.transition(
+        Op.EMERGENCY_CALL, "INIT", "EMERGENCY_CREATED", {"emergency_id": str(emergency_id)}
+    )
 
-    # Fetch trusted contact phone from DB (same schema as user-management service)
     trusted_contact_stmt = (
         select(TrustedContact)
         .where(TrustedContact.user_id == str(body.user_id))
@@ -190,8 +202,14 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
     )
     trusted_contact = (await db.execute(trusted_contact_stmt)).scalars().first()
     trusted_phone = trusted_contact.phone if trusted_contact else ""
+    cas_log.transition(
+        Op.EMERGENCY_CALL,
+        "EMERGENCY_CREATED",
+        "CONTACT_FETCHED",
+        {"phone": trusted_phone[:4] + "***"},
+    )
 
-    # call notification service (payload must match notification's EmergencyCallRequest schema)
+    cas_log.transition(Op.EMERGENCY_CALL, "CONTACT_FETCHED", "NOTIFICATION_REQUESTED")
     try:
         notification_payload = {
             "emergency_id": str(emergency_id),
@@ -203,10 +221,14 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
             resp = await client.post(
                 f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/call",
                 json=notification_payload,
+                headers=_trace_headers(),
             )
             resp.raise_for_status()
             data = resp.json()
     except httpx.HTTPError as e:
+        cas_log.transition(
+            Op.EMERGENCY_CALL, "NOTIFICATION_REQUESTED", "NOTIFICATION_FAILED", {"error": str(e)}
+        )
         logger.exception(
             "Notification service call failed for emergency_id=%s error=%s",
             emergency_id,
@@ -236,12 +258,19 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
         except Exception:
             await db.rollback()
 
+        cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_FAILED", "FAILED")
         raise HTTPException(
             status_code=503,
             detail=f"Failed to dispatch SOS call via notification service: {str(e)}",
         )
 
     call_status = data.get("status", "failed")
+    cas_log.transition(
+        Op.EMERGENCY_CALL,
+        "NOTIFICATION_REQUESTED",
+        "NOTIFICATION_SENT",
+        {"call_status": call_status},
+    )
 
     call_row.updated_at = datetime.utcnow()
 
@@ -273,6 +302,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_db)):
             detail=f"Could not create emergency call record: {e}",
         )
 
+    cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_SENT", "COMMITTED")
     SOS_CALLS_TOTAL.inc()
     data["emergency_id"] = emergency_id
     return EmergencyCallResponse(**data)
@@ -284,21 +314,27 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     Send emergency SMS with rich details (templates, variables, location).
     Delegates delivery to the Notification service.
     """
-    # Validate sos_id is UUID (user_id is now a plain string from Auth0)
+    cas_log.begin(Op.EMERGENCY_SMS, {"sos_id": body.sos_id, "user_id": body.user_id})
+
     parsed_sos_id = _uuid_or_none(body.sos_id)
     if parsed_sos_id is None:
         raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
 
+    cas_log.transition(Op.EMERGENCY_SMS, "INIT", "VALIDATED", {"sos_id": body.sos_id})
+    cas_log.transition(Op.EMERGENCY_SMS, "VALIDATED", "NOTIFICATION_REQUESTED")
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
                 json=body.model_dump(mode="json"),
+                headers=_trace_headers(),
             )
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPError as e:
-        # Log and audit SMS failure
+        cas_log.transition(
+            Op.EMERGENCY_SMS, "NOTIFICATION_REQUESTED", "NOTIFICATION_FAILED", {"error": str(e)}
+        )
         logger.exception(
             "Notification service SMS call failed for emergency_id=%s user_id=%s recipient=%s: %s",
             body.sos_id,
@@ -320,10 +356,15 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
             # Audit failures should not block the main error
             pass
 
+        cas_log.transition(Op.EMERGENCY_SMS, "NOTIFICATION_FAILED", "FAILED")
         raise HTTPException(
             status_code=503,
             detail=f"Failed to send SMS via notification service: {str(e)}",
         )
+
+    cas_log.transition(
+        Op.EMERGENCY_SMS, "NOTIFICATION_REQUESTED", "SMS_SENT", {"sms_id": data.get("sms_id")}
+    )
 
     # Update status
     now = datetime.utcnow()
@@ -356,6 +397,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         # don't let audit failures affect response
         pass
 
+    cas_log.transition(Op.EMERGENCY_SMS, "SMS_SENT", "COMMITTED")
     return EmergencySMSResponse(**data)
 
 
@@ -389,7 +431,9 @@ async def test_sms(body: TestSMSRequest, db: AsyncSession = Depends(get_db)):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
-                f"{NOTIFICATION_SERVICE_URL}/v1/test/sms", json=body.model_dump()
+                f"{NOTIFICATION_SERVICE_URL}/v1/test/sms",
+                json=body.model_dump(),
+                headers=_trace_headers(),
             )
             response.raise_for_status()
             return TestSMSResponse(**response.json())

@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 #     from libs.db import get_postgis_db  # type: ignore
 # except Exception:
 #     from libs.postgis_db import get_postgis_db
+from libs.cas_logger import Op, cas_log
 from models.audit import Audit
 
 # Add parent directory to path for imports
@@ -858,6 +859,7 @@ async def calc(
     db: AsyncSession = Depends(get_db),
     postgisDB: AsyncSession = Depends(get_postgis_db),
 ):
+    cas_log.begin(Op.ROUTE_CALCULATE, {"user_id": body.user_id})
     ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
 
     rid = uuid.uuid4()
@@ -877,6 +879,7 @@ async def calc(
             db=postgisDB,
             algorithm=algorithm,
         )
+        cas_log.transition(Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid)})
     except Exception as e:
         logger.warning("Falling back to default route in /v1/routes/calculate: %s", e)
 
@@ -895,6 +898,7 @@ async def calc(
             waypoints=_extract_waypoints_from_geojson(route_geojson, body.origin, body.destination),
         )
     else:
+        cas_log.transition(Op.ROUTE_CALCULATE, "INIT", "ROUTE_FALLBACK", {"route_id": str(rid)})
         opt = RouteOption(
             route_index=0,
             is_primary=True,
@@ -926,6 +930,11 @@ async def calc(
         updated_at=now,
     )
     db.add(audit)
+    cas_log.transition(
+        Op.ROUTE_CALCULATE,
+        "ROUTE_COMPUTED" if route_geojson else "ROUTE_FALLBACK",
+        "COMMITTED",
+    )
 
     return RouteCalculateResponse(**{k: v for k, v in ROUTES[rid].items() if k != "user_id"})
 
@@ -963,10 +972,7 @@ async def nav_start(
 ):
     # TODO: should use actual route_id and user_id (uuid) and test AUDIT again
 
-    # Business metric: navigation session started
-    ROUTING_NAVIGATION_STARTS_TOTAL.inc()
-
-    # Business metric: navigation session started
+    cas_log.begin(Op.NAVIGATION_START, {"route_id": str(body.route_id), "user_id": body.user_id})
     ROUTING_NAVIGATION_STARTS_TOTAL.inc()
 
     sid = uuid.uuid4()
@@ -983,6 +989,8 @@ async def nav_start(
         updated_at=now,
     )
     db.add(audit)
+    cas_log.transition(Op.NAVIGATION_START, "INIT", "SESSION_CREATED", {"session_id": str(sid)})
+    cas_log.transition(Op.NAVIGATION_START, "SESSION_CREATED", "COMMITTED")
 
     return NavigationStartResponse(session_id=sid, status="active", started_at=now)
 

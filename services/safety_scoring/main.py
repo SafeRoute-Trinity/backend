@@ -34,16 +34,30 @@ backend_env_path = Path(__file__).resolve().parents[2] / ".env"
 if backend_env_path.exists():
     load_dotenv(backend_env_path)
 
+from libs.cas_logger import Op, cas_log
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import ServiceAppConfig
 from libs.rate_limiter import RateLimiter, default_rate_limit_config
+from libs.structured_logging import setup_structured_logging
+from libs.trace_context import TRACE_HEADER, get_or_create_trace_id, trace_id_var
 
 # Initialize database factory
 initialize_databases([DatabaseType.POSTGIS])
 
 app = FastAPI()
+setup_structured_logging("safety_scoring")
 
 _rate_limiter = RateLimiter(default_rate_limit_config(), "safety_scoring")
+
+
+@app.middleware("http")
+async def _trace_middleware(request: Request, call_next):
+    incoming = request.headers.get(TRACE_HEADER)
+    tid = get_or_create_trace_id(incoming)
+    trace_id_var.set(tid)
+    response = await call_next(request)
+    response.headers[TRACE_HEADER] = tid
+    return response
 
 
 @app.middleware("http")
@@ -113,6 +127,10 @@ async def get_ch_route_geojson(route_request: "RouteRequest") -> dict:
     """
     Fetch route from GraphHopper proxy and return GeoJSON-compatible payload.
     """
+    _headers = {}
+    tid = trace_id_var.get("")
+    if tid:
+        _headers[TRACE_HEADER] = tid
     try:
         async with httpx.AsyncClient(timeout=GRAPHHOPPER_PROXY_TIMEOUT_SECONDS) as client:
             response = await client.post(
@@ -122,6 +140,7 @@ async def get_ch_route_geojson(route_request: "RouteRequest") -> dict:
                     "start": {"lat": route_request.start.lat, "lng": route_request.start.lng},
                     "end": {"lat": route_request.end.lat, "lng": route_request.end.lng},
                 },
+                headers=_headers,
             )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"GraphHopper proxy request failed: {e}") from e
@@ -459,13 +478,16 @@ async def update_danger_zone(
     Update safety weight for a specific edge and its bidirectional counterpart.
     """
     try:
-        # Find the geometry of the selected edge
+        cas_log.begin(Op.SAFETY_WEIGHT_UPDATE, {"edge_id": update.edge_id})
         geom_query = text("SELECT geometry FROM ways WHERE gid = :id")
         result = await db.execute(geom_query, {"id": update.edge_id})
         geom_res = result.fetchone()
 
         if not geom_res:
+            cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "INIT", "EDGE_NOT_FOUND")
+            cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "EDGE_NOT_FOUND", "FAILED")
             raise HTTPException(status_code=404, detail="Edge not found")
+        cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "INIT", "EDGE_FOUND")
 
         # Update ALL edges that share exactly the same geometry (spatial equality)
         update_query = text("""
@@ -475,9 +497,10 @@ async def update_danger_zone(
         """)
 
         await db.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
+        cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "EDGE_FOUND", "UPDATED")
         await db.commit()
-
-        # TODO: add audit when auth is ready
+        cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "UPDATED", "COMMITTED")
+        cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "COMMITTED", "COMPLETED")
 
         # audit = Audit(
         #     log_id=uuid.uuid4(),
@@ -562,16 +585,24 @@ async def get_route(
     Calculate route using pgRouting with safety weights.
     """
     try:
-        # Metric
+        cas_log.begin(Op.SAFETY_ROUTE, {"algorithm": algorithm})
         SAFETY_SCORE_ROUTE_REQUESTS_TOTAL.inc()
 
         if algorithm == "ch":
+            cas_log.transition(Op.SAFETY_ROUTE, "INIT", "CH_REQUESTED")
             try:
-                return await get_ch_route_geojson(request)
+                result = await get_ch_route_geojson(request)
+                cas_log.transition(Op.SAFETY_ROUTE, "CH_REQUESTED", "ROUTE_COMPUTED")
+                cas_log.transition(Op.SAFETY_ROUTE, "ROUTE_COMPUTED", "COMPLETED")
+                return result
             except Exception:
+                cas_log.transition(Op.SAFETY_ROUTE, "CH_REQUESTED", "CH_FAILED")
                 if not CH_FALLBACK_TO_DIJKSTRA:
                     raise
+                cas_log.transition(Op.SAFETY_ROUTE, "CH_FAILED", "DIJKSTRA_REQUESTED")
                 algorithm = "dijkstra"
+        else:
+            cas_log.transition(Op.SAFETY_ROUTE, "INIT", "DIJKSTRA_REQUESTED")
 
         # 1. Find nearest graph node by snapping to nearest edge endpoint.
         # This avoids scanning huge start/end-point candidate sets.
@@ -709,9 +740,11 @@ async def get_route(
             routes = route_res.fetchall()
 
         if not routes:
+            cas_log.transition(Op.SAFETY_ROUTE, "DIJKSTRA_REQUESTED", "NO_PATH")
+            cas_log.transition(Op.SAFETY_ROUTE, "NO_PATH", "FAILED")
             raise HTTPException(status_code=404, detail="No path found.")
 
-        # 4. Construct GeoJSON Response
+        cas_log.transition(Op.SAFETY_ROUTE, "DIJKSTRA_REQUESTED", "ROUTE_COMPUTED")
         features = []
         total_distance = 0.0
 
@@ -796,6 +829,7 @@ async def get_route(
 
         # db.add(audit)
 
+        cas_log.transition(Op.SAFETY_ROUTE, "ROUTE_COMPUTED", "COMPLETED")
         return {
             "type": "FeatureCollection",
             "features": features,
