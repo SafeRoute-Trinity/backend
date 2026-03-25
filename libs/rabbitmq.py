@@ -25,6 +25,7 @@ import aio_pika
 from aio_pika import DeliveryMode, Message
 
 from common.constants import (
+    QUEUE_FEEDBACK_EMAIL,
     QUEUE_SOS_NOTIFICATION,
     RABBITMQ_HOST,
     RABBITMQ_PASSWORD,
@@ -37,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # All known durable queues - declared on connect so they exist before any
 # publisher or consumer tries to use them.
-_QUEUES = [QUEUE_SOS_NOTIFICATION]
+_QUEUES = [QUEUE_SOS_NOTIFICATION, QUEUE_FEEDBACK_EMAIL]
 
 
 class RabbitMQClient:
