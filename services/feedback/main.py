@@ -14,7 +14,7 @@ from email.mime.text import MIMEText
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
 import httpx
-from fastapi import Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -398,7 +398,11 @@ async def root():
     return {"service": "feedback", "status": "running"}
 
 
+_compat_router = APIRouter(include_in_schema=False)
+
+
 @app.post("/v1/feedback/submit", response_model=FeedbackSubmitResponse)
+@_compat_router.post("/submit", response_model=FeedbackSubmitResponse)
 async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)):
     await cas_log.begin(Op.FEEDBACK_SUBMIT, {"user_id": body.user_id})
 
@@ -532,6 +536,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
 
 
 @app.get("/v1/feedback", response_model=PaginatedResponse[FeedbackStatusResponse])
+@_compat_router.get("/", response_model=PaginatedResponse[FeedbackStatusResponse])
 async def list_feedback(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     status: Optional[Status] = Query(
@@ -593,6 +598,7 @@ async def list_feedback(
 
 
 @app.post("/v1/feedback/validate", response_model=FeedbackValidateResponse)
+@_compat_router.post("/validate", response_model=FeedbackValidateResponse)
 async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get_db)):
     await cas_log.begin(Op.FEEDBACK_VALIDATE, {"user_id": body.user_id})
 
@@ -664,6 +670,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
 
 
 @app.get("/v1/feedback/{feedback_id}/status", response_model=FeedbackStatusResponse)
+@_compat_router.get("/{feedback_id}/status", response_model=FeedbackStatusResponse)
 async def status(feedback_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     FEEDBACK_STATUS_CHECKS_TOTAL.inc()
 
@@ -736,6 +743,7 @@ async def status(feedback_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
 
 
 @app.put("/v1/feedback/{feedback_id}/status", response_model=FeedbackStatusResponse)
+@_compat_router.put("/{feedback_id}/status", response_model=FeedbackStatusResponse)
 async def update_status(
     feedback_id: uuid.UUID,
     body: FeedbackStatusUpdateRequest,
@@ -803,6 +811,9 @@ async def update_status(
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+app.include_router(_compat_router)
 
 
 @app.post("/v1/system-feedback/submit", response_model=SystemFeedbackSubmitResponse)
