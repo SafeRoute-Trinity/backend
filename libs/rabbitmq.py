@@ -63,7 +63,7 @@ class RabbitMQClient:
 
         Returns True on success, False if RabbitMQ is unreachable.
         """
-        rabbitmq_password = os.getenv("RABBITMQ_PASSWORD", "guest")
+        rabbitmq_password = os.getenv("RABBITMQ_PASSWORD")
         url = (
             f"amqp://{RABBITMQ_USER}:{rabbitmq_password}"
             f"@{RABBITMQ_HOST}:{RABBITMQ_PORT}{RABBITMQ_VHOST}"
