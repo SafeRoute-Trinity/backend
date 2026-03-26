@@ -50,6 +50,20 @@ class AzureJsonFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[1]:
             payload["exception"] = "".join(traceback.format_exception(*record.exc_info))
 
+        _CAS_KEYS = (
+            "cas_operation",
+            "cas_sequence",
+            "cas_expected_state",
+            "cas_new_state",
+            "cas_payload_hash",
+            "cas_valid",
+            "cas_detail",
+        )
+        for key in _CAS_KEYS:
+            val = getattr(record, key, None)
+            if val is not None:
+                payload[key] = val
+
         return json.dumps(payload, default=str)
 
 

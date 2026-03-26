@@ -16,6 +16,9 @@ from prometheus_client import (
     generate_latest,
 )
 
+from libs.cas_enforcer import CASConflictError, cas_enforcer
+from libs.cas_logger import cas_log
+from libs.cas_sync import cas_subscriber
 from libs.rate_limiter import RateLimitConfig, RateLimiter, default_rate_limit_config
 from libs.structured_logging import setup_structured_logging
 from libs.trace_context import TRACE_HEADER, get_or_create_trace_id, trace_id_var
@@ -155,6 +158,10 @@ class FastAPIServiceFactory:
         # trace_id_var is available to all subsequent handlers / loggers.
         self._add_trace_middleware(app)
 
+        # CAS conflict middleware — catches CASConflictError from any
+        # endpoint and returns a clean 409 Conflict response.
+        self._add_cas_conflict_middleware(app)
+
         # Add health check endpoint (always enabled)
         self._add_health_endpoint(app)
 
@@ -168,11 +175,24 @@ class FastAPIServiceFactory:
             self._add_metrics_middleware(app)
             self._add_metrics_endpoint(app)
 
-        # Release the Redis connection pool on application shutdown.
+        # Add readiness endpoint for K8s (checks DB + Redis + CAS sync)
+        self._add_readiness_endpoint(app)
+
+        # Lifecycle: initialize CAS enforcer + sync subscriber on startup,
+        # and tear down on shutdown.
+        svc_name = self.config.service_name
         rate_limiter = self.rate_limiter
 
+        @app.on_event("startup")
+        async def _startup_cas() -> None:
+            await cas_enforcer.initialize(svc_name)
+            cas_log.attach_enforcer(cas_enforcer)
+            await cas_subscriber.start()
+
         @app.on_event("shutdown")
-        async def _close_rate_limiter() -> None:
+        async def _shutdown() -> None:
+            await cas_subscriber.stop()
+            await cas_enforcer.close()
             await rate_limiter.close()
 
         # Store metrics in app state for access in routes
@@ -197,6 +217,45 @@ class FastAPIServiceFactory:
             response = await call_next(request)
             response.headers[TRACE_HEADER] = tid
             return response
+
+    def _add_cas_conflict_middleware(self, app: FastAPI):
+        """Return HTTP 409 when a CAS transition conflicts."""
+
+        @app.middleware("http")
+        async def cas_conflict_middleware(request: Request, call_next):
+            try:
+                return await call_next(request)
+            except CASConflictError as exc:
+                from fastapi.responses import JSONResponse
+
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": "State conflict — another replica modified this operation",
+                        "operation": exc.operation,
+                        "expected": exc.expected,
+                        "trace_id": exc.trace_id,
+                    },
+                )
+
+    def _add_readiness_endpoint(self, app: FastAPI):
+        """K8s readiness probe: DB reachable, Redis connected, CAS enforcer ready."""
+
+        @app.get("/ready")
+        async def readiness_check():
+            checks = {
+                "cas_enforcer": cas_enforcer.ready,
+                "cas_sync": cas_subscriber.is_connected,
+            }
+            last = cas_subscriber.last_event_at
+            if last:
+                checks["last_cas_event"] = last.isoformat()
+
+            all_ok = checks["cas_enforcer"]
+            return {
+                "ready": all_ok,
+                "checks": checks,
+            }
 
     def _add_rate_limit_middleware(self, app: FastAPI):
         """Add Redis-backed rate limiting middleware to the app.
