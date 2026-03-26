@@ -6,13 +6,18 @@ per ``trace_id``.  Each transition records the expected previous state and
 the new state, creating an auditable sequence that Azure Monitor / KQL can
 query to detect broken chains, skipped steps, or stuck operations.
 
+When an enforcer is attached (see ``libs/cas_enforcer``), every transition
+is **also** persisted atomically in PostgreSQL and broadcast to peer
+replicas via Redis pub/sub — giving true cross-replica consistency, not
+just observability.
+
 Usage::
 
     from libs.cas_logger import cas_log, Op
 
-    cas_log.begin(Op.EMERGENCY_CALL, detail={"user_id": uid})
-    cas_log.transition(Op.EMERGENCY_CALL, "INIT", "EMERGENCY_CREATED",
-                       detail={"emergency_id": str(eid)})
+    await cas_log.begin(Op.EMERGENCY_CALL, detail={"user_id": uid})
+    await cas_log.transition(Op.EMERGENCY_CALL, "INIT", "EMERGENCY_CREATED",
+                             detail={"emergency_id": str(eid)})
 
 KQL consistency check::
 
@@ -32,7 +37,10 @@ import json
 import logging
 from contextvars import ContextVar
 from enum import Enum
-from typing import Any, Dict, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, Optional, Set
+
+if TYPE_CHECKING:
+    from libs.cas_enforcer import CASEnforcer
 
 logger = logging.getLogger("cas")
 
@@ -174,25 +182,74 @@ def _is_valid(op: Op, expected: str, new: str) -> bool:
 
 
 class CASLogger:
-    """Singleton CAS state-transition logger."""
+    """
+    Async CAS state-transition logger with optional DB enforcement.
 
-    def begin(
+    In *log-only* mode (no enforcer attached) the calls still emit structured
+    JSON via Python logging — useful for local dev and tests.  When an
+    enforcer is attached the same call also writes to ``cas_state`` in
+    PostgreSQL and publishes to Redis.
+    """
+
+    def __init__(self) -> None:
+        self._enforcer: Optional[CASEnforcer] = None
+
+    def attach_enforcer(self, enforcer: CASEnforcer) -> None:
+        """Wire the DB-backed enforcer (call once at startup)."""
+        self._enforcer = enforcer
+
+    async def begin(
         self,
         operation: Op,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Reset sequence and emit the INIT marker for a new operation."""
         _cas_sequence.set(0)
-        self.transition(operation, "NONE", "INIT", detail)
+        self._emit(operation, "NONE", "INIT", detail)
 
-    def transition(
+        if self._enforcer and self._enforcer.ready:
+            try:
+                await self._enforcer.begin(operation, detail)
+            except Exception:
+                logger.warning(
+                    "CAS enforcer begin failed (table missing or DB down?) — logging only",
+                    exc_info=True,
+                )
+
+    async def transition(
         self,
         operation: Op,
         expected: str,
         new: str,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Log a single state transition with CAS metadata."""
+        """Log (and optionally enforce) a single state transition."""
+        self._emit(operation, expected, new, detail)
+
+        if self._enforcer and self._enforcer.ready:
+            try:
+                await self._enforcer.transition(operation, expected, new, detail)
+            except Exception as exc:
+                # Lazy import avoids circular import (cas_enforcer imports cas_logger).
+                from libs.cas_enforcer import CASConflictError
+
+                if isinstance(exc, CASConflictError):
+                    raise
+                logger.warning(
+                    "CAS enforcer transition failed (%s -> %s) — logging only",
+                    expected,
+                    new,
+                    exc_info=True,
+                )
+
+    def _emit(
+        self,
+        operation: Op,
+        expected: str,
+        new: str,
+        detail: Optional[Dict[str, Any]],
+    ) -> None:
+        """Write the structured log line (always, regardless of enforcer)."""
         seq = _next_seq()
         valid = _is_valid(operation, expected, new)
 

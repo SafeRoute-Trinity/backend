@@ -400,7 +400,7 @@ async def root():
 
 @app.post("/v1/feedback/submit", response_model=FeedbackSubmitResponse)
 async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)):
-    cas_log.begin(Op.FEEDBACK_SUBMIT, {"user_id": body.user_id})
+    await cas_log.begin(Op.FEEDBACK_SUBMIT, {"user_id": body.user_id})
 
     # Business metric
     FEEDBACK_SUBMISSIONS_TOTAL.inc()
@@ -444,7 +444,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     # Generate ticket number as string (format: TKT-YYYY-XXXXXX)
     ticket_number = f"TKT-{now.year}-{uuid.uuid4().hex[:6]}"
 
-    cas_log.transition(Op.FEEDBACK_SUBMIT, "INIT", "VALIDATED", {"ticket": ticket_number})
+    await cas_log.transition(Op.FEEDBACK_SUBMIT, "INIT", "VALIDATED", {"ticket": ticket_number})
 
     # Get feedback factory and create feedback record in database
     feedback_factory = get_feedback_factory()
@@ -466,7 +466,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
             created_at=now,
         )
 
-        cas_log.transition(
+        await cas_log.transition(
             Op.FEEDBACK_SUBMIT,
             "VALIDATED",
             "DB_CREATED",
@@ -476,7 +476,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
         # Commit the transaction
         await db.commit()
 
-        cas_log.transition(Op.FEEDBACK_SUBMIT, "DB_CREATED", "COMMITTED")
+        await cas_log.transition(Op.FEEDBACK_SUBMIT, "DB_CREATED", "COMMITTED")
 
         logger.info(
             f"Feedback created successfully: feedback_id={feedback_id} ticket={ticket_number}"
@@ -484,7 +484,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     except Exception as e:
         await db.rollback()
         logger.exception(f"Failed to create feedback in database: {e}")
-        cas_log.transition(Op.FEEDBACK_SUBMIT, "DB_CREATED", "DB_FAILED", {"error": str(e)})
+        await cas_log.transition(Op.FEEDBACK_SUBMIT, "DB_CREATED", "DB_FAILED", {"error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to submit feedback: {str(e)}")
 
     # Also store in in-memory cache for backward compatibility
@@ -526,7 +526,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
     except Exception:
         logger.exception("Failed to write audit for feedback.submit")
 
-    cas_log.transition(Op.FEEDBACK_SUBMIT, "COMMITTED", "COMPLETED")
+    await cas_log.transition(Op.FEEDBACK_SUBMIT, "COMMITTED", "COMPLETED")
 
     return resp
 
@@ -594,7 +594,7 @@ async def list_feedback(
 
 @app.post("/v1/feedback/validate", response_model=FeedbackValidateResponse)
 async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get_db)):
-    cas_log.begin(Op.FEEDBACK_VALIDATE, {"user_id": body.user_id})
+    await cas_log.begin(Op.FEEDBACK_VALIDATE, {"user_id": body.user_id})
 
     # Business metric
     FEEDBACK_VALIDATIONS_TOTAL.inc()
@@ -621,7 +621,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
             allow_submission=validation_result.allow_submission,
             reason=validation_result.reason,
         )
-        cas_log.transition(
+        await cas_log.transition(
             Op.FEEDBACK_VALIDATE,
             "INIT",
             "VALIDATED",
@@ -638,7 +638,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
             allow_submission=not is_spam,
             reason="OK" if not is_spam else "Too many submissions",
         )
-        cas_log.transition(
+        await cas_log.transition(
             Op.FEEDBACK_VALIDATE,
             "INIT",
             "VALIDATED",
@@ -658,7 +658,7 @@ async def validate(body: FeedbackValidateRequest, db: AsyncSession = Depends(get
     except Exception:
         logger.exception("Failed to write audit for feedback.validate")
 
-    cas_log.transition(Op.FEEDBACK_VALIDATE, "VALIDATED", "COMPLETED")
+    await cas_log.transition(Op.FEEDBACK_VALIDATE, "VALIDATED", "COMPLETED")
 
     return resp
 
@@ -807,7 +807,7 @@ async def update_status(
 
 @app.post("/v1/system-feedback/submit", response_model=SystemFeedbackSubmitResponse)
 async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Request):
-    cas_log.begin(Op.SYSTEM_FEEDBACK, {"user_id": body.user_id})
+    await cas_log.begin(Op.SYSTEM_FEEDBACK, {"user_id": body.user_id})
 
     SYSTEM_FEEDBACK_SUBMISSIONS_TOTAL.inc()
 
@@ -834,7 +834,7 @@ async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Req
         remote_ip=request.client.host if request.client else None,
     )
 
-    cas_log.transition(Op.SYSTEM_FEEDBACK, "INIT", "CAPTCHA_VERIFIED")
+    await cas_log.transition(Op.SYSTEM_FEEDBACK, "INIT", "CAPTCHA_VERIFIED")
 
     try:
         send_system_feedback_email(
@@ -847,7 +847,7 @@ async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Req
         )
     except Exception as e:
         logger.exception("Failed to send system feedback email")
-        cas_log.transition(
+        await cas_log.transition(
             Op.SYSTEM_FEEDBACK,
             "CAPTCHA_VERIFIED",
             "EMAIL_FAILED",
@@ -858,8 +858,8 @@ async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Req
             detail=f"Failed to send feedback email: {str(e)}",
         )
 
-    cas_log.transition(Op.SYSTEM_FEEDBACK, "CAPTCHA_VERIFIED", "EMAIL_SENT")
-    cas_log.transition(Op.SYSTEM_FEEDBACK, "EMAIL_SENT", "COMPLETED")
+    await cas_log.transition(Op.SYSTEM_FEEDBACK, "CAPTCHA_VERIFIED", "EMAIL_SENT")
+    await cas_log.transition(Op.SYSTEM_FEEDBACK, "EMAIL_SENT", "COMPLETED")
 
     return SystemFeedbackSubmitResponse(
         status="received",

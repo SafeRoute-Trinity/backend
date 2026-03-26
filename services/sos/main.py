@@ -174,21 +174,21 @@ async def root():
 
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
 async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serializable_db)):
-    cas_log.begin(Op.EMERGENCY_CALL, {"user_id": body.user_id})
+    await cas_log.begin(Op.EMERGENCY_CALL, {"user_id": body.user_id})
     # SERIALIZABLE isolation is already active on `db` (set by get_serializable_db).
     # All reads in this handler are part of that snapshot; any concurrent
     # is_primary flip or conflicting Emergency write will cause a serialization
     # error at commit time rather than silently producing skewed data.
     now = datetime.utcnow()
     emergency_id = uuid.uuid4()
-    cas_log.transition(
+    await cas_log.transition(
         Op.EMERGENCY_CALL,
         "INIT",
         "EMERGENCY_CREATED",
         {"emergency_id": str(emergency_id)},
     )
     trusted_phone = body.phone
-    cas_log.transition(
+    await cas_log.transition(
         Op.EMERGENCY_CALL,
         "EMERGENCY_CREATED",
         "CONTACT_FETCHED",
@@ -201,7 +201,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
     data: dict = {}
     call_status = "failed"
 
-    cas_log.transition(Op.EMERGENCY_CALL, "CONTACT_FETCHED", "NOTIFICATION_REQUESTED")
+    await cas_log.transition(Op.EMERGENCY_CALL, "CONTACT_FETCHED", "NOTIFICATION_REQUESTED")
     try:
         notification_payload = {
             "emergency_id": str(emergency_id),
@@ -218,14 +218,14 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
             resp.raise_for_status()
             data = resp.json()
             call_status = data.get("status", "failed")
-            cas_log.transition(
+            await cas_log.transition(
                 Op.EMERGENCY_CALL,
                 "NOTIFICATION_REQUESTED",
                 "NOTIFICATION_SENT",
                 {"call_status": call_status},
             )
     except httpx.HTTPError as e:
-        cas_log.transition(
+        await cas_log.transition(
             Op.EMERGENCY_CALL,
             "NOTIFICATION_REQUESTED",
             "NOTIFICATION_FAILED",
@@ -289,7 +289,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
         raise
 
     if notification_failed:
-        cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_FAILED", "FAILED")
+        await cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_FAILED", "FAILED")
         raise HTTPException(
             status_code=503,
             detail=f"Failed to dispatch SOS call via notification service: {str(notification_error)}",
@@ -303,9 +303,28 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
     }
 
     SOS_CALLS_TOTAL.inc()
-    data["emergency_id"] = emergency_id
-    cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_SENT", "COMMITTED")
-    return EmergencyCallResponse(**data)
+    await cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_SENT", "COMMITTED")
+
+    raw_ts = data.get("timestamp")
+    if isinstance(raw_ts, datetime):
+        resp_ts = raw_ts
+    elif isinstance(raw_ts, str):
+        try:
+            resp_ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            resp_ts = datetime.utcnow()
+    else:
+        resp_ts = datetime.utcnow()
+
+    raw_status = data.get("status", "initiated")
+    resp_status = raw_status if raw_status in ("initiated", "failed") else "initiated"
+
+    return EmergencyCallResponse(
+        emergency_id=emergency_id,
+        status=resp_status,
+        call_id=str(data.get("call_id") or data.get("sid") or ""),
+        timestamp=resp_ts,
+    )
 
 
 @app.post("/v1/emergency/sms", response_model=EmergencySMSResponse)
@@ -314,14 +333,14 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     Send emergency SMS with rich details (templates, variables, location).
     Delegates delivery to the Notification service.
     """
-    cas_log.begin(Op.EMERGENCY_SMS, {"sos_id": body.sos_id, "user_id": body.user_id})
+    await cas_log.begin(Op.EMERGENCY_SMS, {"sos_id": body.sos_id, "user_id": body.user_id})
     # Validate sos_id is UUID (user_id is now a plain string from Auth0)
     parsed_sos_id = _uuid_or_none(body.sos_id)
     if parsed_sos_id is None:
         raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
 
-    cas_log.transition(Op.EMERGENCY_SMS, "INIT", "VALIDATED", {"sos_id": body.sos_id})
-    cas_log.transition(Op.EMERGENCY_SMS, "VALIDATED", "NOTIFICATION_REQUESTED")
+    await cas_log.transition(Op.EMERGENCY_SMS, "INIT", "VALIDATED", {"sos_id": body.sos_id})
+    await cas_log.transition(Op.EMERGENCY_SMS, "VALIDATED", "NOTIFICATION_REQUESTED")
 
     data: dict = {}
     try:
@@ -341,14 +360,14 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
             # Only raise if the response has no usable SMS data
             if not response.is_success and "status" not in data:
                 response.raise_for_status()
-            cas_log.transition(
+            await cas_log.transition(
                 Op.EMERGENCY_SMS,
                 "NOTIFICATION_REQUESTED",
                 "SMS_SENT",
                 {"sms_id": data.get("sms_id")},
             )
     except httpx.HTTPError as e:
-        cas_log.transition(
+        await cas_log.transition(
             Op.EMERGENCY_SMS,
             "NOTIFICATION_REQUESTED",
             "NOTIFICATION_FAILED",
@@ -374,7 +393,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         except Exception:
             pass
 
-        cas_log.transition(Op.EMERGENCY_SMS, "NOTIFICATION_FAILED", "FAILED")
+        await cas_log.transition(Op.EMERGENCY_SMS, "NOTIFICATION_FAILED", "FAILED")
         raise HTTPException(
             status_code=503,
             detail=f"Failed to send SMS via notification service: {str(e)}",
@@ -411,7 +430,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         # don't let audit failures affect response
         pass
 
-    cas_log.transition(Op.EMERGENCY_SMS, "SMS_SENT", "COMMITTED")
+    await cas_log.transition(Op.EMERGENCY_SMS, "SMS_SENT", "COMMITTED")
     return EmergencySMSResponse(
         emergency_id=parsed_sos_id,
         status=data.get("status", "failed"),

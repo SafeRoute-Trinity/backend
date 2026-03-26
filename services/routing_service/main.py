@@ -2064,7 +2064,7 @@ async def calc(
     db: AsyncSession = Depends(get_db),
     postgisDB: AsyncSession = Depends(get_postgis_db),
 ):
-    cas_log.begin(Op.ROUTE_CALCULATE, {"user_id": body.user_id})
+    await cas_log.begin(Op.ROUTE_CALCULATE, {"user_id": body.user_id})
 
     ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
 
@@ -2095,7 +2095,9 @@ async def calc(
                 request=route_request,
                 optimize_for=body.preferences.optimize_for,
             )
-            cas_log.transition(Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid)})
+            await cas_log.transition(
+                Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid)}
+            )
         except Exception as e:
             logger.warning("CH route failed in /v1/routes/calculate: %s", e)
             if not CH_FALLBACK_TO_DIJKSTRA:
@@ -2110,7 +2112,9 @@ async def calc(
                 db=postgisDB,
                 algorithm=algorithm,
             )
-            cas_log.transition(Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid)})
+            await cas_log.transition(
+                Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid)}
+            )
         except Exception as e:
             logger.warning("Falling back to default route in /v1/routes/calculate: %s", e)
 
@@ -2129,7 +2133,9 @@ async def calc(
             waypoints=_extract_waypoints_from_geojson(route_geojson, body.origin, body.destination),
         )
     else:
-        cas_log.transition(Op.ROUTE_CALCULATE, "INIT", "ROUTE_FALLBACK", {"route_id": str(rid)})
+        await cas_log.transition(
+            Op.ROUTE_CALCULATE, "INIT", "ROUTE_FALLBACK", {"route_id": str(rid)}
+        )
         opt = RouteOption(
             route_index=0,
             is_primary=True,
@@ -2161,7 +2167,7 @@ async def calc(
         updated_at=now,
     )
     db.add(audit)
-    cas_log.transition(
+    await cas_log.transition(
         Op.ROUTE_CALCULATE,
         "ROUTE_COMPUTED" if route_geojson else "ROUTE_FALLBACK",
         "COMMITTED",
@@ -2198,7 +2204,7 @@ async def recalc(
 async def nav_start(
     body: NavigationStartRequest, db=Depends(get_db), postgisDB=Depends(get_postgis_db)
 ):
-    cas_log.begin(
+    await cas_log.begin(
         Op.NAVIGATION_START,
         {"route_id": str(body.route_id), "user_id": body.user_id},
     )
@@ -2224,8 +2230,10 @@ async def nav_start(
         updated_at=now,
     )
     db.add(audit)
-    cas_log.transition(Op.NAVIGATION_START, "INIT", "SESSION_CREATED", {"session_id": str(sid)})
-    cas_log.transition(Op.NAVIGATION_START, "SESSION_CREATED", "COMMITTED")
+    await cas_log.transition(
+        Op.NAVIGATION_START, "INIT", "SESSION_CREATED", {"session_id": str(sid)}
+    )
+    await cas_log.transition(Op.NAVIGATION_START, "SESSION_CREATED", "COMMITTED")
 
     return NavigationStartResponse(session_id=sid, status="active", started_at=now)
 

@@ -35,7 +35,9 @@ if backend_env_path.exists():
     load_dotenv(backend_env_path)
 
 from libs.db import DatabaseType, get_database_factory, initialize_databases
+from libs.cas_enforcer import CASConflictError, cas_enforcer
 from libs.cas_logger import Op, cas_log
+from libs.cas_sync import cas_subscriber
 from libs.structured_logging import setup_structured_logging
 from libs.trace_context import TRACE_HEADER, get_or_create_trace_id, trace_id_var
 from libs.fastapi_service import ServiceAppConfig
@@ -46,6 +48,20 @@ initialize_databases([DatabaseType.POSTGIS])
 
 app = FastAPI()
 setup_structured_logging("safety_scoring")
+
+
+@app.on_event("startup")
+async def _startup_cas():
+    await cas_enforcer.initialize("safety_scoring")
+    cas_log.attach_enforcer(cas_enforcer)
+    await cas_subscriber.start()
+
+
+@app.on_event("shutdown")
+async def _shutdown_cas():
+    await cas_subscriber.stop()
+    await cas_enforcer.close()
+
 
 _rate_limiter = RateLimiter(default_rate_limit_config(), "safety_scoring")
 
@@ -478,18 +494,18 @@ async def update_danger_zone(
     Update safety weight for a specific edge and its bidirectional counterpart.
     """
     try:
-        cas_log.begin(Op.SAFETY_WEIGHT_UPDATE, {"edge_id": update.edge_id})
+        await cas_log.begin(Op.SAFETY_WEIGHT_UPDATE, {"edge_id": update.edge_id})
         # Find the geometry of the selected edge
         geom_query = text("SELECT geometry FROM ways WHERE gid = :id")
         result = await db.execute(geom_query, {"id": update.edge_id})
         geom_res = result.fetchone()
 
         if not geom_res:
-            cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "INIT", "EDGE_NOT_FOUND")
-            cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "EDGE_NOT_FOUND", "FAILED")
+            await cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "INIT", "EDGE_NOT_FOUND")
+            await cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "EDGE_NOT_FOUND", "FAILED")
             raise HTTPException(status_code=404, detail="Edge not found")
 
-        cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "INIT", "EDGE_FOUND")
+        await cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "INIT", "EDGE_FOUND")
 
         # Update ALL edges that share exactly the same geometry (spatial equality)
         update_query = text("""
@@ -499,10 +515,10 @@ async def update_danger_zone(
         """)
 
         await db.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
-        cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "EDGE_FOUND", "UPDATED")
+        await cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "EDGE_FOUND", "UPDATED")
         await db.commit()
-        cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "UPDATED", "COMMITTED")
-        cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "COMMITTED", "COMPLETED")
+        await cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "UPDATED", "COMMITTED")
+        await cas_log.transition(Op.SAFETY_WEIGHT_UPDATE, "COMMITTED", "COMPLETED")
 
         # TODO: add audit when auth is ready
 
@@ -589,29 +605,29 @@ async def get_route(
     Calculate route using pgRouting with safety weights.
     """
     try:
-        cas_log.begin(Op.SAFETY_ROUTE, {"algorithm": algorithm})
+        await cas_log.begin(Op.SAFETY_ROUTE, {"algorithm": algorithm})
 
         # Metric
         SAFETY_SCORE_ROUTE_REQUESTS_TOTAL.inc()
 
         ch_fallback_to_dijkstra = False
         if algorithm == "ch":
-            cas_log.transition(Op.SAFETY_ROUTE, "INIT", "CH_REQUESTED")
+            await cas_log.transition(Op.SAFETY_ROUTE, "INIT", "CH_REQUESTED")
             try:
                 ch_result = await get_ch_route_geojson(request)
-                cas_log.transition(Op.SAFETY_ROUTE, "CH_REQUESTED", "ROUTE_COMPUTED")
-                cas_log.transition(Op.SAFETY_ROUTE, "ROUTE_COMPUTED", "COMPLETED")
+                await cas_log.transition(Op.SAFETY_ROUTE, "CH_REQUESTED", "ROUTE_COMPUTED")
+                await cas_log.transition(Op.SAFETY_ROUTE, "ROUTE_COMPUTED", "COMPLETED")
                 return ch_result
             except Exception:
-                cas_log.transition(Op.SAFETY_ROUTE, "CH_REQUESTED", "CH_FAILED")
+                await cas_log.transition(Op.SAFETY_ROUTE, "CH_REQUESTED", "CH_FAILED")
                 if not CH_FALLBACK_TO_DIJKSTRA:
                     raise
-                cas_log.transition(Op.SAFETY_ROUTE, "CH_FAILED", "DIJKSTRA_REQUESTED")
+                await cas_log.transition(Op.SAFETY_ROUTE, "CH_FAILED", "DIJKSTRA_REQUESTED")
                 algorithm = "dijkstra"
                 ch_fallback_to_dijkstra = True
 
         if not ch_fallback_to_dijkstra:
-            cas_log.transition(Op.SAFETY_ROUTE, "INIT", "DIJKSTRA_REQUESTED")
+            await cas_log.transition(Op.SAFETY_ROUTE, "INIT", "DIJKSTRA_REQUESTED")
 
         # 1. Find nearest graph node by snapping to nearest edge endpoint.
         # This avoids scanning huge start/end-point candidate sets.
@@ -749,11 +765,11 @@ async def get_route(
             routes = route_res.fetchall()
 
         if not routes:
-            cas_log.transition(Op.SAFETY_ROUTE, "DIJKSTRA_REQUESTED", "NO_PATH")
-            cas_log.transition(Op.SAFETY_ROUTE, "NO_PATH", "FAILED")
+            await cas_log.transition(Op.SAFETY_ROUTE, "DIJKSTRA_REQUESTED", "NO_PATH")
+            await cas_log.transition(Op.SAFETY_ROUTE, "NO_PATH", "FAILED")
             raise HTTPException(status_code=404, detail="No path found.")
 
-        cas_log.transition(Op.SAFETY_ROUTE, "DIJKSTRA_REQUESTED", "ROUTE_COMPUTED")
+        await cas_log.transition(Op.SAFETY_ROUTE, "DIJKSTRA_REQUESTED", "ROUTE_COMPUTED")
 
         # 4. Construct GeoJSON Response
         features = []
@@ -840,7 +856,7 @@ async def get_route(
 
         # db.add(audit)
 
-        cas_log.transition(Op.SAFETY_ROUTE, "ROUTE_COMPUTED", "COMPLETED")
+        await cas_log.transition(Op.SAFETY_ROUTE, "ROUTE_COMPUTED", "COMPLETED")
         return {
             "type": "FeatureCollection",
             "features": features,
