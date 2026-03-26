@@ -194,6 +194,7 @@ async def call(body: EmergencyCallRequest):
     await cas_log.transition(Op.EMERGENCY_CALL, "INIT", "NOTIFICATION_REQUESTED")
     data: dict = {}
     call_status = "failed"
+    emergency_id = uuid.uuid4()
 
     notification_payload = {
         "type": "call",
