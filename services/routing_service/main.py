@@ -36,11 +36,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 #     from libs.db import get_postgis_db  # type: ignore
 # except Exception:
 #     from libs.postgis_db import get_postgis_db
-from models.audit import Audit
-
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from models.audit import Audit
+from libs.cas_logger import Op, cas_log
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
     FastAPIServiceFactory,
@@ -2064,6 +2064,8 @@ async def calc(
     db: AsyncSession = Depends(get_db),
     postgisDB: AsyncSession = Depends(get_postgis_db),
 ):
+    await cas_log.begin(Op.ROUTE_CALCULATE, {"user_id": body.user_id})
+
     ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
 
     rid = uuid.uuid4()
@@ -2093,6 +2095,9 @@ async def calc(
                 request=route_request,
                 optimize_for=body.preferences.optimize_for,
             )
+            await cas_log.transition(
+                Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid)}
+            )
         except Exception as e:
             logger.warning("CH route failed in /v1/routes/calculate: %s", e)
             if not CH_FALLBACK_TO_DIJKSTRA:
@@ -2106,6 +2111,9 @@ async def calc(
                 request=route_request,
                 db=postgisDB,
                 algorithm=algorithm,
+            )
+            await cas_log.transition(
+                Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid)}
             )
         except Exception as e:
             logger.warning("Falling back to default route in /v1/routes/calculate: %s", e)
@@ -2125,6 +2133,9 @@ async def calc(
             waypoints=_extract_waypoints_from_geojson(route_geojson, body.origin, body.destination),
         )
     else:
+        await cas_log.transition(
+            Op.ROUTE_CALCULATE, "INIT", "ROUTE_FALLBACK", {"route_id": str(rid)}
+        )
         opt = RouteOption(
             route_index=0,
             is_primary=True,
@@ -2156,6 +2167,11 @@ async def calc(
         updated_at=now,
     )
     db.add(audit)
+    await cas_log.transition(
+        Op.ROUTE_CALCULATE,
+        "ROUTE_COMPUTED" if route_geojson else "ROUTE_FALLBACK",
+        "COMMITTED",
+    )
 
     return RouteCalculateResponse(**{k: v for k, v in ROUTES[rid].items() if k != "user_id"})
 
@@ -2188,6 +2204,10 @@ async def recalc(
 async def nav_start(
     body: NavigationStartRequest, db=Depends(get_db), postgisDB=Depends(get_postgis_db)
 ):
+    await cas_log.begin(
+        Op.NAVIGATION_START,
+        {"route_id": str(body.route_id), "user_id": body.user_id},
+    )
     # TODO: should use actual route_id and user_id (uuid) and test AUDIT again
 
     # Business metric: navigation session started
@@ -2210,6 +2230,10 @@ async def nav_start(
         updated_at=now,
     )
     db.add(audit)
+    await cas_log.transition(
+        Op.NAVIGATION_START, "INIT", "SESSION_CREATED", {"session_id": str(sid)}
+    )
+    await cas_log.transition(Op.NAVIGATION_START, "SESSION_CREATED", "COMMITTED")
 
     return NavigationStartResponse(session_id=sid, status="active", started_at=now)
 

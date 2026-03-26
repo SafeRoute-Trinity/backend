@@ -17,12 +17,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
+from libs.cas_logger import Op, cas_log
+from libs.trace_context import TRACE_HEADER, trace_id_var
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from models.audit import Audit
 from models.emergency import Emergency
 from models.user_models import User  # noqa: F401 — registers 'users' table for FK resolution
 
 logger = logging.getLogger(__name__)
+
+
+def _trace_headers() -> dict:
+    tid = trace_id_var.get("")
+    return {TRACE_HEADER: tid} if tid else {}
 
 
 # Load environment variables from .env file
@@ -167,12 +174,26 @@ async def root():
 
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
 async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serializable_db)):
+    await cas_log.begin(Op.EMERGENCY_CALL, {"user_id": body.user_id})
     # SERIALIZABLE isolation is already active on `db` (set by get_serializable_db).
     # All reads in this handler are part of that snapshot; any concurrent
     # is_primary flip or conflicting Emergency write will cause a serialization
     # error at commit time rather than silently producing skewed data.
     now = datetime.utcnow()
     emergency_id = uuid.uuid4()
+    await cas_log.transition(
+        Op.EMERGENCY_CALL,
+        "INIT",
+        "EMERGENCY_CREATED",
+        {"emergency_id": str(emergency_id)},
+    )
+    trusted_phone = body.phone
+    await cas_log.transition(
+        Op.EMERGENCY_CALL,
+        "EMERGENCY_CREATED",
+        "CONTACT_FETCHED",
+        {"phone": trusted_phone[:4] + "***"},
+    )
 
     # ---- (1) Dispatch to notification service OUTSIDE the DB write path ----
     notification_failed = False
@@ -180,6 +201,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
     data: dict = {}
     call_status = "failed"
 
+    await cas_log.transition(Op.EMERGENCY_CALL, "CONTACT_FETCHED", "NOTIFICATION_REQUESTED")
     try:
         notification_payload = {
             "emergency_id": str(emergency_id),
@@ -191,11 +213,24 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
             resp = await client.post(
                 f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/call",
                 json=notification_payload,
+                headers=_trace_headers(),
             )
             resp.raise_for_status()
             data = resp.json()
             call_status = data.get("status", "failed")
+            await cas_log.transition(
+                Op.EMERGENCY_CALL,
+                "NOTIFICATION_REQUESTED",
+                "NOTIFICATION_SENT",
+                {"call_status": call_status},
+            )
     except httpx.HTTPError as e:
+        await cas_log.transition(
+            Op.EMERGENCY_CALL,
+            "NOTIFICATION_REQUESTED",
+            "NOTIFICATION_FAILED",
+            {"error": str(e)},
+        )
         logger.exception(
             "Notification service call failed for emergency_id=%s error=%s",
             emergency_id,
@@ -254,6 +289,7 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
         raise
 
     if notification_failed:
+        await cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_FAILED", "FAILED")
         raise HTTPException(
             status_code=503,
             detail=f"Failed to dispatch SOS call via notification service: {str(notification_error)}",
@@ -267,8 +303,28 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
     }
 
     SOS_CALLS_TOTAL.inc()
-    data["emergency_id"] = emergency_id
-    return EmergencyCallResponse(**data)
+    await cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_SENT", "COMMITTED")
+
+    raw_ts = data.get("timestamp")
+    if isinstance(raw_ts, datetime):
+        resp_ts = raw_ts
+    elif isinstance(raw_ts, str):
+        try:
+            resp_ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            resp_ts = datetime.utcnow()
+    else:
+        resp_ts = datetime.utcnow()
+
+    raw_status = data.get("status", "initiated")
+    resp_status = raw_status if raw_status in ("initiated", "failed") else "initiated"
+
+    return EmergencyCallResponse(
+        emergency_id=emergency_id,
+        status=resp_status,
+        call_id=str(data.get("call_id") or data.get("sid") or ""),
+        timestamp=resp_ts,
+    )
 
 
 @app.post("/v1/emergency/sms", response_model=EmergencySMSResponse)
@@ -277,10 +333,14 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     Send emergency SMS with rich details (templates, variables, location).
     Delegates delivery to the Notification service.
     """
+    await cas_log.begin(Op.EMERGENCY_SMS, {"sos_id": body.sos_id, "user_id": body.user_id})
     # Validate sos_id is UUID (user_id is now a plain string from Auth0)
     parsed_sos_id = _uuid_or_none(body.sos_id)
     if parsed_sos_id is None:
         raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
+
+    await cas_log.transition(Op.EMERGENCY_SMS, "INIT", "VALIDATED", {"sos_id": body.sos_id})
+    await cas_log.transition(Op.EMERGENCY_SMS, "VALIDATED", "NOTIFICATION_REQUESTED")
 
     data: dict = {}
     try:
@@ -288,6 +348,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
             response = await client.post(
                 f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
                 json=body.model_dump(mode="json"),
+                headers=_trace_headers(),
             )
             try:
                 data = response.json()
@@ -299,7 +360,19 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
             # Only raise if the response has no usable SMS data
             if not response.is_success and "status" not in data:
                 response.raise_for_status()
+            await cas_log.transition(
+                Op.EMERGENCY_SMS,
+                "NOTIFICATION_REQUESTED",
+                "SMS_SENT",
+                {"sms_id": data.get("sms_id")},
+            )
     except httpx.HTTPError as e:
+        await cas_log.transition(
+            Op.EMERGENCY_SMS,
+            "NOTIFICATION_REQUESTED",
+            "NOTIFICATION_FAILED",
+            {"error": str(e)},
+        )
         logger.exception(
             "Notification service SMS call failed for sos_id=%s user_id=%s recipient=%s: %s",
             body.sos_id,
@@ -320,6 +393,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         except Exception:
             pass
 
+        await cas_log.transition(Op.EMERGENCY_SMS, "NOTIFICATION_FAILED", "FAILED")
         raise HTTPException(
             status_code=503,
             detail=f"Failed to send SMS via notification service: {str(e)}",
@@ -356,6 +430,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         # don't let audit failures affect response
         pass
 
+    await cas_log.transition(Op.EMERGENCY_SMS, "SMS_SENT", "COMMITTED")
     return EmergencySMSResponse(
         emergency_id=parsed_sos_id,
         status=data.get("status", "failed"),
@@ -400,7 +475,9 @@ async def test_sms(body: TestSMSRequest, db: AsyncSession = Depends(get_db)):
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
-                f"{NOTIFICATION_SERVICE_URL}/v1/test/sms", json=body.model_dump()
+                f"{NOTIFICATION_SERVICE_URL}/v1/test/sms",
+                json=body.model_dump(),
+                headers=_trace_headers(),
             )
             response.raise_for_status()
             return TestSMSResponse(**response.json())
