@@ -64,6 +64,12 @@ class RabbitMQClient:
         Returns True on success, False if RabbitMQ is unreachable.
         """
         rabbitmq_password = os.getenv("RABBITMQ_PASSWORD")
+        if not RABBITMQ_USER or not rabbitmq_password:
+            logger.error(
+                "RABBITMQ_USER or RABBITMQ_PASSWORD not set. "
+                "Please configure them in environment variables."
+            )
+            return False
         url = (
             f"amqp://{RABBITMQ_USER}:{rabbitmq_password}"
             f"@{RABBITMQ_HOST}:{RABBITMQ_PORT}{RABBITMQ_VHOST}"
