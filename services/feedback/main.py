@@ -519,7 +519,7 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
 
 
 @app.get("/v1/feedback", response_model=PaginatedResponse[FeedbackStatusResponse])
-@_compat_router.get("", response_model=PaginatedResponse[FeedbackStatusResponse])
+@_compat_router.get("/", response_model=PaginatedResponse[FeedbackStatusResponse])
 async def list_feedback(
     user_id: Optional[str] = Query(None, description="Filter by user ID"),
     status: Optional[Status] = Query(
