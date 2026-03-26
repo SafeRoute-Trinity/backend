@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 from fastapi.testclient import TestClient
@@ -26,7 +27,7 @@ class FakeExecuteResult:
 
 
 class FakeDB:
-    def __init__(self, *, trusted_contact=None, commit_raises: Exception | None = None):
+    def __init__(self, *, trusted_contact=None, commit_raises: Optional[Exception] = None):
         self.trusted_contact = trusted_contact or SimpleNamespace(phone="+353800000111")
         self.added = []
         self.flushed = False
@@ -78,6 +79,10 @@ class DummyResponse:
     def json(self):
         return self._payload
 
+    @property
+    def is_success(self) -> bool:
+        return 200 <= self.status_code < 300
+
 
 class DummyAsyncClient:
     def __init__(self, timeout=10.0):
@@ -89,13 +94,15 @@ class DummyAsyncClient:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def post(self, url, json=None, **kwargs):
+    async def post(self, url, json, **_kwargs):
         now = datetime.now(timezone.utc).isoformat()
-        if url.endswith("/v1/notifications/sos/call"):
+        if url.endswith("/v1/coordinator/sos/call"):
+            emergency_id = str(uuid.uuid4())
             return DummyResponse(
                 {
+                    "emergency_id": emergency_id,
                     "status": "initiated",
-                    "call_id": "twilio_sid_123",
+                    "call_id": "call_request_id_123",
                     "timestamp": now,
                 }
             )
@@ -146,7 +153,6 @@ def test_emergency_call_success(client, fake_db):
         "lat": 53.34,
         "lon": -6.26,
         "trigger_type": "manual",
-        "message": "Test emergency",
     }
     r = client.post("/v1/emergency/call", json=call_req)
     assert r.status_code == 200
@@ -155,7 +161,7 @@ def test_emergency_call_success(client, fake_db):
     assert "call_id" in data
     assert "timestamp" in data
     assert "emergency_id" in data
-    assert fake_db.committed is True
+    # coordinator-backed call does not use this service's DB session
 
 
 def test_emergency_call_missing_fields(client):
@@ -205,7 +211,6 @@ def test_full_emergency_flow(client):
         "lat": 53.34,
         "lon": -6.26,
         "trigger_type": "manual",
-        "message": "Test emergency",
     }
 
     r1 = client.post("/v1/emergency/call", json=call_req)

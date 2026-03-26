@@ -13,16 +13,11 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Path
 from pydantic import BaseModel
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
 from libs.cas_logger import Op, cas_log
-from libs.trace_context import TRACE_HEADER, trace_id_var
 from libs.db import DatabaseType, get_database_factory, initialize_databases
-from models.audit import Audit
-from models.emergency import Emergency
-from models.user_models import User  # noqa: F401 — registers 'users' table for FK resolution
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +38,8 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-from libs.service_urls import NOTIFICATION_SERVICE_URL
+from libs.service_urls import COORDINATOR_SERVICE_URL, NOTIFICATION_SERVICE_URL
+from libs.trace_context import TRACE_HEADER, trace_id_var
 
 # Create service configuration
 service_config = ServiceAppConfig(
@@ -59,10 +55,6 @@ initialize_databases([DatabaseType.POSTGRES])
 # Get database session dependencies
 db_factory = get_database_factory()
 get_db = db_factory.get_session_dependency(DatabaseType.POSTGRES)
-# SERIALIZABLE isolation for the SOS trigger chain: the trusted-contact read
-# and the Emergency+Audit co-write must form a single consistent snapshot so
-# that no concurrent is_primary flip or Emergency insert can interleave.
-get_serializable_db = db_factory.get_serializable_session_dependency(DatabaseType.POSTGRES)
 
 # Create factory and build app
 factory = FastAPIServiceFactory(service_config)
@@ -106,7 +98,7 @@ class EmergencyCallRequest(BaseModel):
     lat: float
     lon: float
     trigger_type: Literal["manual", "automatic"]
-    phone: str  # E.164 format, e.g. +353831234567
+    phone: Optional[str] = None  # E.164 format, e.g. +353831234567
 
 
 class EmergencyCallResponse(BaseModel):
@@ -173,56 +165,32 @@ async def root():
 
 
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
-async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serializable_db)):
+async def call(body: EmergencyCallRequest):
+    """
+    Coordinator-backed SOS call:
+      - coordinator atomically writes Emergency + outbox event
+      - notification worker later consumes the outbox and places the call
+    """
     await cas_log.begin(Op.EMERGENCY_CALL, {"user_id": body.user_id})
-    # SERIALIZABLE isolation is already active on `db` (set by get_serializable_db).
-    # All reads in this handler are part of that snapshot; any concurrent
-    # is_primary flip or conflicting Emergency write will cause a serialization
-    # error at commit time rather than silently producing skewed data.
-    now = datetime.utcnow()
-    emergency_id = uuid.uuid4()
-    await cas_log.transition(
-        Op.EMERGENCY_CALL,
-        "INIT",
-        "EMERGENCY_CREATED",
-        {"emergency_id": str(emergency_id)},
-    )
-    trusted_phone = body.phone
-    await cas_log.transition(
-        Op.EMERGENCY_CALL,
-        "EMERGENCY_CREATED",
-        "CONTACT_FETCHED",
-        {"phone": trusted_phone[:4] + "***"},
-    )
 
-    # ---- (1) Dispatch to notification service OUTSIDE the DB write path ----
-    notification_failed = False
-    notification_error: Optional[httpx.HTTPError] = None
+    payload = body.model_dump(mode="json")
+
+    await cas_log.transition(Op.EMERGENCY_CALL, "INIT", "NOTIFICATION_REQUESTED")
     data: dict = {}
-    call_status = "failed"
-
-    await cas_log.transition(Op.EMERGENCY_CALL, "CONTACT_FETCHED", "NOTIFICATION_REQUESTED")
     try:
-        notification_payload = {
-            "emergency_id": str(emergency_id),
-            "phone_number": body.phone,
-            "user_location": {"lat": body.lat, "lon": body.lon},
-            "call_reason": f"SOS {body.trigger_type}",
-        }
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
-                f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/call",
-                json=notification_payload,
+                f"{COORDINATOR_SERVICE_URL}/v1/coordinator/sos/call",
+                json=payload,
                 headers=_trace_headers(),
             )
             resp.raise_for_status()
             data = resp.json()
-            call_status = data.get("status", "failed")
             await cas_log.transition(
                 Op.EMERGENCY_CALL,
                 "NOTIFICATION_REQUESTED",
                 "NOTIFICATION_SENT",
-                {"call_status": call_status},
+                {"call_status": data.get("status", "failed")},
             )
     except httpx.HTTPError as e:
         await cas_log.transition(
@@ -231,78 +199,24 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
             "NOTIFICATION_FAILED",
             {"error": str(e)},
         )
-        logger.exception(
-            "Notification service call failed for emergency_id=%s error=%s",
-            emergency_id,
-            repr(e),
-        )
-        notification_failed = True
-        notification_error = e
-
-    # ---- (3) Write Emergency row + Audit row in a single atomic commit ----
-    # Both succeed or both fail — no orphaned Emergency without an audit trail
-    # and no audit row without a matching Emergency row.
-    if notification_failed:
-        audit_message = (
-            f"sos_call_failed emergency_id={emergency_id} "
-            f"trigger_type={body.trigger_type} error={str(notification_error)}"
-        )
-        audit_user_id = body.user_id
-    else:
-        audit_message = f"sos_call_initiated emergency_id={emergency_id} status={call_status}"
-        audit_user_id = None
-
-    db.add(
-        Emergency(
-            emergency_id=emergency_id,
-            user_id=body.user_id,
-            route_id=body.route_id,
-            lat=body.lat,
-            lon=body.lon,
-            trigger_type=body.trigger_type,
-            messaging_id=_uuid_or_none(data.get("call_id")),
-            message=f"SOS {body.trigger_type}",
-        )
-    )
-    db.add(
-        Audit(
-            log_id=uuid.uuid4(),
-            user_id=audit_user_id,
-            event_type="emergency",
-            event_id=emergency_id,
-            message=audit_message,
-            created_at=now,
-            updated_at=now,
-        )
-    )
-
-    try:
-        await db.commit()
-    except IntegrityError as e:
-        await db.rollback()
-        raise HTTPException(
-            status_code=400,
-            detail=f"Could not create emergency call record: {e}",
-        )
-    except Exception:
-        await db.rollback()
-        raise
-
-    if notification_failed:
-        await cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_FAILED", "FAILED")
+        logger.exception("Coordinator call failed for SOS emergency")
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to dispatch SOS call via notification service: {str(notification_error)}",
+            detail=f"Failed to queue SOS emergency call: {str(e)}",
         )
 
-    STATUS[emergency_id] = {
+    emergency_id = data.get("emergency_id")
+    call_status = data.get("status", "failed")
+    SOS_CALLS_TOTAL.inc()
+
+    # Ensure keying matches /v1/emergency/{emergency_id}/status (path param is str).
+    STATUS[str(emergency_id)] = {
         "emergency_id": emergency_id,
         "call_status": call_status,
         "sms_status": "not_sent",
         "last_update": datetime.utcnow(),
     }
 
-    SOS_CALLS_TOTAL.inc()
     await cas_log.transition(Op.EMERGENCY_CALL, "NOTIFICATION_SENT", "COMMITTED")
 
     raw_ts = data.get("timestamp")
@@ -434,11 +348,7 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     return EmergencySMSResponse(
         emergency_id=parsed_sos_id,
         status=data.get("status", "failed"),
-        sms_id=(
-            uuid.uuid4()
-            if not _uuid_or_none(data.get("sms_id", ""))
-            else _uuid_or_none(data.get("sms_id", ""))
-        ),
+        sms_id=str(_uuid_or_none(data.get("sms_id", "")) or uuid.uuid4()),
         timestamp=data.get("timestamp", datetime.utcnow().isoformat()),
         message_sent=data.get("message_sent", ""),
         recipient=data.get("recipient", body.emergency_contact.phone),
