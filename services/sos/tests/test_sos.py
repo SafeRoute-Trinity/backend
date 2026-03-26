@@ -63,6 +63,7 @@ class DummyResponse:
     def __init__(self, payload: dict, status_code: int = 200):
         self._payload = payload
         self.status_code = status_code
+        self.is_success = 200 <= status_code < 300
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -88,7 +89,7 @@ class DummyAsyncClient:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def post(self, url, json):
+    async def post(self, url, json=None, **kwargs):
         now = datetime.now(timezone.utc).isoformat()
         if url.endswith("/v1/notifications/sos/call"):
             return DummyResponse(

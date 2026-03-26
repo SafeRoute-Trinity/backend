@@ -31,6 +31,7 @@ from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from models.audit import Audit
+from libs.cas_logger import Op, cas_log
 
 # Add parent directory to path to import libs and models
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
@@ -527,6 +528,8 @@ async def get_current_user(
     """
     # Extract user_id — full sub claim (e.g. "auth0|6979e8...")
     user_id = extract_user_id_from_auth(auth)
+    cas_log.begin(Op.USER_PROFILE_FETCH, {"user_id": user_id})
+    cas_log.transition(Op.USER_PROFILE_FETCH, "INIT", "TOKEN_VERIFIED")
 
     print(f"[UserMgmt] get_current_user called for: {user_id}")
 
@@ -536,6 +539,7 @@ async def get_current_user(
 
     # Auto-create user on first login — fetch profile from Auth0 /userinfo
     if not user:
+        cas_log.transition(Op.USER_PROFILE_FETCH, "TOKEN_VERIFIED", "USER_NOT_FOUND")
         print(f"[UserMgmt] User {user_id} not found, auto-creating from Auth0 /userinfo")
 
         # Fetch profile from Auth0 /userinfo using the bearer token
@@ -557,6 +561,7 @@ async def get_current_user(
         except Exception as e:
             print(f"[UserMgmt] Failed to fetch /userinfo: {e}")
 
+        cas_log.transition(Op.USER_PROFILE_FETCH, "USER_NOT_FOUND", "PROFILE_FETCHED")
         now = datetime.utcnow()
         user = User(
             user_id=user_id,
@@ -570,18 +575,28 @@ async def get_current_user(
             last_login=now,
         )
         db.add(user)
+        cas_log.transition(Op.USER_PROFILE_FETCH, "PROFILE_FETCHED", "USER_CREATED")
         try:
             await db.commit()
             await db.refresh(user)
             USER_REGISTRATION_TOTAL.inc()
             print(f"[UserMgmt] Auto-created user {user_id}")
+            cas_log.transition(Op.USER_PROFILE_FETCH, "USER_CREATED", "COMMITTED")
         except Exception as e:
+            cas_log.transition(
+                Op.USER_PROFILE_FETCH,
+                "USER_CREATED",
+                "COMMIT_FAILED",
+                {"error": str(e)},
+            )
             await db.rollback()
             print(f"[UserMgmt] Failed to auto-create user {user_id}: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to create user: {e}",
             )
+    else:
+        cas_log.transition(Op.USER_PROFILE_FETCH, "TOKEN_VERIFIED", "USER_FOUND")
 
     # Update last_login
     user.last_login = datetime.utcnow()
@@ -690,11 +705,14 @@ async def sync_auth0_user(
 
     Security: Validates shared secret via X-Auth0-Webhook-Secret header.
     """
+    cas_log.begin(Op.USER_SYNC, {"user_id": payload.user_id})
     # Verify webhook secret
     secret = request.headers.get("X-Auth0-Webhook-Secret")
     expected_secret = os.getenv("AUTH0_WEBHOOK_SECRET")
     if not expected_secret or secret != expected_secret:
         raise HTTPException(status_code=401, detail="Invalid webhook secret")
+
+    cas_log.transition(Op.USER_SYNC, "INIT", "SECRET_VERIFIED")
 
     # Strip auth0| prefix for DB storage
     raw_user_id = payload.user_id.split("|", 1)[-1] if "|" in payload.user_id else payload.user_id
@@ -732,18 +750,24 @@ async def sync_auth0_user(
     )
     db.add(audit)
 
+    cas_log.transition(Op.USER_SYNC, "SECRET_VERIFIED", "USER_UPSERTED")
+
     try:
         await db.commit()
     except IntegrityError:
+        cas_log.transition(Op.USER_SYNC, "USER_UPSERTED", "COMMIT_FAILED")
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not sync user",
         )
 
+    cas_log.transition(Op.USER_SYNC, "USER_UPSERTED", "COMMITTED")
+
     # Business metric
     USER_REGISTRATION_TOTAL.inc()
 
+    cas_log.transition(Op.USER_SYNC, "COMMITTED", "COMPLETED")
     return {"status": "synced", "user_id": raw_user_id}
 
 
@@ -812,6 +836,7 @@ async def save_preferences(
       - units varchar(20) not null default 'metric' (metric|imperial)
       - created_at/updated_at timestamptz not null default now()
     """
+    cas_log.begin(Op.PREFERENCES_SAVE, {"user_id": user_id})
     now = datetime.utcnow()
 
     # Ensure user exists
@@ -822,6 +847,8 @@ async def save_preferences(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+
+    cas_log.transition(Op.PREFERENCES_SAVE, "INIT", "USER_VERIFIED")
 
     # ---- (1) Upsert into user_preferences ----
     result = await db.execute(select(UserPreferences).where(UserPreferences.user_id == user_id))
@@ -852,16 +879,22 @@ async def save_preferences(
     )
     db.add(audit)
 
+    cas_log.transition(Op.PREFERENCES_SAVE, "USER_VERIFIED", "PREFERENCES_UPSERTED")
+
     # ---- (3) Commit ----
     try:
         await db.commit()
     except IntegrityError:
+        cas_log.transition(Op.PREFERENCES_SAVE, "PREFERENCES_UPSERTED", "COMMIT_FAILED")
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not update preference",
         )
 
+    cas_log.transition(Op.PREFERENCES_SAVE, "PREFERENCES_UPSERTED", "COMMITTED")
+
+    cas_log.transition(Op.PREFERENCES_SAVE, "COMMITTED", "COMPLETED")
     return PreferencesResponse(
         user_id=user_id,
         status="preferences_saved",
@@ -1067,6 +1100,7 @@ async def upsert_trusted_contact(
     Otherwise -> create a new contact.
     Use for adding one contact or editing one by phone; use PUT to replace the whole list.
     """
+    cas_log.begin(Op.TRUSTED_CONTACT_UPSERT, {"user_id": user_id, "phone": body.phone})
     now = datetime.utcnow()
 
     # Serialize all trusted-contact primary updates for this user.
@@ -1080,6 +1114,8 @@ async def upsert_trusted_contact(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found",
         )
+
+    cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "INIT", "USER_VERIFIED")
 
     # ---- (2) Try find existing contact (by phone), acquiring a row lock ----
     # FOR UPDATE prevents a concurrent upsert on the same (user_id, phone) from
@@ -1155,16 +1191,22 @@ async def upsert_trusted_contact(
     )
     db.add(audit)
 
+    cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "USER_VERIFIED", "CONTACT_UPSERTED")
+
     # ---- (6) Commit ----
     try:
         await db.commit()
     except IntegrityError:
+        cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "CONTACT_UPSERTED", "COMMIT_FAILED")
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Could not upsert trusted contact",
         )
 
+    cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "CONTACT_UPSERTED", "COMMITTED")
+
+    cas_log.transition(Op.TRUSTED_CONTACT_UPSERT, "COMMITTED", "COMPLETED")
     # ---- (7) Response ----
     return TrustedContactUpsertResponse(
         user_id=user_id,
