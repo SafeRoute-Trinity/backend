@@ -153,7 +153,6 @@ def test_emergency_call_success(client, fake_db):
         "lat": 53.34,
         "lon": -6.26,
         "trigger_type": "manual",
-        "phone": "+353831234567",
     }
     r = client.post("/v1/emergency/call", json=call_req)
     assert r.status_code == 200
@@ -212,7 +211,6 @@ def test_full_emergency_flow(client):
         "lat": 53.34,
         "lon": -6.26,
         "trigger_type": "manual",
-        "phone": "+353831234568",
     }
 
     r1 = client.post("/v1/emergency/call", json=call_req)
