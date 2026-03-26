@@ -33,13 +33,18 @@ load_dotenv()
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from common.constants import QUEUE_SOS_NOTIFICATION
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
+from libs.rabbitmq import RabbitMQClient
 from libs.service_urls import COORDINATOR_SERVICE_URL, NOTIFICATION_SERVICE_URL
 from libs.trace_context import TRACE_HEADER, trace_id_var
+
+# RabbitMQ client (shared for the lifetime of this process)
+_mq = RabbitMQClient()
 
 # Create service configuration
 service_config = ServiceAppConfig(
@@ -59,6 +64,17 @@ get_db = db_factory.get_session_dependency(DatabaseType.POSTGRES)
 # Create factory and build app
 factory = FastAPIServiceFactory(service_config)
 app = factory.create_app()
+
+
+@app.on_event("startup")
+async def _startup():
+    await _mq.connect()
+
+
+@app.on_event("shutdown")
+async def _shutdown():
+    await _mq.close()
+
 
 # Add business-specific metrics
 SOS_CALLS_TOTAL = factory.add_business_metric(
@@ -177,33 +193,59 @@ async def call(body: EmergencyCallRequest):
 
     await cas_log.transition(Op.EMERGENCY_CALL, "INIT", "NOTIFICATION_REQUESTED")
     data: dict = {}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{COORDINATOR_SERVICE_URL}/v1/coordinator/sos/call",
-                json=payload,
-                headers=_trace_headers(),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            await cas_log.transition(
-                Op.EMERGENCY_CALL,
-                "NOTIFICATION_REQUESTED",
-                "NOTIFICATION_SENT",
-                {"call_status": data.get("status", "failed")},
-            )
-    except httpx.HTTPError as e:
+    call_status = "failed"
+    emergency_id = uuid.uuid4()
+
+    notification_payload = {
+        "type": "call",
+        "emergency_id": str(emergency_id),
+        "phone_number": body.phone,
+        "user_location": {"lat": body.lat, "lon": body.lon},
+        "call_reason": f"SOS {body.trigger_type}",
+        "user_id": body.user_id,
+        "sos_id": str(emergency_id),
+    }
+
+    published = await _mq.publish(QUEUE_SOS_NOTIFICATION, notification_payload)
+
+    if published:
+        call_status = "initiated"
+        data = {"call_id": f"CALL-{emergency_id}", "status": call_status}
         await cas_log.transition(
             Op.EMERGENCY_CALL,
             "NOTIFICATION_REQUESTED",
-            "NOTIFICATION_FAILED",
-            {"error": str(e)},
+            "NOTIFICATION_SENT",
+            {"call_status": call_status},
         )
-        logger.exception("Coordinator call failed for SOS emergency")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to queue SOS emergency call: {str(e)}",
-        )
+    else:
+        # RabbitMQ unavailable — fall back to coordinator
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    f"{COORDINATOR_SERVICE_URL}/v1/coordinator/sos/call",
+                    json=payload,
+                    headers=_trace_headers(),
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                await cas_log.transition(
+                    Op.EMERGENCY_CALL,
+                    "NOTIFICATION_REQUESTED",
+                    "NOTIFICATION_SENT",
+                    {"call_status": data.get("status", "failed")},
+                )
+        except httpx.HTTPError as e:
+            await cas_log.transition(
+                Op.EMERGENCY_CALL,
+                "NOTIFICATION_REQUESTED",
+                "NOTIFICATION_FAILED",
+                {"error": str(e)},
+            )
+            logger.exception("Coordinator call failed for SOS emergency")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to queue SOS emergency call: {str(e)}",
+            )
 
     emergency_id = data.get("emergency_id")
     call_status = data.get("status", "failed")
@@ -256,62 +298,53 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
     await cas_log.transition(Op.EMERGENCY_SMS, "INIT", "VALIDATED", {"sos_id": body.sos_id})
     await cas_log.transition(Op.EMERGENCY_SMS, "VALIDATED", "NOTIFICATION_REQUESTED")
 
+    sms_payload = body.model_dump(mode="json")
+    sms_payload["type"] = "sms"
+
+    published = await _mq.publish(QUEUE_SOS_NOTIFICATION, sms_payload)
     data: dict = {}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
-                json=body.model_dump(mode="json"),
-                headers=_trace_headers(),
-            )
-            try:
-                data = response.json()
-            except Exception:
-                data = {}
 
-            data["emergency_id"] = parsed_sos_id
-
-            # Only raise if the response has no usable SMS data
-            if not response.is_success and "status" not in data:
-                response.raise_for_status()
-            await cas_log.transition(
-                Op.EMERGENCY_SMS,
-                "NOTIFICATION_REQUESTED",
-                "SMS_SENT",
-                {"sms_id": data.get("sms_id")},
-            )
-    except httpx.HTTPError as e:
-        await cas_log.transition(
-            Op.EMERGENCY_SMS,
-            "NOTIFICATION_REQUESTED",
-            "NOTIFICATION_FAILED",
-            {"error": str(e)},
-        )
-        logger.exception(
-            "Notification service SMS call failed for sos_id=%s user_id=%s recipient=%s: %s",
-            body.sos_id,
-            body.user_id,
-            body.emergency_contact.phone,
-            repr(e),
-        )
-
+    if published:
+        # Message queued — return an optimistic response immediately.
+        generated_sms_id = str(uuid.uuid4())
+        data = {
+            "emergency_id": parsed_sos_id,
+            "status": "sent",
+            "sms_id": generated_sms_id,
+            "timestamp": datetime.utcnow().isoformat(),
+            "message_sent": "",
+            "recipient": body.emergency_contact.phone,
+        }
+    else:
+        # RabbitMQ unavailable — fall back to direct HTTP call.
         try:
-            await write_audit(
-                db=db,
-                event_type="emergency",
-                user_id=body.user_id,
-                event_id=parsed_sos_id,
-                message=f"sos_sms_failed sos_id={body.sos_id} user_id={body.user_id} recipient={body.emergency_contact.phone} error={str(e)}",
-                commit=True,
-            )
-        except Exception:
-            pass
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
+                    json=sms_payload,
+                )
+                try:
+                    data = response.json()
+                except Exception:
+                    data = {}
 
-        await cas_log.transition(Op.EMERGENCY_SMS, "NOTIFICATION_FAILED", "FAILED")
-        raise HTTPException(
-            status_code=503,
-            detail=f"Failed to send SMS via notification service: {str(e)}",
-        )
+                data["emergency_id"] = parsed_sos_id
+
+                if not response.is_success and "status" not in data:
+                    response.raise_for_status()
+        except httpx.HTTPError as e:
+            logger.exception(
+                "Notification service SMS call failed for sos_id=%s user_id=%s recipient=%s: %s",
+                body.sos_id,
+                body.user_id,
+                body.emergency_contact.phone,
+                repr(e),
+            )
+            await cas_log.transition(Op.EMERGENCY_SMS, "NOTIFICATION_FAILED", "FAILED")
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to send SMS via notification service: {str(e)}",
+            )
 
     # Update status
     now = datetime.utcnow()

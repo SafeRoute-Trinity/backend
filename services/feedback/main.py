@@ -29,12 +29,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from libs.audit_logger import write_audit
 from libs.cas_logger import Op, cas_log
 from libs.auth.auth0_verify import verify_token
+from libs.rabbitmq import RabbitMQClient
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from dotenv import load_dotenv
 
+from common.constants import QUEUE_FEEDBACK_EMAIL, QUEUE_FEEDBACK_SUBMIT
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
@@ -46,6 +48,9 @@ from services.feedback.spam_validator import get_spam_validator_factory
 from services.feedback.types import FeedbackType, SeverityType, Status
 
 load_dotenv(".env")
+
+# RabbitMQ client
+_mq = RabbitMQClient()
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -85,6 +90,56 @@ FEEDBACK_STATUS_CHECKS_TOTAL = factory.add_business_metric(
 FEEDBACK = {}
 
 
+async def _handle_email_message(payload: dict) -> None:
+    """Consume feedback.email queue and send the email."""
+    try:
+        send_system_feedback_email(
+            user_id=payload.get("user_id"),
+            user_email=payload.get("user_email"),
+            subject=payload.get("subject"),
+            content=payload.get("content"),
+            page_url=payload.get("page_url"),
+            user_agent=payload.get("user_agent"),
+        )
+        logger.info("RabbitMQ consumer: feedback email sent to=%s", payload.get("user_email"))
+    except Exception as exc:
+        logger.error("RabbitMQ consumer: feedback email failed: %s", exc)
+        raise
+
+
+async def _handle_feedback_submit(payload: dict) -> None:
+    """Consume feedback.submit queue and write the ticket to the database."""
+    feedback_factory = get_feedback_factory()
+    async for db in get_db():
+        try:
+            await feedback_factory.create_feedback(
+                db=db,
+                feedback_id=uuid.UUID(payload["feedback_id"]),
+                user_id=payload["user_id"],
+                ticket_number=payload["ticket_number"],
+                route_id=uuid.UUID(payload["route_id"]) if payload.get("route_id") else None,
+                lat=payload.get("lat"),
+                lon=payload.get("lon"),
+                type=FeedbackType(payload["type"]) if payload.get("type") else None,
+                severity=SeverityType(payload["severity"]) if payload.get("severity") else None,
+                description=payload.get("description"),
+                location=payload.get("location"),
+                attachments=payload.get("attachments"),
+                status=Status.RECEIVED,
+                created_at=datetime.fromisoformat(payload["created_at"]),
+            )
+            await db.commit()
+            logger.info(
+                "RabbitMQ consumer: feedback ticket written feedback_id=%s ticket=%s",
+                payload["feedback_id"],
+                payload["ticket_number"],
+            )
+        except Exception as exc:
+            await db.rollback()
+            logger.error("RabbitMQ consumer: feedback submit failed: %s", exc)
+            raise
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize services on startup."""
@@ -105,6 +160,16 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to initialize feedback factory: {e}")
         # Continue startup even if feedback factory fails
+
+    connected = await _mq.connect()
+    if connected:
+        await _mq.consume(QUEUE_FEEDBACK_EMAIL, _handle_email_message)
+        await _mq.consume(QUEUE_FEEDBACK_SUBMIT, _handle_feedback_submit)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await _mq.close()
 
 
 # ========= PROMETHEUS METRICS =========
@@ -450,46 +515,63 @@ async def submit(body: FeedbackSubmitRequest, db: AsyncSession = Depends(get_db)
 
     await cas_log.transition(Op.FEEDBACK_SUBMIT, "INIT", "VALIDATED", {"ticket": ticket_number})
 
-    # Get feedback factory and create feedback record in database
-    feedback_factory = get_feedback_factory()
-    try:
-        await feedback_factory.create_feedback(
-            db=db,
-            feedback_id=feedback_id,
-            user_id=user_id_str,
-            ticket_number=ticket_number,
-            route_id=rid,
-            lat=lat,
-            lon=lon,
-            type=body.type,
-            severity=body.severity,
-            description=body.description,
-            location=location_dict,
-            attachments=body.attachments,
-            status=Status.RECEIVED,
-            created_at=now,
-        )
+    submit_payload = {
+        "feedback_id": str(feedback_id),
+        "user_id": user_id_str,
+        "ticket_number": ticket_number,
+        "route_id": str(rid),
+        "lat": lat,
+        "lon": lon,
+        "type": body.type.value if body.type else None,
+        "severity": body.severity.value if body.severity else None,
+        "description": body.description,
+        "location": location_dict,
+        "attachments": [str(a) for a in body.attachments] if body.attachments else None,
+        "created_at": now.isoformat(),
+    }
 
-        await cas_log.transition(
-            Op.FEEDBACK_SUBMIT,
-            "VALIDATED",
-            "DB_CREATED",
-            {"feedback_id": str(feedback_id)},
-        )
+    published = await _mq.publish(QUEUE_FEEDBACK_SUBMIT, submit_payload)
 
-        # Commit the transaction
-        await db.commit()
+    if not published:
+        # RabbitMQ unavailable — fall back to writing directly
+        feedback_factory = get_feedback_factory()
+        try:
+            await feedback_factory.create_feedback(
+                db=db,
+                feedback_id=feedback_id,
+                user_id=user_id_str,
+                ticket_number=ticket_number,
+                route_id=rid,
+                lat=lat,
+                lon=lon,
+                type=body.type,
+                severity=body.severity,
+                description=body.description,
+                location=location_dict,
+                attachments=body.attachments,
+                status=Status.RECEIVED,
+                created_at=now,
+            )
 
-        await cas_log.transition(Op.FEEDBACK_SUBMIT, "DB_CREATED", "COMMITTED")
+            await cas_log.transition(
+                Op.FEEDBACK_SUBMIT,
+                "VALIDATED",
+                "DB_CREATED",
+                {"feedback_id": str(feedback_id)},
+            )
 
-        logger.info(
-            f"Feedback created successfully: feedback_id={feedback_id} ticket={ticket_number}"
-        )
-    except Exception as e:
-        await db.rollback()
-        logger.exception(f"Failed to create feedback in database: {e}")
-        await cas_log.transition(Op.FEEDBACK_SUBMIT, "DB_CREATED", "DB_FAILED", {"error": str(e)})
-        raise HTTPException(status_code=500, detail=f"Failed to submit feedback: {str(e)}")
+            await db.commit()
+
+            await cas_log.transition(Op.FEEDBACK_SUBMIT, "DB_CREATED", "COMMITTED")
+
+            logger.info(
+                f"Feedback created successfully: feedback_id={feedback_id} ticket={ticket_number}"
+            )
+        except Exception as e:
+            await db.rollback()
+            logger.exception(f"Failed to create feedback in database: {e}")
+            await cas_log.transition(Op.FEEDBACK_SUBMIT, "DB_CREATED", "DB_FAILED", {"error": str(e)})
+            raise HTTPException(status_code=500, detail=f"Failed to submit feedback: {str(e)}")
 
     # Also store in in-memory cache for backward compatibility
     FEEDBACK[str(feedback_id)] = {
@@ -847,27 +929,33 @@ async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Req
 
     await cas_log.transition(Op.SYSTEM_FEEDBACK, "INIT", "CAPTCHA_VERIFIED")
 
-    try:
-        send_system_feedback_email(
-            user_id=user_id,
-            user_email=user_email,
-            subject=body.subject,
-            content=body.content,
-            page_url=body.page_url,
-            user_agent=body.user_agent,
-        )
-    except Exception as e:
-        logger.exception("Failed to send system feedback email")
-        await cas_log.transition(
-            Op.SYSTEM_FEEDBACK,
-            "CAPTCHA_VERIFIED",
-            "EMAIL_FAILED",
-            {"error": str(e)},
-        )
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to send feedback email: {str(e)}",
-        )
+    email_payload = {
+        "user_id": user_id,
+        "user_email": user_email,
+        "subject": body.subject,
+        "content": body.content,
+        "page_url": body.page_url,
+        "user_agent": body.user_agent,
+    }
+
+    published = await _mq.publish(QUEUE_FEEDBACK_EMAIL, email_payload)
+
+    if not published:
+        # RabbitMQ unavailable — fall back to sending directly
+        try:
+            send_system_feedback_email(**email_payload)
+        except Exception as e:
+            logger.exception("Failed to send system feedback email")
+            await cas_log.transition(
+                Op.SYSTEM_FEEDBACK,
+                "CAPTCHA_VERIFIED",
+                "EMAIL_FAILED",
+                {"error": str(e)},
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to send feedback email: {str(e)}",
+            )
 
     await cas_log.transition(Op.SYSTEM_FEEDBACK, "CAPTCHA_VERIFIED", "EMAIL_SENT")
     await cas_log.transition(Op.SYSTEM_FEEDBACK, "EMAIL_SENT", "COMPLETED")
