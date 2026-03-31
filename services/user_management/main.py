@@ -17,7 +17,6 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-import httpx
 from fastapi import Depends, HTTPException, Query, Request, Response, status
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -30,8 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 
-from models.audit import Audit
 from libs.cas_logger import Op, cas_log
+from models.audit import Audit
 
 # Add parent directory to path to import libs and models
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
@@ -44,6 +43,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
+from libs.http_client import close_shared_async_clients, get_shared_async_client
 from models.user_models import Contact, TrustedContact, User, UserPreferences
 
 # Initialize database connections
@@ -68,6 +68,12 @@ service_config = ServiceAppConfig(
 # Create factory and build app
 factory = FastAPIServiceFactory(service_config)
 app = factory.create_app()
+
+
+@app.on_event("shutdown")
+async def _close_http_clients() -> None:
+    await close_shared_async_clients()
+
 
 # Add business-specific metrics
 USER_REGISTRATION_TOTAL = factory.add_business_metric(
@@ -547,17 +553,17 @@ async def get_current_user(
         auth0_domain = os.getenv("AUTH0_DOMAIN", "saferouteapp.eu.auth0.com")
         try:
             token = request.headers.get("Authorization", "").replace("Bearer ", "")
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    f"https://{auth0_domain}/userinfo",
-                    headers={"Authorization": f"Bearer {token}"},
-                )
-                if resp.status_code == 200:
-                    profile = resp.json()
-                    print("something here")
-                    print(f"[UserMgmt] Got Auth0 profile: email={profile.get('email')}")
-                else:
-                    print(f"[UserMgmt] /userinfo returned {resp.status_code}")
+            client = get_shared_async_client(timeout_seconds=5.0)
+            resp = await client.get(
+                f"https://{auth0_domain}/userinfo",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code == 200:
+                profile = resp.json()
+                print("something here")
+                print(f"[UserMgmt] Got Auth0 profile: email={profile.get('email')}")
+            else:
+                print(f"[UserMgmt] /userinfo returned {resp.status_code}")
         except Exception as e:
             print(f"[UserMgmt] Failed to fetch /userinfo: {e}")
 

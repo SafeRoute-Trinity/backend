@@ -8,10 +8,11 @@ with a factory pattern for both PostgreSQL and PostGIS databases.
 import asyncio
 import os
 from enum import Enum
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote_plus
 
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -74,17 +75,58 @@ class DatabaseConfig:
             return self.database_url
 
         password_encoded = quote_plus(self.password) if self.password else ""
-        url = f"postgresql+asyncpg://{self.user}:{password_encoded}@{self.host}:{self.port}/{self.database}"
-
-        # Add SSL mode if specified
-        if self.sslmode:
-            url += f"?sslmode={self.sslmode}"
-
-        return url
+        return (
+            f"postgresql+asyncpg://{self.user}:{password_encoded}@"
+            f"{self.host}:{self.port}/{self.database}"
+        )
 
 
 class DatabaseConnection:
     """Encapsulates a single database connection with engine and session maker."""
+
+    @staticmethod
+    def _sslmode_to_asyncpg_ssl(sslmode: Optional[str]) -> Optional[bool]:
+        """
+        Convert libpq-style sslmode to asyncpg's `ssl` argument.
+
+        asyncpg does not accept a raw `sslmode` keyword, so we normalize it.
+        """
+        if not sslmode:
+            return None
+
+        normalized = sslmode.strip().lower()
+        if normalized == "disable":
+            return False
+        if normalized in {"require", "verify-ca", "verify-full"}:
+            return True
+        # For modes like "prefer"/"allow", keep asyncpg defaults.
+        return None
+
+    @staticmethod
+    def _normalize_asyncpg_url_and_connect_args(
+        database_url: str, sslmode_hint: Optional[str]
+    ) -> tuple[str, Dict[str, Any]]:
+        """
+        Normalize asyncpg URLs:
+        - remove `sslmode` from query string (unsupported by asyncpg.connect)
+        - convert it to `connect_args['ssl']`
+        """
+        if not database_url.startswith("postgresql+asyncpg://"):
+            return database_url, {}
+
+        url = make_url(database_url)
+        query = dict(url.query)
+        sslmode = query.pop("sslmode", None) or sslmode_hint
+        connect_args: Dict[str, Any] = {}
+
+        ssl_arg = DatabaseConnection._sslmode_to_asyncpg_ssl(str(sslmode) if sslmode else None)
+        if ssl_arg is not None:
+            connect_args["ssl"] = ssl_arg
+
+        if "sslmode" in url.query:
+            url = url.set(query=query)
+
+        return str(url), connect_args
 
     def __init__(self, config: DatabaseConfig):
         """
@@ -94,11 +136,36 @@ class DatabaseConnection:
             config: Database configuration
         """
         self.config = config
-        self.engine: AsyncEngine = create_async_engine(
-            config.get_url(),
-            echo=config.echo,
-            future=True,
+        database_url = config.get_url()
+        database_url, connect_args = self._normalize_asyncpg_url_and_connect_args(
+            database_url, config.sslmode
         )
+        engine_kwargs = {
+            "echo": config.echo,
+            "future": True,
+            "pool_pre_ping": os.getenv("DB_POOL_PRE_PING", "true").lower() == "true",
+        }
+
+        # Async PostgreSQL connections benefit significantly from explicit pool
+        # sizing under load. Keep defaults conservative but configurable.
+        if database_url.startswith("postgresql+asyncpg://"):
+            env_prefix = "POSTGIS" if config.db_type == DatabaseType.POSTGIS else "POSTGRES"
+            engine_kwargs["pool_size"] = int(
+                os.getenv(f"{env_prefix}_POOL_SIZE", os.getenv("DB_POOL_SIZE", "20"))
+            )
+            engine_kwargs["max_overflow"] = int(
+                os.getenv(f"{env_prefix}_MAX_OVERFLOW", os.getenv("DB_MAX_OVERFLOW", "30"))
+            )
+            engine_kwargs["pool_timeout"] = int(
+                os.getenv(f"{env_prefix}_POOL_TIMEOUT", os.getenv("DB_POOL_TIMEOUT", "30"))
+            )
+            engine_kwargs["pool_recycle"] = int(
+                os.getenv(f"{env_prefix}_POOL_RECYCLE", os.getenv("DB_POOL_RECYCLE", "1800"))
+            )
+            if connect_args:
+                engine_kwargs["connect_args"] = connect_args
+
+        self.engine: AsyncEngine = create_async_engine(database_url, **engine_kwargs)
         self.session_maker = sessionmaker(
             bind=self.engine,
             class_=AsyncSession,

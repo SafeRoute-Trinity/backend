@@ -141,7 +141,18 @@ class RateLimiter:
     def __init__(self, config: RateLimitConfig, service_name: str) -> None:
         self.config = config
         self.service_name = service_name
+        self.enabled = os.getenv("RATE_LIMIT_ENABLED", "true").strip().lower() == "true"
+        self._redis_max_connections = int(os.getenv("RATE_LIMIT_REDIS_MAX_CONNECTIONS", "256"))
         self._redis: Optional[aioredis.Redis] = None
+        self._last_connect_attempt_monotonic = 0.0
+        self._last_redis_error_log_monotonic = 0.0
+        self._redis_marked_unavailable = False
+        self._redis_retry_interval_seconds = float(
+            os.getenv("RATE_LIMIT_REDIS_RETRY_INTERVAL_SECONDS", "5")
+        )
+        self._redis_error_log_interval_seconds = float(
+            os.getenv("RATE_LIMIT_REDIS_ERROR_LOG_INTERVAL_SECONDS", "30")
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -152,6 +163,15 @@ class RateLimiter:
         if self._redis is not None:
             return self._redis
 
+        now_monotonic = time.monotonic()
+        if (
+            self._last_connect_attempt_monotonic > 0
+            and now_monotonic - self._last_connect_attempt_monotonic
+            < self._redis_retry_interval_seconds
+        ):
+            return None
+
+        self._last_connect_attempt_monotonic = now_monotonic
         password: Optional[str] = os.getenv("REDIS_PASSWORD") or None
         try:
             client = aioredis.Redis(
@@ -159,19 +179,29 @@ class RateLimiter:
                 port=REDIS_PORT,
                 db=REDIS_DB,
                 password=password,
+                max_connections=self._redis_max_connections,
                 decode_responses=True,
                 socket_connect_timeout=2,
                 socket_timeout=2,
             )
             await client.ping()
             self._redis = client
+            if self._redis_marked_unavailable:
+                logger.info("RateLimiter: Redis connection recovered.")
+            self._redis_marked_unavailable = False
         except Exception as exc:
-            logger.warning(
-                "RateLimiter: Redis unavailable (%s). "
-                "Rate limiting is disabled until Redis recovers.",
-                exc,
-            )
+            if (
+                now_monotonic - self._last_redis_error_log_monotonic
+                >= self._redis_error_log_interval_seconds
+            ):
+                logger.warning(
+                    "RateLimiter: Redis unavailable (%s). "
+                    "Rate limiting is disabled until Redis recovers.",
+                    exc,
+                )
+                self._last_redis_error_log_monotonic = now_monotonic
             self._redis = None
+            self._redis_marked_unavailable = True
 
         return self._redis
 
@@ -215,6 +245,9 @@ class RateLimiter:
             ``None``               — request is within the limit; proceed.
             ``JSONResponse(429)``  — limit exceeded; abort immediately.
         """
+        if not self.enabled:
+            return None
+
         path = request.url.path
 
         # CORS preflight requests must never be blocked.
@@ -248,11 +281,19 @@ class RateLimiter:
         except Exception as exc:
             # Transient Redis error: allow the request, reset the cached
             # connection so it will be re-established on the next call.
-            logger.warning(
-                "RateLimiter: Redis pipeline error (%s). Allowing request.",
-                exc,
-            )
+            now_monotonic = time.monotonic()
+            if (
+                now_monotonic - self._last_redis_error_log_monotonic
+                >= self._redis_error_log_interval_seconds
+            ):
+                logger.warning(
+                    "RateLimiter: Redis pipeline error (%s). Allowing request.",
+                    exc,
+                )
+                self._last_redis_error_log_monotonic = now_monotonic
             self._redis = None
+            self._redis_marked_unavailable = True
+            self._last_connect_attempt_monotonic = now_monotonic
             return None
 
         remaining = max(0, limit - current)

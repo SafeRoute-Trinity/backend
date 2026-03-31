@@ -19,12 +19,11 @@ Queue durability:
 
 import json
 import logging
+import os
 from typing import Any, Callable, Coroutine, Optional
 
 import aio_pika
 from aio_pika import DeliveryMode, Message
-
-import os
 
 from common.constants import (
     QUEUE_FEEDBACK_EMAIL,

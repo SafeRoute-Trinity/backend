@@ -34,14 +34,14 @@ backend_env_path = Path(__file__).resolve().parents[2] / ".env"
 if backend_env_path.exists():
     load_dotenv(backend_env_path)
 
-from libs.db import DatabaseType, get_database_factory, initialize_databases
-from libs.cas_enforcer import CASConflictError, cas_enforcer
+from libs.cas_enforcer import cas_enforcer
 from libs.cas_logger import Op, cas_log
 from libs.cas_sync import cas_subscriber
-from libs.structured_logging import setup_structured_logging
-from libs.trace_context import TRACE_HEADER, get_or_create_trace_id, trace_id_var
+from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import ServiceAppConfig
 from libs.rate_limiter import RateLimiter, default_rate_limit_config
+from libs.structured_logging import setup_structured_logging
+from libs.trace_context import TRACE_HEADER, get_or_create_trace_id, trace_id_var
 
 # Initialize database factory
 initialize_databases([DatabaseType.POSTGIS])

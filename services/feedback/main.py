@@ -27,8 +27,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
-from libs.cas_logger import Op, cas_log
 from libs.auth.auth0_verify import verify_token
+from libs.cas_logger import Op, cas_log
 from libs.rabbitmq import RabbitMQClient
 
 # Add parent directory to path for imports

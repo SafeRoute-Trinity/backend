@@ -31,8 +31,8 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
-from libs.rabbitmq import RabbitMQClient
 from libs.outbox import ensure_outbox_tables
+from libs.rabbitmq import RabbitMQClient
 from libs.twilio_client import get_twilio_client
 from services.notification.manager import NotificationManager
 from services.notification.schemas import (
