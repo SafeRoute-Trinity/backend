@@ -40,3 +40,4 @@ graphhopper/cache/*
 !graphhopper/cache/.gitkeep
 graphhopper/*.jar
 asebackend-env/
+env

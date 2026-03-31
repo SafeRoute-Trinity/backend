@@ -1,5 +1,5 @@
 # 使用官方 Python 基础镜像
-FROM python:3.9
+ FROM python:3.11
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \

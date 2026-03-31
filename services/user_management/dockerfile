@@ -1,5 +1,5 @@
 # Use official Python base image (specify linux/amd64 platform for AKS compatibility)
-FROM --platform=linux/amd64 python:3.9
+ FROM --platform=linux/amd64 python:3.11
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \

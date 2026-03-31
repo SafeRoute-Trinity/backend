@@ -114,6 +114,50 @@ class TwilioClient:
                 "error": f"Unexpected error: {str(e)}",
             }
 
+    def make_call_twiml(self, to_phone: str, twiml: str, from_phone: Optional[str] = None) -> dict:
+        """
+        Make a voice call using inline TwiML (no external URL needed).
+
+        Args:
+            to_phone: Recipient phone number (E.164 format)
+            twiml: TwiML XML string to execute when the call is answered
+            from_phone: Optional caller phone number (defaults to configured number)
+
+        Returns:
+            dict with status, sid, and any error information
+        """
+        try:
+            call = self.client.calls.create(
+                twiml=twiml, to=to_phone, from_=from_phone or self.from_phone
+            )
+
+            return {
+                "status": "initiated",
+                "sid": call.sid,
+                "to": call.to,
+                "from": call.from_,
+                "call_status": call.status,
+                "error": None,
+            }
+        except TwilioRestException as e:
+            return {
+                "status": "failed",
+                "sid": None,
+                "to": to_phone,
+                "from": from_phone or self.from_phone,
+                "call_status": "failed",
+                "error": str(e),
+            }
+        except Exception as e:
+            return {
+                "status": "failed",
+                "sid": None,
+                "to": to_phone,
+                "from": from_phone or self.from_phone,
+                "call_status": "failed",
+                "error": f"Unexpected error: {str(e)}",
+            }
+
     def get_message_status(self, message_sid: str) -> dict:
         """
         Check the status of a sent message

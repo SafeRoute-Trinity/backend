@@ -1,6 +1,5 @@
-# 使用官方 Python 基础镜像（默认跟随当前构建机架构；需特定架构时在 build 命令指定 --platform）
-# 统一到 Python 3.11 以匹配 requirements 中开发依赖对 >=3.10 的要求。
-FROM python:3.11
+# 使用官方 Python 基础镜像 (指定 linux/amd64 架构以兼容 AKS)
+ FROM --platform=linux/amd64 python:3.11
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
