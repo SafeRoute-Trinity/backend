@@ -37,6 +37,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
+from libs.http_client import close_shared_async_clients, get_shared_async_client
 from libs.service_urls import NOTIFICATION_SERVICE_URL
 
 # Create service configuration
@@ -61,6 +62,12 @@ get_serializable_db = db_factory.get_serializable_session_dependency(DatabaseTyp
 # Create factory and build app
 factory = FastAPIServiceFactory(service_config)
 app = factory.create_app()
+
+
+@app.on_event("shutdown")
+async def _close_http_clients() -> None:
+    await close_shared_async_clients()
+
 
 # Add business-specific metrics
 SOS_CALLS_TOTAL = factory.add_business_metric(
@@ -200,14 +207,14 @@ async def call(body: EmergencyCallRequest, db: AsyncSession = Depends(get_serial
             "user_location": {"lat": body.lat, "lon": body.lon},
             "call_reason": body.message or f"SOS {body.trigger_type}",
         }
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/call",
-                json=notification_payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            call_status = data.get("status", "failed")
+        client = get_shared_async_client(timeout_seconds=10.0)
+        resp = await client.post(
+            f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/call",
+            json=notification_payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        call_status = data.get("status", "failed")
     except httpx.HTTPError as e:
         logger.exception(
             "Notification service call failed for emergency_id=%s error=%s",
@@ -296,14 +303,14 @@ async def sms(body: EmergencySMSRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=400, detail="sos_id must be a valid UUID")
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
-                json=body.model_dump(mode="json"),
-            )
-            response.raise_for_status()
-            data = response.json()
-            data["emergency_id"] = parsed_sos_id
+        client = get_shared_async_client(timeout_seconds=10.0)
+        response = await client.post(
+            f"{NOTIFICATION_SERVICE_URL}/v1/notifications/sos/sms",
+            json=body.model_dump(mode="json"),
+        )
+        response.raise_for_status()
+        data = response.json()
+        data["emergency_id"] = parsed_sos_id
     except httpx.HTTPError as e:
         # Log and audit SMS failure
         logger.exception(
@@ -394,12 +401,12 @@ async def test_sms(body: TestSMSRequest, db: AsyncSession = Depends(get_db)):
     Phone number must be in E.164 format (e.g., +1234567890)
     """
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                f"{NOTIFICATION_SERVICE_URL}/v1/test/sms", json=body.model_dump()
-            )
-            response.raise_for_status()
-            return TestSMSResponse(**response.json())
+        client = get_shared_async_client(timeout_seconds=10.0)
+        response = await client.post(
+            f"{NOTIFICATION_SERVICE_URL}/v1/test/sms", json=body.model_dump()
+        )
+        response.raise_for_status()
+        return TestSMSResponse(**response.json())
     except httpx.HTTPError as e:
         # Log and audit test sms failure
         logger.exception("Notification test SMS call failed to=%s: %s", body.to_phone, repr(e))

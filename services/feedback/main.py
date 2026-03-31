@@ -13,7 +13,6 @@ from datetime import datetime
 from email.mime.text import MIMEText
 from typing import Any, Dict, Generic, List, Optional, TypeVar
 
-import httpx
 from fastapi import Depends, HTTPException, Query, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -39,6 +38,7 @@ from libs.fastapi_service import (
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
+from libs.http_client import close_shared_async_clients, get_shared_async_client
 from services.feedback.feedback_factory import get_feedback_factory
 from services.feedback.spam_validator import get_spam_validator_factory
 from services.feedback.types import FeedbackType, SeverityType, Status
@@ -103,6 +103,12 @@ async def startup_event():
     except Exception as e:
         logger.error(f"Failed to initialize feedback factory: {e}")
         # Continue startup even if feedback factory fails
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Release shared outbound HTTP clients."""
+    await close_shared_async_clients()
 
 
 # ========= PROMETHEUS METRICS =========
@@ -239,10 +245,10 @@ async def verify_recaptcha(token: str, remote_ip: Optional[str] = None) -> dict:
         payload["remoteip"] = remote_ip
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(RECAPTCHA_VERIFY_URL, data=payload)
-            resp.raise_for_status()
-            result = resp.json()
+        client = get_shared_async_client(timeout_seconds=10)
+        resp = await client.post(RECAPTCHA_VERIFY_URL, data=payload)
+        resp.raise_for_status()
+        result = resp.json()
     except Exception as e:
         logger.exception("Failed to verify captcha")
         raise HTTPException(

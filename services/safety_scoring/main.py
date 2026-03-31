@@ -10,7 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -36,6 +35,7 @@ if backend_env_path.exists():
 
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import ServiceAppConfig
+from libs.http_client import close_shared_async_clients, get_shared_async_client
 from libs.rate_limiter import RateLimiter, default_rate_limit_config
 
 # Initialize database factory
@@ -60,6 +60,7 @@ async def _rate_limit_middleware(request: Request, call_next):
 @app.on_event("shutdown")
 async def _close_rate_limiter():
     await _rate_limiter.close()
+    await close_shared_async_clients()
 
 
 # Get database session dependency
@@ -114,15 +115,15 @@ async def get_ch_route_geojson(route_request: "RouteRequest") -> dict:
     Fetch route from GraphHopper proxy and return GeoJSON-compatible payload.
     """
     try:
-        async with httpx.AsyncClient(timeout=GRAPHHOPPER_PROXY_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                f"{GRAPHHOPPER_PROXY_SERVICE_URL}/api/route",
-                params={"algorithm": "ch"},
-                json={
-                    "start": {"lat": route_request.start.lat, "lng": route_request.start.lng},
-                    "end": {"lat": route_request.end.lat, "lng": route_request.end.lng},
-                },
-            )
+        client = get_shared_async_client(timeout_seconds=GRAPHHOPPER_PROXY_TIMEOUT_SECONDS)
+        response = await client.post(
+            f"{GRAPHHOPPER_PROXY_SERVICE_URL}/api/route",
+            params={"algorithm": "ch"},
+            json={
+                "start": {"lat": route_request.start.lat, "lng": route_request.start.lng},
+                "end": {"lat": route_request.end.lat, "lng": route_request.end.lng},
+            },
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"GraphHopper proxy request failed: {e}") from e
 
