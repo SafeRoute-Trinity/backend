@@ -2,11 +2,13 @@
 # uvicorn services.safety_scoring.main:app --host 0.0.0.0 --port 20003 --reload
 # Docs: http://127.0.0.1:20003/docs
 
+import asyncio
 import json
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -57,10 +59,28 @@ async def _startup_cas():
     await cas_subscriber.start()
 
 
+@app.on_event("startup")
+async def _startup_safety():
+    global _safety_refresh_task
+    await _ensure_safety_infrastructure()
+    _safety_refresh_task = asyncio.create_task(_safety_refresh_loop())
+
+
 @app.on_event("shutdown")
 async def _shutdown_cas():
     await cas_subscriber.stop()
     await cas_enforcer.close()
+
+
+@app.on_event("shutdown")
+async def _shutdown_safety():
+    global _safety_refresh_task
+    if _safety_refresh_task and not _safety_refresh_task.done():
+        _safety_refresh_task.cancel()
+        try:
+            await _safety_refresh_task
+        except asyncio.CancelledError:
+            pass
 
 
 _rate_limiter = RateLimiter(default_rate_limit_config(), "safety_scoring")
@@ -115,6 +135,46 @@ SAFETY_SCORING_DATABASE_URL = os.getenv("SAFETY_SCORING_DATABASE_URL") or os.get
     "POSTGIS_DATABASE_URL"
 )
 
+# ── Safety score refresh ───────────────────────────────────────────────────────
+SAFETY_REFRESH_INTERVAL_HOURS = int(os.getenv("SAFETY_REFRESH_INTERVAL_HOURS", "1"))
+SAFETY_REFRESH_ON_STARTUP = os.getenv("SAFETY_REFRESH_ON_STARTUP", "true").lower() == "true"
+
+# ── External feature table names (override to match your PostGIS schema) ───────
+SAFETY_FEATURE_TABLE_LIGHTS = os.getenv("SAFETY_FEATURE_TABLE_LIGHTS", "street_lights")
+SAFETY_FEATURE_TABLE_CCTV = os.getenv("SAFETY_FEATURE_TABLE_CCTV", "cctv_cameras")
+SAFETY_FEATURE_TABLE_GARDA = os.getenv("SAFETY_FEATURE_TABLE_GARDA", "garda_stations")
+# crime_statistics has no geometry — it joins to garda_stations via station_name
+SAFETY_FEATURE_TABLE_CRIME = os.getenv("SAFETY_FEATURE_TABLE_CRIME", "crime_statistics")
+SAFETY_SCORES_VIEW = "saferoute.ways_safety_scores"
+
+# ── Spatial influence radii (metres) ─────────────────────────────────────────
+SAFETY_BUFFER_LIGHTS_M = float(os.getenv("SAFETY_BUFFER_LIGHTS_M", "60"))
+SAFETY_BUFFER_CCTV_M = float(os.getenv("SAFETY_BUFFER_CCTV_M", "100"))
+SAFETY_BUFFER_GARDA_M = float(os.getenv("SAFETY_BUFFER_GARDA_M", "400"))
+# Crime uses the same Garda station buffer (incidents are anchored to stations)
+SAFETY_BUFFER_CRIME_M = float(os.getenv("SAFETY_BUFFER_CRIME_M", "400"))
+
+# ── Composite weight distribution (should sum to 1.0) ────────────────────────
+# Crime is an INVERTED factor: its contribution = w_crime * (1 - crime_density_norm)
+SAFETY_WEIGHT_LIGHTS = float(os.getenv("SAFETY_WEIGHT_LIGHTS", "0.25"))
+SAFETY_WEIGHT_CCTV = float(os.getenv("SAFETY_WEIGHT_CCTV", "0.25"))
+SAFETY_WEIGHT_GARDA = float(os.getenv("SAFETY_WEIGHT_GARDA", "0.25"))
+SAFETY_WEIGHT_CRIME = float(os.getenv("SAFETY_WEIGHT_CRIME", "0.25"))
+
+# ── safety_factor range (must match ROUTE_SAFETY_FACTOR_MIN/MAX in routing_service) ──
+SAFETY_FACTOR_MIN = float(os.getenv("ROUTE_SAFETY_FACTOR_MIN", "0.5"))
+SAFETY_FACTOR_MAX = float(os.getenv("ROUTE_SAFETY_FACTOR_MAX", "50.0"))
+
+# ── Route cache ───────────────────────────────────────────────────────────────
+SAFETY_ROUTE_CACHE_ENABLED = os.getenv("SAFETY_ROUTE_CACHE_ENABLED", "true").lower() == "true"
+SAFETY_ROUTE_CACHE_TTL_SECONDS = int(os.getenv("SAFETY_ROUTE_CACHE_TTL_SECONDS", "3600"))
+SAFETY_ROUTE_CACHE_TABLE = "saferoute.route_cache"
+
+# ── Mutable module-level state ────────────────────────────────────────────────
+_SAFETY_INFRA_INITIALIZED: bool = False
+_SAFETY_ROUTE_CACHE_TABLE_INITIALIZED: bool = False
+_safety_refresh_task: Optional[asyncio.Task] = None
+
 _SafetyScoringSessionLocal = None
 if SAFETY_SCORING_DATABASE_URL:
     _safety_scoring_engine = create_async_engine(
@@ -137,6 +197,360 @@ async def get_safety_scoring_db():
 
     async for shared_session in get_db():
         yield shared_session
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Safety infrastructure helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_mat_view_sql() -> str:
+    """Return CREATE MATERIALIZED VIEW SQL using the configured feature table names."""
+    tl = SAFETY_FEATURE_TABLE_LIGHTS
+    tc = SAFETY_FEATURE_TABLE_CCTV
+    tg = SAFETY_FEATURE_TABLE_GARDA
+    tcr = SAFETY_FEATURE_TABLE_CRIME
+    bl, bc, bg = SAFETY_BUFFER_LIGHTS_M, SAFETY_BUFFER_CCTV_M, SAFETY_BUFFER_GARDA_M
+    bcr = SAFETY_BUFFER_CRIME_M
+    wl, wc, wg, wcr = (
+        SAFETY_WEIGHT_LIGHTS,
+        SAFETY_WEIGHT_CCTV,
+        SAFETY_WEIGHT_GARDA,
+        SAFETY_WEIGHT_CRIME,
+    )
+
+    return f"""
+    CREATE MATERIALIZED VIEW {SAFETY_SCORES_VIEW} AS
+    WITH
+      way_buffers AS (
+        SELECT gid, geometry, length,
+          ST_Buffer(geometry::geography, {bl})::geometry   AS buf_l,
+          ST_Buffer(geometry::geography, {bc})::geometry   AS buf_c,
+          ST_Buffer(geometry::geography, {bg})::geometry   AS buf_g,
+          ST_Buffer(geometry::geography, {bcr})::geometry  AS buf_cr
+        FROM ways
+      ),
+      light_scores AS (
+        SELECT wb.gid,
+          COALESCE(SUM(1.0 / GREATEST(
+            ST_Distance(wb.geometry::geography, sl.geometry::geography), 1.0
+          )), 0.0) AS raw_score
+        FROM way_buffers wb
+        LEFT JOIN {tl} sl
+          ON sl.geometry && wb.buf_l
+          AND ST_DWithin(wb.geometry::geography, sl.geometry::geography, {bl})
+        GROUP BY wb.gid
+      ),
+      cctv_scores AS (
+        SELECT wb.gid,
+          COALESCE(SUM(1.0 / GREATEST(
+            ST_Distance(wb.geometry::geography, cc.geometry::geography), 1.0
+          )), 0.0) AS raw_score
+        FROM way_buffers wb
+        LEFT JOIN {tc} cc
+          ON cc.geometry && wb.buf_c
+          AND ST_DWithin(wb.geometry::geography, cc.geometry::geography, {bc})
+        GROUP BY wb.gid
+      ),
+      garda_scores AS (
+        SELECT DISTINCT ON (wb.gid) wb.gid,
+          1.0 / GREATEST(
+            ST_Distance(wb.geometry::geography, gs.geometry::geography), 1.0
+          ) AS raw_score
+        FROM way_buffers wb
+        LEFT JOIN {tg} gs
+          ON gs.geometry && wb.buf_g
+          AND ST_DWithin(wb.geometry::geography, gs.geometry::geography, {bg})
+        ORDER BY wb.gid,
+          ST_Distance(wb.geometry::geography, gs.geometry::geography)
+      ),
+      -- Crime has no geometry: incidents are anchored to Garda stations via station_name.
+      -- High incident_count near a segment = LESS safe (inverted in composite formula).
+      crime_scores AS (
+        SELECT wb.gid,
+          COALESCE(SUM(
+            COALESCE(cr.incident_count, 0)::float
+            / GREATEST(ST_Distance(wb.geometry::geography, gs.geometry::geography), 1.0)
+          ), 0.0) AS raw_score
+        FROM way_buffers wb
+        LEFT JOIN {tg} gs
+          ON gs.geometry && wb.buf_cr
+          AND ST_DWithin(wb.geometry::geography, gs.geometry::geography, {bcr})
+        LEFT JOIN {tcr} cr ON cr.station_name = gs.station_name
+        GROUP BY wb.gid
+      ),
+      norms AS (
+        SELECT
+          NULLIF(MAX(ls.raw_score), 0)  AS light_max,
+          NULLIF(MAX(cs.raw_score), 0)  AS cctv_max,
+          NULLIF(MAX(gs.raw_score), 0)  AS garda_max,
+          NULLIF(MAX(cr.raw_score), 0)  AS crime_max
+        FROM light_scores ls, cctv_scores cs, garda_scores gs, crime_scores cr
+      )
+    SELECT
+      w.gid,
+      -- Composite safety score in [0, 1]; higher = safer.
+      -- Crime contribution is inverted: (1 - crime_norm) so high crime lowers the score.
+      LEAST(1.0, GREATEST(0.0,
+          {wl}  * LEAST(COALESCE(ls.raw_score / norms.light_max,  0.0), 1.0)
+        + {wc}  * LEAST(COALESCE(cs.raw_score / norms.cctv_max,   0.0), 1.0)
+        + {wg}  * LEAST(COALESCE(gs.raw_score / norms.garda_max,  0.0), 1.0)
+        + {wcr} * (1.0 - LEAST(COALESCE(cr.raw_score / norms.crime_max, 0.0), 1.0))
+      )) AS composite_safety_score,
+      -- Per-factor normalised scores exposed for breakdown API and per-factor routing
+      COALESCE(ls.raw_score / NULLIF(norms.light_max, 0),  0.0) AS light_score_norm,
+      COALESCE(cs.raw_score / NULLIF(norms.cctv_max,  0),  0.0) AS cctv_score_norm,
+      COALESCE(gs.raw_score / NULLIF(norms.garda_max, 0),  0.0) AS garda_score_norm,
+      -- Crime stored as density (not inverted) so callers can apply their own inversion
+      COALESCE(cr.raw_score / NULLIF(norms.crime_max, 0),  0.0) AS crime_score_norm,
+      NOW() AS computed_at
+    FROM ways w
+    LEFT JOIN light_scores ls ON ls.gid = w.gid
+    LEFT JOIN cctv_scores cs  ON cs.gid  = w.gid
+    LEFT JOIN garda_scores gs ON gs.gid  = w.gid
+    LEFT JOIN crime_scores cr ON cr.gid  = w.gid
+    CROSS JOIN norms
+    """
+
+
+async def _ensure_safety_infrastructure() -> None:
+    """Create supporting tables and the materialized view if they don't exist."""
+    global _SAFETY_INFRA_INITIALIZED, _SAFETY_ROUTE_CACHE_TABLE_INITIALIZED
+    if _SAFETY_INFRA_INITIALIZED:
+        return
+    if _SafetyScoringSessionLocal is None:
+        print("Safety infrastructure: no dedicated DB session, skipping init.")
+        _SAFETY_INFRA_INITIALIZED = True
+        return
+
+    try:
+        async with _SafetyScoringSessionLocal() as session:
+            await session.execute(text("CREATE SCHEMA IF NOT EXISTS saferoute"))
+
+            await session.execute(text(f"""
+                CREATE TABLE IF NOT EXISTS {SAFETY_ROUTE_CACHE_TABLE} (
+                    cache_key         TEXT PRIMARY KEY,
+                    origin_lat        DOUBLE PRECISION NOT NULL,
+                    origin_lon        DOUBLE PRECISION NOT NULL,
+                    destination_lat   DOUBLE PRECISION NOT NULL,
+                    destination_lon   DOUBLE PRECISION NOT NULL,
+                    weights_hash      TEXT NOT NULL DEFAULT 'default',
+                    response_payload  JSONB NOT NULL,
+                    safety_score      DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    expires_at        TIMESTAMPTZ NOT NULL,
+                    hit_count         INTEGER NOT NULL DEFAULT 0,
+                    last_hit_at       TIMESTAMPTZ
+                )
+            """))
+            await session.execute(text(f"""
+                CREATE INDEX IF NOT EXISTS idx_route_cache_expires_at
+                ON {SAFETY_ROUTE_CACHE_TABLE} (expires_at)
+            """))
+
+            await session.execute(text("""
+                CREATE TABLE IF NOT EXISTS saferoute.user_safety_weights (
+                    user_id            TEXT PRIMARY KEY,
+                    cctv_coverage      DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    street_lighting    DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    business_activity  DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    crime_rate         DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    pedestrian_traffic DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """))
+
+            # Only create the materialized view if it doesn't already exist.
+            existing = await session.execute(text("""
+                SELECT 1 FROM pg_matviews
+                WHERE schemaname = 'saferoute'
+                  AND matviewname = 'ways_safety_scores'
+            """))
+            if not existing.scalar():
+                try:
+                    await session.execute(text(_build_mat_view_sql()))
+                    await session.execute(
+                        text(f"CREATE UNIQUE INDEX ON {SAFETY_SCORES_VIEW} (gid)")
+                    )
+                    print(f"Created materialized view {SAFETY_SCORES_VIEW}")
+                except Exception as view_err:
+                    print(
+                        f"Could not create {SAFETY_SCORES_VIEW} "
+                        f"(feature tables may not exist yet): {view_err}"
+                    )
+                    await session.rollback()
+                    _SAFETY_INFRA_INITIALIZED = True
+                    return
+
+            await session.commit()
+            _SAFETY_INFRA_INITIALIZED = True
+            _SAFETY_ROUTE_CACHE_TABLE_INITIALIZED = True
+            print("Safety infrastructure initialized.")
+    except Exception as e:
+        print(f"Safety infrastructure init failed (non-fatal): {e}")
+
+
+async def _refresh_safety_scores() -> None:
+    """
+    Refresh the materialized view then write the computed safety_factor back to
+    ways.safety_factor so pgRouting picks it up immediately.
+    """
+    if _SafetyScoringSessionLocal is None:
+        return
+    try:
+        async with _SafetyScoringSessionLocal() as session:
+            existing = await session.execute(text("""
+                SELECT 1 FROM pg_matviews
+                WHERE schemaname = 'saferoute'
+                  AND matviewname = 'ways_safety_scores'
+            """))
+            if not existing.scalar():
+                print("ways_safety_scores view not found — skipping refresh.")
+                return
+
+            await session.execute(
+                text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {SAFETY_SCORES_VIEW}")
+            )
+
+            sf_range = SAFETY_FACTOR_MAX - SAFETY_FACTOR_MIN
+            await session.execute(
+                text(f"""
+                UPDATE ways w
+                SET safety_factor =
+                    :sf_min + (1.0 - mv.composite_safety_score) * :sf_range
+                FROM {SAFETY_SCORES_VIEW} mv
+                WHERE w.gid = mv.gid
+            """),
+                {"sf_min": SAFETY_FACTOR_MIN, "sf_range": sf_range},
+            )
+
+            await session.commit()
+            print(f"Safety scores refreshed at {datetime.utcnow().isoformat()}Z")
+    except Exception as e:
+        print(f"Safety score refresh failed: {e}")
+
+
+async def _safety_refresh_loop() -> None:
+    """Periodic background task: refresh safety scores every N hours."""
+    await asyncio.sleep(15)  # short initial delay so DB is fully ready
+    if SAFETY_REFRESH_ON_STARTUP:
+        await _refresh_safety_scores()
+    while True:
+        try:
+            await asyncio.sleep(SAFETY_REFRESH_INTERVAL_HOURS * 3600)
+            await _refresh_safety_scores()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"Safety refresh loop error: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Route cache helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _route_cache_key(
+    start: "Coordinate", end: "Coordinate", weights: Optional["RouteSafetyWeightsInput"]
+) -> str:
+    weights_sig = "default"
+    if weights:
+        weights_sig = md5(json.dumps(weights.model_dump(), sort_keys=True).encode()).hexdigest()[:8]
+    return f"{start.lat:.5f},{start.lng:.5f}:{end.lat:.5f},{end.lng:.5f}:{weights_sig}"
+
+
+async def _get_cached_route(db: "AsyncSession", cache_key: str) -> Optional[Dict[str, Any]]:
+    if not SAFETY_ROUTE_CACHE_ENABLED:
+        return None
+    try:
+        result = await db.execute(
+            text(f"""
+                SELECT response_payload
+                FROM {SAFETY_ROUTE_CACHE_TABLE}
+                WHERE cache_key = :k AND expires_at > NOW()
+                LIMIT 1
+            """),
+            {"k": cache_key},
+        )
+        row = result.first()
+        if not row:
+            return None
+        await db.execute(
+            text(f"""
+                UPDATE {SAFETY_ROUTE_CACHE_TABLE}
+                SET hit_count = hit_count + 1, last_hit_at = NOW()
+                WHERE cache_key = :k
+            """),
+            {"k": cache_key},
+        )
+        await db.commit()
+        payload = row.response_payload
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return payload if isinstance(payload, dict) else None
+    except Exception as e:
+        print(f"Route cache read failed: {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+async def _store_route_cache(
+    db: "AsyncSession",
+    cache_key: str,
+    start: "Coordinate",
+    end: "Coordinate",
+    weights: Optional["RouteSafetyWeightsInput"],
+    payload: Dict[str, Any],
+    safety_score: float,
+) -> None:
+    if not SAFETY_ROUTE_CACHE_ENABLED:
+        return
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=SAFETY_ROUTE_CACHE_TTL_SECONDS)
+    weights_sig = (
+        "default"
+        if not weights
+        else md5(json.dumps(weights.model_dump(), sort_keys=True).encode()).hexdigest()[:8]
+    )
+    try:
+        await db.execute(
+            text(f"""
+                INSERT INTO {SAFETY_ROUTE_CACHE_TABLE} (
+                    cache_key, origin_lat, origin_lon,
+                    destination_lat, destination_lon,
+                    weights_hash, response_payload, safety_score, expires_at
+                ) VALUES (
+                    :k, :olat, :olon, :dlat, :dlon,
+                    :whash, CAST(:payload AS JSONB), :score, :exp
+                )
+                ON CONFLICT (cache_key) DO UPDATE SET
+                    response_payload = EXCLUDED.response_payload,
+                    safety_score     = EXCLUDED.safety_score,
+                    expires_at       = EXCLUDED.expires_at,
+                    hit_count        = {SAFETY_ROUTE_CACHE_TABLE}.hit_count + 1,
+                    last_hit_at      = NOW()
+            """),
+            {
+                "k": cache_key,
+                "olat": start.lat,
+                "olon": start.lng,
+                "dlat": end.lat,
+                "dlon": end.lng,
+                "whash": weights_sig,
+                "payload": json.dumps(payload),
+                "score": safety_score,
+                "exp": expires_at,
+            },
+        )
+        await db.commit()
+    except Exception as e:
+        print(f"Route cache write failed: {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
 
 async def get_ch_route_geojson(route_request: "RouteRequest") -> dict:
@@ -278,9 +692,20 @@ class WeightUpdateRequest(BaseModel):
     safety_factor: float
 
 
+class RouteSafetyWeightsInput(BaseModel):
+    """Per-user factor importance weights for route cost scaling (all default to 1.0)."""
+
+    cctv_coverage: float = 1.0
+    street_lighting: float = 1.0
+    business_activity: float = 1.0
+    crime_rate: float = 1.0
+    pedestrian_traffic: float = 1.0
+
+
 class RouteRequest(BaseModel):
     start: Coordinate
     end: Coordinate
+    safety_weights: Optional[RouteSafetyWeightsInput] = None
 
 
 class SafetySegmentInput(BaseModel):
@@ -666,6 +1091,28 @@ async def get_route(
         start_node = start_node_res[0]
         end_node = end_node_res[0]
 
+        # Compute user safety scalar from optional per-factor weights.
+        # A scalar > 1 amplifies the penalty for unsafe edges (more cautious routing).
+        user_safety_scalar = 1.0
+        if request.safety_weights:
+            sw = request.safety_weights
+            total = (
+                sw.cctv_coverage
+                + sw.street_lighting
+                + sw.business_activity
+                + sw.crime_rate
+                + sw.pedestrian_traffic
+            )
+            user_safety_scalar = max(0.3, min(3.0, total / 5.0))
+
+        # Check route cache before running pgRouting.
+        cache_key = _route_cache_key(request.start, request.end, request.safety_weights)
+        cached = await _get_cached_route(db, cache_key)
+        if cached is not None:
+            await cas_log.transition(Op.SAFETY_ROUTE, "DIJKSTRA_REQUESTED", "ROUTE_COMPUTED")
+            await cas_log.transition(Op.SAFETY_ROUTE, "ROUTE_COMPUTED", "COMPLETED")
+            return cached
+
         # 2. Build query against progressively larger local subgraphs, then full graph fallback.
         routing_fn = (
             "pgr_aStar"
@@ -674,7 +1121,7 @@ async def get_route(
         )
         routing_query = text(
             """
-            SELECT 
+            SELECT
                 d.seq,
                 d.path_seq,
                 d.node,
@@ -683,14 +1130,15 @@ async def get_route(
                 d.agg_cost,
                 ST_AsGeoJSON(w.geometry) as geojson,
                 w.length,
+                w.safety_factor,
                 w.source,
                 w.target
             FROM """
             + routing_fn
             + """(
                 CAST(:sql AS TEXT),
-                CAST(:start_node AS BIGINT), 
-                CAST(:end_node AS BIGINT), 
+                CAST(:start_node AS BIGINT),
+                CAST(:end_node AS BIGINT),
                 false
             ) as d
             LEFT JOIN ways w ON d.edge = w.gid
@@ -704,6 +1152,7 @@ async def get_route(
             expansions.append(round(expanded, 6))
             expanded *= 2
 
+        scalar_sql = f"* {user_safety_scalar:.4f}" if user_safety_scalar != 1.0 else ""
         routes = []
         for expand in expansions:
             cost_sql = f"""
@@ -722,8 +1171,8 @@ async def get_route(
                     w.gid AS id,
                     w.source,
                     w.target,
-                    w.length * w.safety_factor AS cost,
-                    w.length * w.safety_factor AS reverse_cost,
+                    w.length * w.safety_factor {scalar_sql} AS cost,
+                    w.length * w.safety_factor {scalar_sql} AS reverse_cost,
                     ST_X(ST_StartPoint(w.geometry)) AS x1,
                     ST_Y(ST_StartPoint(w.geometry)) AS y1,
                     ST_X(ST_EndPoint(w.geometry)) AS x2,
@@ -740,18 +1189,16 @@ async def get_route(
                 if routes:
                     break
             except Exception:
-                # If the local subgraph is too small/invalid, keep expanding.
                 continue
 
         if not routes:
-            # Fallback to full graph to avoid false negatives.
-            full_cost_sql = """
+            full_cost_sql = f"""
                 SELECT
                     gid AS id,
                     source,
                     target,
-                    length * safety_factor AS cost,
-                    length * safety_factor AS reverse_cost,
+                    length * safety_factor {scalar_sql} AS cost,
+                    length * safety_factor {scalar_sql} AS reverse_cost,
                     ST_X(ST_StartPoint(geometry)) AS x1,
                     ST_Y(ST_StartPoint(geometry)) AS y1,
                     ST_X(ST_EndPoint(geometry)) AS x2,
@@ -774,23 +1221,18 @@ async def get_route(
         # 4. Construct GeoJSON Response
         features = []
         total_distance = 0.0
+        path_sf_weighted: List[tuple] = []  # (safety_factor, length)
 
         # Path Segments
         road_coords = []
         if ROUTE_DEBUG_LOG:
             print(f"--- Routing from {start_node} to {end_node} ---")
         for r in routes:
-            if r.edge != -1:
-                # print(f"Used Edge: {r.edge}, Cost: {r.cost}, Length: {r.length}")
-                pass
-
             if r.geojson:
                 geom = json.loads(r.geojson)
                 coords = geom["coordinates"]
 
-                # Check direction using Topology (Robust)
                 if r.node == r.target:
-                    # We are starting traversal from the Target node, so we are going backwards.
                     coords = coords[::-1]
 
                 if not road_coords:
@@ -803,6 +1245,9 @@ async def get_route(
 
                 if r.length:
                     total_distance += r.length
+                    sf = getattr(r, "safety_factor", None)
+                    if sf is not None:
+                        path_sf_weighted.append((float(sf), float(r.length)))
 
         trimmed_coords = road_coords
 
@@ -842,22 +1287,30 @@ async def get_route(
         walking_speed_mps = 1.39
         duration_seconds = total_distance / walking_speed_mps
 
-        # TODO: add audit when auth is ready
-
-        # audit = Audit(
-        #     log_id=uuid.uuid4(),
-        #     user_id=user_id,
-        #     event_type="authentication",
-        #     event_id=user_id,
-        #     message="Register",
-        #     created_at=now,
-        #     updated_at=now,
-        # )
-
-        # db.add(audit)
+        # Compute real path safety score from length-weighted avg safety_factor.
+        if path_sf_weighted and total_distance > 0:
+            total_sf_len = sum(length for _, length in path_sf_weighted)
+            avg_sf = sum(sf * length for sf, length in path_sf_weighted) / max(total_sf_len, 1e-9)
+            computed_safety_score = round(
+                max(
+                    0.0,
+                    min(
+                        100.0,
+                        (
+                            1.0
+                            - (avg_sf - SAFETY_FACTOR_MIN)
+                            / max(SAFETY_FACTOR_MAX - SAFETY_FACTOR_MIN, 1e-9)
+                        )
+                        * 100.0,
+                    ),
+                ),
+                1,
+            )
+        else:
+            computed_safety_score = 50.0
 
         await cas_log.transition(Op.SAFETY_ROUTE, "ROUTE_COMPUTED", "COMPLETED")
-        return {
+        result = {
             "type": "FeatureCollection",
             "features": features,
             "properties": {
@@ -865,9 +1318,20 @@ async def get_route(
                     "distance_meters": total_distance,
                     "distance_km": round(total_distance / 1000, 2),
                     "duration": duration_seconds,
-                }
+                },
+                "safety_score": computed_safety_score,
             },
         }
+        await _store_route_cache(
+            db,
+            cache_key,
+            request.start,
+            request.end,
+            request.safety_weights,
+            result,
+            computed_safety_score,
+        )
+        return result
 
     except HTTPException:
         raise
@@ -960,42 +1424,133 @@ async def get_graph_geojson(
 
 
 @app.get("/v1/safety/factors", response_model=SafetyFactorsResponse)
-async def get_factors(body: SafetyFactorsRequest):
-    # Business metric: count factors queries
+async def get_factors(
+    body: SafetyFactorsRequest,
+    db: AsyncSession = Depends(get_safety_scoring_db),
+):
     SAFETY_FACTORS_QUERIES_TOTAL.inc()
+
+    composite_score = 50.0
+    factors: Dict[str, object] = {}
+
+    try:
+        # Nearest way segment to the queried point, then look up its scores.
+        result = await db.execute(
+            text(f"""
+                SELECT
+                    mv.composite_safety_score,
+                    mv.light_score_norm,
+                    mv.cctv_score_norm,
+                    mv.garda_score_norm
+                FROM {SAFETY_SCORES_VIEW} mv
+                JOIN ways w ON w.gid = mv.gid
+                ORDER BY w.geometry <-> ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)
+                LIMIT 1
+            """),
+            {"lon": body.lon, "lat": body.lat},
+        )
+        row = result.fetchone()
+        if row:
+            composite_score = round(float(row.composite_safety_score) * 100, 1)
+            factors = {
+                "street_lighting": round(float(row.light_score_norm) * 100, 1),
+                "cctv_coverage": round(float(row.cctv_score_norm) * 100, 1),
+                "garda_proximity": round(float(row.garda_score_norm) * 100, 1),
+                # Exposed as raw density (0 = no crime, 100 = highest relative density)
+                "crime_density": round(float(row.crime_score_norm) * 100, 1),
+            }
+    except Exception as e:
+        print(f"get_factors DB query failed (returning defaults): {e}")
+        factors = {"street_lighting": 0, "cctv_coverage": 0, "garda_proximity": 0}
 
     return SafetyFactorsResponse(
         location=PointModel(lat=body.lat, lon=body.lon),
         radius_m=body.radius_m,
-        factors={"cctv_cameras": 3, "street_lights": 5, "foot_traffic_level": "medium"},
-        composite_score=88.0,
+        factors=factors,
+        composite_score=composite_score,
         queried_at=datetime.utcnow(),
     )
 
 
 @app.post("/v1/safety/score-route", response_model=ScoreRouteResponse)
-async def score_route(body: ScoreRouteRequest):
-    # Business metric: count scoring requests
+async def score_route(
+    body: ScoreRouteRequest,
+    db: AsyncSession = Depends(get_safety_scoring_db),
+):
     SAFETY_SCORE_ROUTE_REQUESTS_TOTAL.inc()
 
-    segs = [
-        SafetySegmentScore(
-            segment_id=f"seg_{i + 1:03d}",
-            start_lat=s.start_lat,
-            start_lon=s.start_lon,
-            end_lat=s.end_lat,
-            end_lon=s.end_lon,
-            score=85 + i,
+    segs: List[SafetySegmentScore] = []
+    all_scores: List[float] = []
+    breakdown_lights: List[float] = []
+    breakdown_cctv: List[float] = []
+    breakdown_garda: List[float] = []
+    breakdown_crime: List[float] = []
+
+    for i, s in enumerate(body.segments):
+        seg_score = 50.0
+        risk_factors: List[RiskFactor] = []
+        try:
+            mid_lon = (s.start_lon + s.end_lon) / 2
+            mid_lat = (s.start_lat + s.end_lat) / 2
+            result = await db.execute(
+                text(f"""
+                    SELECT
+                        mv.composite_safety_score,
+                        mv.light_score_norm,
+                        mv.cctv_score_norm,
+                        mv.garda_score_norm,
+                        mv.crime_score_norm
+                    FROM {SAFETY_SCORES_VIEW} mv
+                    JOIN ways w ON w.gid = mv.gid
+                    ORDER BY w.geometry <-> ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)
+                    LIMIT 1
+                """),
+                {"lon": mid_lon, "lat": mid_lat},
+            )
+            row = result.fetchone()
+            if row:
+                seg_score = round(float(row.composite_safety_score) * 100, 1)
+                breakdown_lights.append(float(row.light_score_norm) * 100)
+                breakdown_cctv.append(float(row.cctv_score_norm) * 100)
+                breakdown_garda.append(float(row.garda_score_norm) * 100)
+                breakdown_crime.append(float(row.crime_score_norm) * 100)
+                # Flag high crime density as a risk factor
+                if float(row.crime_score_norm) > 0.7:
+                    risk_factors.append(RiskFactor(type="high_crime_area", severity="high"))
+                elif float(row.crime_score_norm) > 0.4:
+                    risk_factors.append(RiskFactor(type="elevated_crime", severity="medium"))
+                if seg_score < 40:
+                    risk_factors.append(RiskFactor(type="low_safety_score", severity="high"))
+                elif seg_score < 60:
+                    risk_factors.append(RiskFactor(type="moderate_risk", severity="medium"))
+        except Exception as e:
+            print(f"score_route segment {i} query failed: {e}")
+
+        all_scores.append(seg_score)
+        segs.append(
+            SafetySegmentScore(
+                segment_id=f"seg_{i + 1:03d}",
+                start_lat=s.start_lat,
+                start_lon=s.start_lon,
+                end_lat=s.end_lat,
+                end_lon=s.end_lon,
+                score=seg_score,
+                risk_factors=risk_factors,
+            )
         )
-        for i, s in enumerate(body.segments)
-    ]
+
+    overall = round(sum(all_scores) / max(len(all_scores), 1), 1)
+    scoring_breakdown: Dict[str, float] = {
+        "street_lighting": round(sum(breakdown_lights) / max(len(breakdown_lights), 1), 1),
+        "cctv_coverage": round(sum(breakdown_cctv) / max(len(breakdown_cctv), 1), 1),
+        "garda_proximity": round(sum(breakdown_garda) / max(len(breakdown_garda), 1), 1),
+        # Exposed as density (higher = more crime in this corridor)
+        "crime_density": round(sum(breakdown_crime) / max(len(breakdown_crime), 1), 1),
+    }
+
     return ScoreRouteResponse(
-        overall_score=87.5,
-        scoring_breakdown={
-            "cctv_coverage": 90,
-            "street_lighting": 85,
-            "crime_rate": 82,
-        },
+        overall_score=overall,
+        scoring_breakdown=scoring_breakdown,
         segments=segs,
         alerts=[],
         calculated_at=datetime.utcnow(),
@@ -1003,7 +1558,10 @@ async def score_route(body: ScoreRouteRequest):
 
 
 @app.put("/v1/safety/weights", response_model=SafetyWeightsResponse)
-async def update_weights(body: SafetyWeightsRequest):
+async def update_weights(
+    body: SafetyWeightsRequest,
+    db: AsyncSession = Depends(get_safety_scoring_db),
+):
     w = body.weights
     total = (
         w.cctv_coverage
@@ -1012,14 +1570,57 @@ async def update_weights(body: SafetyWeightsRequest):
         + w.crime_rate
         + w.pedestrian_traffic
     )
-
-    # Business metric: count weights updates
     SAFETY_WEIGHTS_UPDATES_TOTAL.inc()
+    now = datetime.utcnow()
+
+    try:
+        await db.execute(
+            text("""
+                INSERT INTO saferoute.user_safety_weights
+                    (user_id, cctv_coverage, street_lighting, business_activity,
+                     crime_rate, pedestrian_traffic, updated_at)
+                VALUES
+                    (:uid, :cctv, :lights, :biz, :crime, :ped, :now)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    cctv_coverage      = EXCLUDED.cctv_coverage,
+                    street_lighting    = EXCLUDED.street_lighting,
+                    business_activity  = EXCLUDED.business_activity,
+                    crime_rate         = EXCLUDED.crime_rate,
+                    pedestrian_traffic = EXCLUDED.pedestrian_traffic,
+                    updated_at         = EXCLUDED.updated_at
+            """),
+            {
+                "uid": body.user_id,
+                "cctv": w.cctv_coverage,
+                "lights": w.street_lighting,
+                "biz": w.business_activity,
+                "crime": w.crime_rate,
+                "ped": w.pedestrian_traffic,
+                "now": now,
+            },
+        )
+        await db.commit()
+    except Exception as e:
+        print(f"Failed to persist safety weights for {body.user_id}: {e}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
     return SafetyWeightsResponse(
         status="updated",
         user_id=body.user_id,
         weights=w,
         weights_sum=total,
-        updated_at=datetime.utcnow(),
+        updated_at=now,
     )
+
+
+@app.post("/internal/refresh-safety-scores", include_in_schema=False)
+async def manual_refresh_safety_scores():
+    """
+    Manually trigger a safety score refresh. Useful after bulk updates to
+    feature tables (e.g. new CCTV cameras imported).
+    """
+    await _refresh_safety_scores()
+    return {"status": "refreshed", "refreshed_at": datetime.utcnow().isoformat() + "Z"}
