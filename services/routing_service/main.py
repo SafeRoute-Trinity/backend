@@ -2,6 +2,7 @@
 # uvicorn services.routing_service.main:app --host 0.0.0.0 --port 20002 --reload
 # Docs: http://127.0.0.1:20002/docs
 
+import asyncio
 import json
 import logging
 import math
@@ -9,12 +10,13 @@ import os
 import sys
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
-import httpx
+import redis.asyncio as aioredis
 from fastapi import Depends, HTTPException, Query, Request, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
@@ -41,11 +43,13 @@ from models.audit import Audit
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from common.constants import REDIS_DB, REDIS_HOST, REDIS_PORT
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
     FastAPIServiceFactory,
     ServiceAppConfig,
 )
+from libs.http_client import close_shared_async_clients, get_shared_async_client
 
 # Load .env file at startup (before other imports that need env vars)
 try:
@@ -111,12 +115,49 @@ CH_ROUTING_PROFILE_FAST = os.getenv(
 TRANSIT_CACHE_ENABLED = os.getenv("TRANSIT_CACHE_ENABLED", "true").lower() == "true"
 TRANSIT_CACHE_TTL_SECONDS = int(os.getenv("TRANSIT_CACHE_TTL_SECONDS", "900"))
 TRANSIT_CACHE_BUCKET_MINUTES = int(os.getenv("TRANSIT_CACHE_BUCKET_MINUTES", "5"))
+TRANSIT_CACHE_TRACK_HITS = os.getenv("TRANSIT_CACHE_TRACK_HITS", "false").lower() == "true"
 TRANSIT_CACHE_TABLE = "saferoute.transit_plan_cache"
 TRANSIT_CACHE_TABLE_INITIALIZED = False
+TRANSIT_CACHE_TABLE_LOCK = asyncio.Lock()
 ROUTE_SAFETY_FACTOR_MIN = float(os.getenv("ROUTE_SAFETY_FACTOR_MIN", "0.5"))
 ROUTE_SAFETY_FACTOR_MAX = float(os.getenv("ROUTE_SAFETY_FACTOR_MAX", "50"))
 ROUTE_SAFETY_FACTOR_EXPONENT = float(os.getenv("ROUTE_SAFETY_FACTOR_EXPONENT", "0.65"))
 ROUTE_MAX_DETOUR_RATIO = float(os.getenv("ROUTE_MAX_DETOUR_RATIO", "1.45"))
+ROUTE_RESULT_CACHE_ENABLED = os.getenv("ROUTE_RESULT_CACHE_ENABLED", "true").lower() == "true"
+ROUTE_RESULT_CACHE_BACKEND = os.getenv("ROUTE_RESULT_CACHE_BACKEND", "redis").strip().lower()
+ROUTE_RESULT_CACHE_TTL_SECONDS = float(os.getenv("ROUTE_RESULT_CACHE_TTL_SECONDS", "20"))
+ROUTE_RESULT_CACHE_MAX_ENTRIES = int(os.getenv("ROUTE_RESULT_CACHE_MAX_ENTRIES", "512"))
+ROUTE_RESULT_CACHE_REDIS_KEY_PREFIX = os.getenv(
+    "ROUTE_RESULT_CACHE_REDIS_KEY_PREFIX", "routing:route_result_cache"
+).strip()
+ROUTE_RESULT_CACHE_REDIS_DB = int(os.getenv("ROUTE_RESULT_CACHE_REDIS_DB", str(REDIS_DB)))
+ROUTE_RESULT_CACHE_REDIS_HOST = os.getenv("ROUTE_RESULT_CACHE_REDIS_HOST", REDIS_HOST)
+ROUTE_RESULT_CACHE_REDIS_PORT = int(os.getenv("ROUTE_RESULT_CACHE_REDIS_PORT", str(REDIS_PORT)))
+ROUTE_RESULT_CACHE_REDIS_PASSWORD = os.getenv("ROUTE_RESULT_CACHE_REDIS_PASSWORD") or os.getenv(
+    "REDIS_PASSWORD"
+)
+ROUTE_RESULT_CACHE_REDIS_MAX_CONNECTIONS = int(
+    os.getenv("ROUTE_RESULT_CACHE_REDIS_MAX_CONNECTIONS", "256")
+)
+ROUTE_RESULT_CACHE_REDIS_RETRY_INTERVAL_SECONDS = float(
+    os.getenv("ROUTE_RESULT_CACHE_REDIS_RETRY_INTERVAL_SECONDS", "5")
+)
+ROUTE_RESULT_CACHE_REDIS_ERROR_LOG_INTERVAL_SECONDS = float(
+    os.getenv("ROUTE_RESULT_CACHE_REDIS_ERROR_LOG_INTERVAL_SECONDS", "30")
+)
+ROUTE_RESULT_CACHE: "OrderedDict[str, tuple[float, Dict[str, Any]]]" = OrderedDict()
+ROUTE_RESULT_CACHE_LOCK = asyncio.Lock()
+ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL = 1
+ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_TTL_SECONDS = float(
+    os.getenv("ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_TTL_SECONDS", "5")
+)
+ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_VALUE: Optional[str] = None
+ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_EXPIRES_AT_MONOTONIC = 0.0
+ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_LOCK = asyncio.Lock()
+ROUTE_RESULT_CACHE_REDIS: Optional[aioredis.Redis] = None
+ROUTE_RESULT_CACHE_REDIS_LAST_CONNECT_ATTEMPT_MONOTONIC = 0.0
+ROUTE_RESULT_CACHE_REDIS_LAST_ERROR_LOG_MONOTONIC = 0.0
+ROUTING_ROUTE_AUDIT_ENABLED = os.getenv("ROUTING_ROUTE_AUDIT_ENABLED", "true").lower() == "true"
 
 # Create service configuration
 service_config = ServiceAppConfig(
@@ -139,6 +180,13 @@ get_postgis_db = db_factory.get_session_dependency(DatabaseType.POSTGIS)
 # Create factory and build app
 factory = FastAPIServiceFactory(service_config)
 app = factory.create_app()
+
+
+@app.on_event("shutdown")
+async def _close_http_clients() -> None:
+    await close_shared_async_clients()
+    await _close_route_result_cache_redis()
+
 
 # Add business-specific metrics
 ROUTING_ROUTE_CALCULATIONS_TOTAL = factory.add_business_metric(
@@ -685,6 +733,287 @@ def _round_coord(value: float) -> float:
     return round(float(value), 5)
 
 
+def _normalize_avoid_list(avoid: Optional[List[str]]) -> List[str]:
+    if not avoid:
+        return []
+    cleaned = [str(item).strip().lower() for item in avoid if str(item).strip()]
+    return sorted(set(cleaned))
+
+
+def _route_cache_uses_redis() -> bool:
+    return ROUTE_RESULT_CACHE_ENABLED and ROUTE_RESULT_CACHE_BACKEND == "redis"
+
+
+def _route_result_cache_data_key(cache_key: str) -> str:
+    return f"{ROUTE_RESULT_CACHE_REDIS_KEY_PREFIX}:route:{cache_key}"
+
+
+def _route_result_cache_weights_version_key() -> str:
+    return f"{ROUTE_RESULT_CACHE_REDIS_KEY_PREFIX}:weights_version"
+
+
+def _set_route_result_cache_weights_version_local_cache(value: str) -> None:
+    global ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_VALUE
+    global ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_EXPIRES_AT_MONOTONIC
+
+    ttl_seconds = max(0.0, ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_TTL_SECONDS)
+    ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_VALUE = value
+    ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_EXPIRES_AT_MONOTONIC = (
+        time.monotonic() + ttl_seconds if ttl_seconds > 0 else 0.0
+    )
+
+
+def _get_route_result_cache_weights_version_local_cache(now_monotonic: float) -> Optional[str]:
+    if ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_EXPIRES_AT_MONOTONIC <= 0:
+        return None
+    if now_monotonic >= ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_EXPIRES_AT_MONOTONIC:
+        return None
+    return ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_VALUE
+
+
+def _maybe_log_route_cache_redis_error(message: str, error: Exception) -> None:
+    global ROUTE_RESULT_CACHE_REDIS_LAST_ERROR_LOG_MONOTONIC
+    now_monotonic = time.monotonic()
+    if (
+        now_monotonic - ROUTE_RESULT_CACHE_REDIS_LAST_ERROR_LOG_MONOTONIC
+        < ROUTE_RESULT_CACHE_REDIS_ERROR_LOG_INTERVAL_SECONDS
+    ):
+        return
+    ROUTE_RESULT_CACHE_REDIS_LAST_ERROR_LOG_MONOTONIC = now_monotonic
+    logger.warning("%s: %s", message, error)
+
+
+async def _get_route_result_cache_redis() -> Optional[aioredis.Redis]:
+    global ROUTE_RESULT_CACHE_REDIS
+    global ROUTE_RESULT_CACHE_REDIS_LAST_CONNECT_ATTEMPT_MONOTONIC
+
+    if not _route_cache_uses_redis():
+        return None
+
+    if ROUTE_RESULT_CACHE_REDIS is not None:
+        return ROUTE_RESULT_CACHE_REDIS
+
+    now_monotonic = time.monotonic()
+    if (
+        ROUTE_RESULT_CACHE_REDIS_LAST_CONNECT_ATTEMPT_MONOTONIC > 0
+        and now_monotonic - ROUTE_RESULT_CACHE_REDIS_LAST_CONNECT_ATTEMPT_MONOTONIC
+        < ROUTE_RESULT_CACHE_REDIS_RETRY_INTERVAL_SECONDS
+    ):
+        return None
+
+    ROUTE_RESULT_CACHE_REDIS_LAST_CONNECT_ATTEMPT_MONOTONIC = now_monotonic
+
+    try:
+        client = aioredis.Redis(
+            host=ROUTE_RESULT_CACHE_REDIS_HOST,
+            port=ROUTE_RESULT_CACHE_REDIS_PORT,
+            db=ROUTE_RESULT_CACHE_REDIS_DB,
+            password=ROUTE_RESULT_CACHE_REDIS_PASSWORD,
+            max_connections=ROUTE_RESULT_CACHE_REDIS_MAX_CONNECTIONS,
+            decode_responses=True,
+            socket_connect_timeout=1,
+            socket_timeout=1,
+        )
+        await client.ping()
+        ROUTE_RESULT_CACHE_REDIS = client
+    except Exception as e:
+        _maybe_log_route_cache_redis_error("Route result cache Redis unavailable", e)
+        ROUTE_RESULT_CACHE_REDIS = None
+
+    return ROUTE_RESULT_CACHE_REDIS
+
+
+async def _close_route_result_cache_redis() -> None:
+    global ROUTE_RESULT_CACHE_REDIS
+    if ROUTE_RESULT_CACHE_REDIS is None:
+        return
+    await ROUTE_RESULT_CACHE_REDIS.aclose()
+    ROUTE_RESULT_CACHE_REDIS = None
+
+
+async def _get_route_result_cache_weights_version() -> str:
+    if _route_cache_uses_redis():
+        now_monotonic = time.monotonic()
+        cached_version = _get_route_result_cache_weights_version_local_cache(now_monotonic)
+        if cached_version is not None:
+            return cached_version
+
+        async with ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL_CACHE_LOCK:
+            now_monotonic = time.monotonic()
+            cached_version = _get_route_result_cache_weights_version_local_cache(now_monotonic)
+            if cached_version is not None:
+                return cached_version
+
+            client = await _get_route_result_cache_redis()
+            if client is not None:
+                version_key = _route_result_cache_weights_version_key()
+                try:
+                    current = await client.get(version_key)
+                    if current is None:
+                        await client.set(version_key, "1", nx=True)
+                        current = await client.get(version_key)
+                    if current:
+                        version_value = str(current)
+                        _set_route_result_cache_weights_version_local_cache(version_value)
+                        return version_value
+                except Exception as e:
+                    _maybe_log_route_cache_redis_error(
+                        "Failed reading route cache weights version from Redis", e
+                    )
+
+    version_value = str(ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL)
+    _set_route_result_cache_weights_version_local_cache(version_value)
+    return version_value
+
+
+async def _bump_route_result_cache_weights_version() -> None:
+    global ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL
+
+    async with ROUTE_RESULT_CACHE_LOCK:
+        ROUTE_RESULT_CACHE.clear()
+
+    if _route_cache_uses_redis():
+        client = await _get_route_result_cache_redis()
+        if client is not None:
+            try:
+                current = await client.incr(_route_result_cache_weights_version_key())
+                _set_route_result_cache_weights_version_local_cache(str(current))
+                return
+            except Exception as e:
+                _maybe_log_route_cache_redis_error(
+                    "Failed bumping route cache weights version in Redis", e
+                )
+
+    ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL += 1
+    _set_route_result_cache_weights_version_local_cache(
+        str(ROUTE_RESULT_CACHE_WEIGHTS_VERSION_LOCAL)
+    )
+
+
+def _build_route_result_cache_key(
+    body: RouteCalculateRequest,
+    algorithm: Literal["astar", "dijkstra", "bd_dijkstra"],
+    use_ch_engine: bool,
+    cache_version: str,
+) -> str:
+    time_bucket = ""
+    if body.time_of_day is not None:
+        time_bucket = (
+            _coerce_utc_datetime(body.time_of_day).replace(second=0, microsecond=0).isoformat()
+        )
+
+    cache_schema_version = os.getenv("ROUTE_RESULT_CACHE_SCHEMA_VERSION", "v1")
+    key_source = "|".join(
+        [
+            cache_schema_version,
+            "ch" if use_ch_engine else "weighted",
+            algorithm,
+            body.preferences.transport_mode,
+            body.preferences.optimize_for,
+            ",".join(_normalize_avoid_list(body.preferences.avoid)),
+            f"{_round_coord(body.origin.lat):.5f}",
+            f"{_round_coord(body.origin.lon):.5f}",
+            f"{_round_coord(body.destination.lat):.5f}",
+            f"{_round_coord(body.destination.lon):.5f}",
+            time_bucket,
+            cache_version,
+        ]
+    )
+    return sha256(key_source.encode("utf-8")).hexdigest()
+
+
+def _route_option_to_cache_payload(option: RouteOption) -> Dict[str, Any]:
+    if hasattr(option, "model_dump"):
+        return option.model_dump(mode="python")
+    return option.dict()  # type: ignore[no-any-return]
+
+
+def _route_option_from_cache_payload(payload: Dict[str, Any]) -> RouteOption:
+    if hasattr(RouteOption, "model_validate"):
+        return RouteOption.model_validate(payload)
+    return RouteOption.parse_obj(payload)
+
+
+def _prune_route_result_cache(now_monotonic: float) -> None:
+    expired_keys = [
+        key for key, (expires_at, _) in ROUTE_RESULT_CACHE.items() if expires_at <= now_monotonic
+    ]
+    for key in expired_keys:
+        ROUTE_RESULT_CACHE.pop(key, None)
+    while len(ROUTE_RESULT_CACHE) > ROUTE_RESULT_CACHE_MAX_ENTRIES:
+        ROUTE_RESULT_CACHE.popitem(last=False)
+
+
+async def _get_cached_route_option_local(cache_key: str) -> Optional[RouteOption]:
+    now_monotonic = time.monotonic()
+    async with ROUTE_RESULT_CACHE_LOCK:
+        _prune_route_result_cache(now_monotonic)
+        cached = ROUTE_RESULT_CACHE.get(cache_key)
+        if not cached:
+            return None
+
+        expires_at, payload = cached
+        if expires_at <= now_monotonic:
+            ROUTE_RESULT_CACHE.pop(cache_key, None)
+            return None
+
+        ROUTE_RESULT_CACHE.move_to_end(cache_key)
+        return _route_option_from_cache_payload(payload)
+
+
+async def _store_route_option_cache_local_payload(cache_key: str, payload: Dict[str, Any]) -> None:
+    now_monotonic = time.monotonic()
+    expires_at = now_monotonic + max(1.0, ROUTE_RESULT_CACHE_TTL_SECONDS)
+    async with ROUTE_RESULT_CACHE_LOCK:
+        ROUTE_RESULT_CACHE[cache_key] = (expires_at, payload)
+        ROUTE_RESULT_CACHE.move_to_end(cache_key)
+        _prune_route_result_cache(now_monotonic)
+
+
+async def _get_cached_route_option(cache_key: str) -> Optional[RouteOption]:
+    if not ROUTE_RESULT_CACHE_ENABLED:
+        return None
+
+    local_hit = await _get_cached_route_option_local(cache_key)
+    if local_hit is not None:
+        return local_hit
+
+    if _route_cache_uses_redis():
+        client = await _get_route_result_cache_redis()
+        if client is not None:
+            try:
+                raw_payload = await client.get(_route_result_cache_data_key(cache_key))
+                if raw_payload:
+                    payload = json.loads(raw_payload)
+                    if isinstance(payload, dict):
+                        await _store_route_option_cache_local_payload(cache_key, payload)
+                        return _route_option_from_cache_payload(payload)
+            except Exception as e:
+                _maybe_log_route_cache_redis_error("Route cache read failed from Redis", e)
+    return None
+
+
+async def _store_route_option_cache(cache_key: str, option: RouteOption) -> None:
+    if not ROUTE_RESULT_CACHE_ENABLED:
+        return
+
+    payload = _route_option_to_cache_payload(option)
+
+    if _route_cache_uses_redis():
+        client = await _get_route_result_cache_redis()
+        if client is not None:
+            try:
+                ttl_seconds = max(1, int(math.ceil(ROUTE_RESULT_CACHE_TTL_SECONDS)))
+                await client.set(
+                    _route_result_cache_data_key(cache_key),
+                    json.dumps(payload),
+                    ex=ttl_seconds,
+                )
+            except Exception as e:
+                _maybe_log_route_cache_redis_error("Route cache write failed to Redis", e)
+    await _store_route_option_cache_local_payload(cache_key, payload)
+
+
 def _bucket_departure_time(value: datetime) -> datetime:
     bucket_minutes = max(1, TRANSIT_CACHE_BUCKET_MINUTES)
     departure_utc = _coerce_utc_datetime(value)
@@ -725,8 +1054,12 @@ async def _ensure_transit_cache_table(db: AsyncSession) -> None:
     if TRANSIT_CACHE_TABLE_INITIALIZED:
         return
 
-    await db.execute(text("CREATE SCHEMA IF NOT EXISTS saferoute"))
-    await db.execute(text("""
+    async with TRANSIT_CACHE_TABLE_LOCK:
+        if TRANSIT_CACHE_TABLE_INITIALIZED:
+            return
+
+        await db.execute(text("CREATE SCHEMA IF NOT EXISTS saferoute"))
+        await db.execute(text("""
             CREATE TABLE IF NOT EXISTS saferoute.transit_plan_cache (
                 cache_key TEXT PRIMARY KEY,
                 provider TEXT NOT NULL,
@@ -744,12 +1077,12 @@ async def _ensure_transit_cache_table(db: AsyncSession) -> None:
                 last_hit_at TIMESTAMPTZ
             )
             """))
-    await db.execute(text("""
+        await db.execute(text("""
             CREATE INDEX IF NOT EXISTS idx_transit_plan_cache_expires_at
             ON saferoute.transit_plan_cache (expires_at)
             """))
-    await db.commit()
-    TRANSIT_CACHE_TABLE_INITIALIZED = True
+        await db.commit()
+        TRANSIT_CACHE_TABLE_INITIALIZED = True
 
 
 async def _get_cached_transit_itinerary(
@@ -775,17 +1108,18 @@ async def _get_cached_transit_itinerary(
             return None
 
         payload = row.response_payload
-        await db.execute(
-            text(f"""
-                UPDATE {TRANSIT_CACHE_TABLE}
-                SET hit_count = hit_count + 1,
-                    last_hit_at = NOW(),
-                    updated_at = NOW()
-                WHERE cache_key = :cache_key
-                """),
-            {"cache_key": cache_key},
-        )
-        await db.commit()
+        if TRANSIT_CACHE_TRACK_HITS:
+            await db.execute(
+                text(f"""
+                    UPDATE {TRANSIT_CACHE_TABLE}
+                    SET hit_count = hit_count + 1,
+                        last_hit_at = NOW(),
+                        updated_at = NOW()
+                    WHERE cache_key = :cache_key
+                    """),
+                {"cache_key": cache_key},
+            )
+            await db.commit()
 
         if isinstance(payload, str):
             payload = json.loads(payload)
@@ -937,16 +1271,16 @@ async def _plan_transit_with_google(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                endpoint,
-                headers={
-                    "Content-Type": "application/json",
-                    "X-Goog-Api-Key": api_key,
-                    "X-Goog-FieldMask": field_mask,
-                },
-                json=payload,
-            )
+        client = get_shared_async_client(timeout_seconds=15.0)
+        response = await client.post(
+            endpoint,
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": api_key,
+                "X-Goog-FieldMask": field_mask,
+            },
+            json=payload,
+        )
     except Exception as e:
         logger.exception("Failed to call Google Routes transit endpoint.")
         raise HTTPException(status_code=502, detail=f"Google transit request failed: {e}") from e
@@ -1189,12 +1523,12 @@ async def _compute_ch_route_geojson(
     }
 
     try:
-        async with httpx.AsyncClient(timeout=CH_ROUTING_TIMEOUT_SECONDS) as client:
-            response = await client.post(
-                url,
-                params={"algorithm": "ch", "profile": profile},
-                json=payload,
-            )
+        client = get_shared_async_client(timeout_seconds=CH_ROUTING_TIMEOUT_SECONDS)
+        response = await client.post(
+            url,
+            params={"algorithm": "ch", "profile": profile},
+            json=payload,
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"CH routing request failed: {e}") from e
 
@@ -1760,6 +2094,7 @@ async def update_danger_zone(
             """)
         await db.execute(update_query, {"w": update.safety_factor, "geom": geom_res[0]})
         await db.commit()
+        await _bump_route_result_cache_weights_version()
         return {
             "status": "updated",
             "id": update.edge_id,
@@ -1796,6 +2131,7 @@ async def reset_danger_zone(zone_id: int, db: AsyncSession = Depends(get_postgis
             """)
         await db.execute(reset_query, {"geom": geom_res[0]})
         await db.commit()
+        await _bump_route_result_cache_weights_version()
         return {"status": "reset", "id": zone_id}
     except HTTPException:
         raise
@@ -2061,8 +2397,6 @@ async def list_routes(
 @app.post("/v1/routes/calculate", response_model=RouteCalculateResponse)
 async def calc(
     body: RouteCalculateRequest,
-    db: AsyncSession = Depends(get_db),
-    postgisDB: AsyncSession = Depends(get_postgis_db),
 ):
     ROUTING_ROUTE_CALCULATIONS_TOTAL.inc()
 
@@ -2087,56 +2421,68 @@ async def calc(
             "Skipping CH for walking route because CH_SUPPORTS_DYNAMIC_WEIGHTS is false; "
             "using weighted pgRouting to honor ways.safety_factor."
         )
-    if use_ch_engine:
-        try:
-            route_geojson = await _compute_ch_route_geojson(
-                request=route_request,
-                optimize_for=body.preferences.optimize_for,
-            )
-        except Exception as e:
-            logger.warning("CH route failed in /v1/routes/calculate: %s", e)
-            if not CH_FALLBACK_TO_DIJKSTRA:
-                if isinstance(e, HTTPException):
-                    raise
-                raise HTTPException(status_code=502, detail=f"CH route failed: {e}") from e
+    cache_version = await _get_route_result_cache_weights_version()
+    cache_key = _build_route_result_cache_key(body, algorithm, use_ch_engine, cache_version)
+    opt = await _get_cached_route_option(cache_key)
 
-    if route_geojson is None:
-        try:
-            route_geojson = await _compute_weighted_route_geojson(
-                request=route_request,
-                db=postgisDB,
-                algorithm=algorithm,
-            )
-        except Exception as e:
-            logger.warning("Falling back to default route in /v1/routes/calculate: %s", e)
+    if opt is None:
+        if use_ch_engine:
+            try:
+                route_geojson = await _compute_ch_route_geojson(
+                    request=route_request,
+                    optimize_for=body.preferences.optimize_for,
+                )
+            except Exception as e:
+                logger.warning("CH route failed in /v1/routes/calculate: %s", e)
+                if not CH_FALLBACK_TO_DIJKSTRA:
+                    if isinstance(e, HTTPException):
+                        raise
+                    raise HTTPException(status_code=502, detail=f"CH route failed: {e}") from e
 
-    if route_geojson:
-        summary = (route_geojson.get("properties") or {}).get("summary") or {}
-        distance_meters = int(round(float(summary.get("distance_meters", 0))))
-        duration_seconds = int(round(float(summary.get("duration", 0))))
-        safety_score = 90.0 if body.preferences.optimize_for == "safety" else 82.0
-        opt = RouteOption(
-            route_index=0,
-            is_primary=True,
-            geometry=json.dumps(route_geojson),
-            distance_m=max(distance_meters, 0),
-            duration_s=max(duration_seconds, 0),
-            safety_score=safety_score,
-            waypoints=_extract_waypoints_from_geojson(route_geojson, body.origin, body.destination),
-        )
-    else:
-        opt = RouteOption(
-            route_index=0,
-            is_primary=True,
-            geometry="encoded_polyline_demo",
-            distance_m=2450,
-            duration_s=1800,
-            safety_score=87.5,
-            waypoints=[
-                Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
-                Waypoint(lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"),
-            ],
-        )
+        if route_geojson is None:
+            try:
+                postgis_connection = db_factory.get_connection(DatabaseType.POSTGIS)
+                async with postgis_connection.session_maker() as postgisDB:
+                    route_geojson = await _compute_weighted_route_geojson(
+                        request=route_request,
+                        db=postgisDB,
+                        algorithm=algorithm,
+                    )
+            except Exception as e:
+                logger.warning("Falling back to default route in /v1/routes/calculate: %s", e)
+
+        if route_geojson:
+            summary = (route_geojson.get("properties") or {}).get("summary") or {}
+            distance_meters = int(round(float(summary.get("distance_meters", 0))))
+            duration_seconds = int(round(float(summary.get("duration", 0))))
+            safety_score = 90.0 if body.preferences.optimize_for == "safety" else 82.0
+            opt = RouteOption(
+                route_index=0,
+                is_primary=True,
+                geometry=json.dumps(route_geojson),
+                distance_m=max(distance_meters, 0),
+                duration_s=max(duration_seconds, 0),
+                safety_score=safety_score,
+                waypoints=_extract_waypoints_from_geojson(
+                    route_geojson, body.origin, body.destination
+                ),
+            )
+            await _store_route_option_cache(cache_key, opt)
+        else:
+            opt = RouteOption(
+                route_index=0,
+                is_primary=True,
+                geometry="encoded_polyline_demo",
+                distance_m=2450,
+                duration_s=1800,
+                safety_score=87.5,
+                waypoints=[
+                    Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
+                    Waypoint(
+                        lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"
+                    ),
+                ],
+            )
 
     ROUTES[rid] = {
         "route_id": rid,
@@ -2146,24 +2492,29 @@ async def calc(
         "user_id": body.user_id,
     }
 
-    audit = Audit(
-        log_id=uuid.uuid4(),
-        user_id=body.user_id,
-        event_type="routing",
-        event_id=rid,
-        message="calculate",
-        created_at=now,
-        updated_at=now,
-    )
-    db.add(audit)
+    if ROUTING_ROUTE_AUDIT_ENABLED:
+        try:
+            audit = Audit(
+                log_id=uuid.uuid4(),
+                user_id=body.user_id,
+                event_type="routing",
+                event_id=rid,
+                message="calculate",
+                created_at=now,
+                updated_at=now,
+            )
+            postgres_connection = db_factory.get_connection(DatabaseType.POSTGRES)
+            async with postgres_connection.session_maker() as audit_db:
+                audit_db.add(audit)
+                await audit_db.commit()
+        except Exception as e:
+            logger.warning("Failed writing route audit log in /v1/routes/calculate: %s", e)
 
     return RouteCalculateResponse(**{k: v for k, v in ROUTES[rid].items() if k != "user_id"})
 
 
 @app.post("/v1/routes/{route_id}/recalculate", response_model=RouteCalculateResponse)
-async def recalc(
-    route_id: str, body: RecalculateRequest, db=Depends(get_db), postgisDB=Depends(get_postgis_db)
-):
+async def recalc(route_id: str, body: RecalculateRequest):
     # TODO: should use actual route_id (uuid) and test AUDIT again
 
     # Business metric: route recalculation
@@ -2185,9 +2536,7 @@ async def recalc(
 
 
 @app.post("/v1/navigation/start", response_model=NavigationStartResponse)
-async def nav_start(
-    body: NavigationStartRequest, db=Depends(get_db), postgisDB=Depends(get_postgis_db)
-):
+async def nav_start(body: NavigationStartRequest, db=Depends(get_db)):
     # TODO: should use actual route_id and user_id (uuid) and test AUDIT again
 
     # Business metric: navigation session started

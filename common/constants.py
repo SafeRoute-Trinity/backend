@@ -17,6 +17,7 @@ SERVICES = {
     "feedback": ("services.feedback.main", 20004),
     "data_cleaner": ("services.data_cleaner.main", 20005),
     "sos": ("services.sos.main", 20006),
+    "coordinator": ("services.coordinator.main", 20008),
 }
 
 # Docs service (service discovery)
@@ -53,6 +54,17 @@ RATE_LIMIT_DEFAULT_WINDOW = int(os.getenv("RATE_LIMIT_DEFAULT_WINDOW", "60"))
 # brute-force and credential-stuffing attacks
 RATE_LIMIT_AUTH_LIMIT = int(os.getenv("RATE_LIMIT_AUTH_LIMIT", "10"))
 RATE_LIMIT_AUTH_WINDOW = int(os.getenv("RATE_LIMIT_AUTH_WINDOW", "60"))
+
+# ========= RabbitMQ Configuration =========
+RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "localhost")
+RABBITMQ_PORT = int(os.getenv("RABBITMQ_PORT", "5672"))
+RABBITMQ_USER = os.getenv("RABBITMQ_USER")
+RABBITMQ_VHOST = os.getenv("RABBITMQ_VHOST", "/")
+
+# Queue names
+QUEUE_SOS_NOTIFICATION = "sos.notification"
+QUEUE_FEEDBACK_EMAIL = "feedback.email"
+QUEUE_FEEDBACK_SUBMIT = "feedback.submit"
 
 # ========= Token Blacklist Configuration =========
 # Blacklist key prefix for revoked tokens

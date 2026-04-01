@@ -6,7 +6,6 @@ import sys
 from pathlib import Path
 from typing import Literal, Optional
 
-import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -21,6 +20,7 @@ if backend_env_path.exists():
 
 app = FastAPI(title="GraphHopper Proxy Service", description="GraphHopper CH route proxy.")
 
+from libs.http_client import close_shared_async_clients, get_shared_async_client
 from libs.rate_limiter import RateLimiter, default_rate_limit_config
 
 _rate_limiter = RateLimiter(default_rate_limit_config(), "graphhopper_proxy")
@@ -40,6 +40,7 @@ async def _rate_limit_middleware(request: Request, call_next):
 @app.on_event("shutdown")
 async def _close_rate_limiter():
     await _rate_limiter.close()
+    await close_shared_async_clients()
 
 
 GRAPHHOPPER_BASE_URL = os.getenv("GRAPHHOPPER_BASE_URL", "http://127.0.0.1:8989")
@@ -82,8 +83,8 @@ async def health_deps():
         probe_params["key"] = GRAPHHOPPER_API_KEY
 
     try:
-        async with httpx.AsyncClient(timeout=min(GRAPHHOPPER_TIMEOUT_SECONDS, 3.0)) as client:
-            resp = await client.get(route_url, params=probe_params)
+        client = get_shared_async_client(timeout_seconds=min(GRAPHHOPPER_TIMEOUT_SECONDS, 3.0))
+        resp = await client.get(route_url, params=probe_params)
         return {
             "service": "graphhopper_proxy",
             "graphhopper_up": resp.status_code < 500,
@@ -121,8 +122,8 @@ async def get_route(
         params["key"] = GRAPHHOPPER_API_KEY
 
     try:
-        async with httpx.AsyncClient(timeout=GRAPHHOPPER_TIMEOUT_SECONDS) as client:
-            resp = await client.get(route_url, params=params)
+        client = get_shared_async_client(timeout_seconds=GRAPHHOPPER_TIMEOUT_SECONDS)
+        resp = await client.get(route_url, params=params)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"GraphHopper request failed: {e}") from e
 
