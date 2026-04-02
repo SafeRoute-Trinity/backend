@@ -623,9 +623,7 @@ async def _refresh_safety_scores() -> None:
                             f"CONCURRENTLY refresh failed ({conc_err}); "
                             f"retrying non-concurrent REFRESH {SAFETY_SCORES_VIEW}…"
                         )
-                        await conn.execute(
-                            text(f"REFRESH MATERIALIZED VIEW {SAFETY_SCORES_VIEW}")
-                        )
+                        await conn.execute(text(f"REFRESH MATERIALIZED VIEW {SAFETY_SCORES_VIEW}"))
                 finally:
                     await conn.execute(text("SET statement_timeout TO DEFAULT"))
 

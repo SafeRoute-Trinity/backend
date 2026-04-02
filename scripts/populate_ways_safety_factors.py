@@ -35,10 +35,7 @@ def main() -> None:
     if load_dotenv and env_path.exists():
         load_dotenv(env_path)
 
-    if not (
-        os.getenv("POSTGIS_DATABASE_URL")
-        or os.getenv("SAFETY_SCORING_DATABASE_URL")
-    ):
+    if not (os.getenv("POSTGIS_DATABASE_URL") or os.getenv("SAFETY_SCORING_DATABASE_URL")):
         print(
             "Set POSTGIS_DATABASE_URL or SAFETY_SCORING_DATABASE_URL.",
             file=sys.stderr,

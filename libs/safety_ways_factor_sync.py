@@ -40,14 +40,14 @@ def _sync_state_ddl(table_qualified: str) -> str:
     """
 
 
-async def ensure_safety_factor_sync_state_table(conn: AsyncConnection, table_qualified: str) -> None:
+async def ensure_safety_factor_sync_state_table(
+    conn: AsyncConnection, table_qualified: str
+) -> None:
     await conn.execute(text(_sync_state_ddl(table_qualified)))
-    await conn.execute(
-        text(f"""
+    await conn.execute(text(f"""
         INSERT INTO {table_qualified} (lock_id) VALUES (1)
         ON CONFLICT (lock_id) DO NOTHING
-        """)
-    )
+        """))
 
 
 def _batch_update_sql(matview_qualified: str) -> str:
@@ -86,8 +86,7 @@ def _batch_update_sql(matview_qualified: str) -> str:
 
 
 async def reset_sync_state(conn: AsyncConnection, table_qualified: str) -> None:
-    await conn.execute(
-        text(f"""
+    await conn.execute(text(f"""
         UPDATE {table_qualified}
         SET last_processed_gid = 0,
             last_run_started_at = NOW(),
@@ -95,8 +94,7 @@ async def reset_sync_state(conn: AsyncConnection, table_qualified: str) -> None:
             batches_in_run = 0,
             ways_updated_in_run = 0
         WHERE lock_id = 1
-        """)
-    )
+        """))
 
 
 async def update_sync_state_progress(
@@ -150,7 +148,9 @@ async def sync_ways_safety_factors_batched(
     await ensure_safety_factor_sync_state_table(conn, state_table_qualified)
     await reset_sync_state(conn, state_table_qualified)
 
-    bounds = await conn.execute(text("SELECT COALESCE(MIN(gid), 0), COALESCE(MAX(gid), 0), COUNT(*) FROM ways"))
+    bounds = await conn.execute(
+        text("SELECT COALESCE(MIN(gid), 0), COALESCE(MAX(gid), 0), COUNT(*) FROM ways")
+    )
     row = bounds.first()
     if not row or row[2] == 0:
         logger.info("sync_ways_safety_factors_batched: ways table empty, nothing to do")
