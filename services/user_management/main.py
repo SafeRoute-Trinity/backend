@@ -44,7 +44,7 @@ from libs.fastapi_service import (
     ServiceAppConfig,
 )
 from libs.http_client import close_shared_async_clients, get_shared_async_client
-from models.user_models import Contact, TrustedContact, User, UserPreferences
+from models.user_models import TrustedContact, User, UserPreferences
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -201,37 +201,6 @@ class AuditLogResponse(BaseModel):
     event_id: Optional[uuid.UUID] = None
     message: str
     created_at: datetime
-    updated_at: datetime
-
-
-# ======== Contact Models ===========================
-class ContactItem(BaseModel):
-    name: str
-    phone: str
-    relationship: Optional[str] = None
-    is_primary: Optional[bool] = False
-
-
-class ContactsSetRequest(BaseModel):
-    contacts: List[ContactItem]
-
-
-class ContactDTO(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    contact_id: uuid.UUID
-    user_id: str
-    name: str
-    phone: str
-    relationship: Optional[str] = None
-    is_primary: bool
-    created_at: datetime
-    updated_at: datetime
-
-
-class ContactsSetResponse(BaseModel):
-    user_id: str
-    status: Literal["contacts_set"]
-    contacts: List[ContactDTO]
     updated_at: datetime
 
 
@@ -406,6 +375,12 @@ class TrustedContactsListPaginatedResponse(BaseModel):
     user_id: str
     data: List[TrustedContactDTO]
     pagination: PaginationMeta
+
+
+class TrustedContactsSetRequest(BaseModel):
+    """Request model for replacing the full trusted contacts list."""
+
+    contacts: List[TrustedContactUpsertRequest]
 
 
 # ========= User Management Endpoints =========
@@ -973,7 +948,7 @@ async def list_trusted_contacts(
 )
 async def set_trusted_contacts(
     user_id: str,
-    body: ContactsSetRequest,
+    body: TrustedContactsSetRequest,
     db=Depends(get_db),
 ):
     """
@@ -1021,53 +996,6 @@ async def set_trusted_contacts(
         user_id=user_id,
         status="trusted_contacts_set",
         contacts=[TrustedContactDTO.model_validate(r) for r in rows],
-        updated_at=now,
-    )
-
-
-@app.put(
-    "/v1/users/{user_id}/contacts",
-    response_model=ContactsSetResponse,
-    tags=["User Management"],
-)
-async def set_contacts(
-    user_id: str,
-    body: ContactsSetRequest,
-    db=Depends(get_db),
-):
-    now = datetime.utcnow()
-
-    # 可选：最多一个 primary
-    if sum(1 for c in body.contacts if c.is_primary) > 1:
-        raise HTTPException(status_code=400, detail="Only one contact can be primary")
-
-    # 1) delete old
-    await db.execute(delete(Contact).where(Contact.user_id == user_id))
-
-    # 2) insert new (contacts 表：contact_id/created_at/updated_at 都有默认，可不手动填)
-    rows = [
-        Contact(
-            user_id=user_id,
-            name=c.name,
-            phone=c.phone,
-            relationship=c.relationship,
-            is_primary=bool(c.is_primary),
-        )
-        for c in body.contacts
-    ]
-    db.add_all(rows)
-    await db.flush()
-
-    try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=400, detail="Could not set contacts")
-
-    return ContactsSetResponse(
-        user_id=user_id,
-        status="contacts_set",
-        contacts=[ContactDTO.model_validate(r) for r in rows],
         updated_at=now,
     )
 
