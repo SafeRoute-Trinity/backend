@@ -51,7 +51,6 @@ from libs.fastapi_service import (
     ServiceAppConfig,
 )
 from libs.http_client import close_shared_async_clients, get_shared_async_client
-from models.audit import Audit
 
 # Load .env file at startup (before other imports that need env vars)
 try:
@@ -124,6 +123,9 @@ TRANSIT_CACHE_TABLE_LOCK = asyncio.Lock()
 ROUTE_SAFETY_FACTOR_MIN = float(os.getenv("ROUTE_SAFETY_FACTOR_MIN", "0.5"))
 ROUTE_SAFETY_FACTOR_MAX = float(os.getenv("ROUTE_SAFETY_FACTOR_MAX", "50"))
 ROUTE_SAFETY_FACTOR_EXPONENT = float(os.getenv("ROUTE_SAFETY_FACTOR_EXPONENT", "0.65"))
+# Upper bound used only for score display (sf=1.0 → 50, sf=this → 0).
+# Keep in sync with SAFETY_FACTOR_DANGEROUS_MAX in safety_scoring service.
+ROUTE_SAFETY_FACTOR_DANGEROUS_MAX = float(os.getenv("SAFETY_FACTOR_DANGEROUS_MAX", "10.0"))
 ROUTE_MAX_DETOUR_RATIO = float(os.getenv("ROUTE_MAX_DETOUR_RATIO", "1.45"))
 ROUTE_RESULT_CACHE_ENABLED = os.getenv("ROUTE_RESULT_CACHE_ENABLED", "true").lower() == "true"
 ROUTE_RESULT_CACHE_BACKEND = os.getenv("ROUTE_RESULT_CACHE_BACKEND", "redis").strip().lower()
@@ -1281,8 +1283,7 @@ async def _ensure_route_cache_table(db: AsyncSession) -> None:
 def _walking_route_cache_key(origin: "Point", destination: "Point", scalar: float) -> str:
     sig = sha256(f"{scalar:.4f}".encode()).hexdigest()[:6]
     return (
-        f"walk:{origin.lat:.5f},{origin.lon:.5f}"
-        f":{destination.lat:.5f},{destination.lon:.5f}:{sig}"
+        f"walk:{origin.lat:.5f},{origin.lon:.5f}:{destination.lat:.5f},{destination.lon:.5f}:{sig}"
     )
 
 
@@ -2129,13 +2130,23 @@ async def _compute_weighted_route_geojson(
 
     duration_seconds = total_distance / WALKING_SPEED_MPS
 
-    # Compute length-weighted average safety_factor → map to [0, 100] score.
+    # Compute length-weighted average safety_factor → user-facing 0–100 score.
+    # sf=1.0 → 50 (neutral/grey), sf<1 → >50 (green/safe), sf>1 → <50 (red/danger).
     if path_sf_weighted and total_distance > 0:
         total_sf_len = sum(length for _, length in path_sf_weighted)
         avg_sf = sum(sf * ln for sf, ln in path_sf_weighted) / max(total_sf_len, 1e-9)
-        computed_safety_score = round(
-            max(0.0, min(100.0, (1.0 - (avg_sf - sf_min) / max(sf_max - sf_min, 1e-9)) * 100.0)), 1
-        )
+        _sf_danger_max = ROUTE_SAFETY_FACTOR_DANGEROUS_MAX
+        if avg_sf <= 1.0:
+            computed_safety_score = round(
+                max(0.0, min(100.0, 50.0 + (1.0 - avg_sf) / max(1.0 - sf_min, 1e-9) * 50.0)), 1
+            )
+        else:
+            computed_safety_score = round(
+                max(
+                    0.0, min(100.0, 50.0 - (avg_sf - 1.0) / max(_sf_danger_max - 1.0, 1e-9) * 50.0)
+                ),
+                1,
+            )
     else:
         computed_safety_score = 50.0
 

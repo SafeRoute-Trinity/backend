@@ -145,7 +145,11 @@ SAFETY_FEATURE_TABLE_CCTV = os.getenv("SAFETY_FEATURE_TABLE_CCTV", "cctv_cameras
 SAFETY_FEATURE_TABLE_GARDA = os.getenv("SAFETY_FEATURE_TABLE_GARDA", "garda_stations")
 # crime_statistics has no geometry — it joins to garda_stations via station_name
 SAFETY_FEATURE_TABLE_CRIME = os.getenv("SAFETY_FEATURE_TABLE_CRIME", "crime_statistics")
-SAFETY_SCORES_VIEW = "saferoute.ways_safety_scores"
+# Geometry column names (differ per table; override if your schema uses a different name)
+SAFETY_GEOM_COL_LIGHTS = os.getenv("SAFETY_GEOM_COL_LIGHTS", "light_pt")
+SAFETY_GEOM_COL_CCTV = os.getenv("SAFETY_GEOM_COL_CCTV", "cctv_pt")
+SAFETY_GEOM_COL_GARDA = os.getenv("SAFETY_GEOM_COL_GARDA", "location")
+SAFETY_SCORES_VIEW = "saferoute.ways_safety_view"
 
 # ── Spatial influence radii (metres) ─────────────────────────────────────────
 SAFETY_BUFFER_LIGHTS_M = float(os.getenv("SAFETY_BUFFER_LIGHTS_M", "60"))
@@ -153,6 +157,10 @@ SAFETY_BUFFER_CCTV_M = float(os.getenv("SAFETY_BUFFER_CCTV_M", "100"))
 SAFETY_BUFFER_GARDA_M = float(os.getenv("SAFETY_BUFFER_GARDA_M", "400"))
 # Crime uses the same Garda station buffer (incidents are anchored to stations)
 SAFETY_BUFFER_CRIME_M = float(os.getenv("SAFETY_BUFFER_CRIME_M", "400"))
+# Conversion factor: metres → degrees (approximate for Ireland lat ~53°).
+# Used to pass a planar ST_DWithin radius so GiST indices are used directly
+# without the expensive ::geography geodesic cast on every row.
+_M_TO_DEG = 1.0 / 111_000.0
 
 # ── Composite weight distribution (should sum to 1.0) ────────────────────────
 # Crime is an INVERTED factor: its contribution = w_crime * (1 - crime_density_norm)
@@ -161,9 +169,26 @@ SAFETY_WEIGHT_CCTV = float(os.getenv("SAFETY_WEIGHT_CCTV", "0.25"))
 SAFETY_WEIGHT_GARDA = float(os.getenv("SAFETY_WEIGHT_GARDA", "0.25"))
 SAFETY_WEIGHT_CRIME = float(os.getenv("SAFETY_WEIGHT_CRIME", "0.25"))
 
-# ── safety_factor range (must match ROUTE_SAFETY_FACTOR_MIN/MAX in routing_service) ──
+# ── safety_factor semantics ───────────────────────────────────────────────────
+# sf = 1.0  → neutral / grey   (default for all ways; no feature data)
+# sf < 1.0  → safe   / green   (well-covered by lights, CCTV, Garda)
+# sf > 1.0  → danger / red     (high crime, poor coverage)
+#
+# SAFETY_FACTOR_MIN:          floor for safe segments  (default 0.5)
+# SAFETY_FACTOR_DANGEROUS_MAX: ceiling for dangerous segments visible in scoring (default 10.0)
+# ROUTE_SAFETY_FACTOR_MAX:    pgRouting CLAMP — hard ceiling for cost expression (default 50.0)
 SAFETY_FACTOR_MIN = float(os.getenv("ROUTE_SAFETY_FACTOR_MIN", "0.5"))
+SAFETY_FACTOR_DANGEROUS_MAX = float(os.getenv("SAFETY_FACTOR_DANGEROUS_MAX", "10.0"))
 SAFETY_FACTOR_MAX = float(os.getenv("ROUTE_SAFETY_FACTOR_MAX", "50.0"))
+# The composite score at which safety_factor = 1.0 (neutral/grey).
+# Lower this below 0.5 if your city's infrastructure is sparse so the
+# population median lands in the neutral band instead of the danger zone.
+# Calibrate by running: SELECT AVG(composite_safety_score) FROM saferoute.ways_safety_scores;
+# and picking a value ~10–15 pts below that average (so most roads are neutral/slightly-safe).
+SAFETY_NEUTRAL_COMPOSITE = float(os.getenv("SAFETY_NEUTRAL_COMPOSITE", "0.35"))
+# Set to "true" to DROP + recreate the materialized view on each startup.
+# Flip this after any formula change, then set back to "false" once deployed.
+SAFETY_SCORES_RECREATE_VIEW = os.getenv("SAFETY_SCORES_RECREATE_VIEW", "false").lower() == "true"
 
 # ── Route cache ───────────────────────────────────────────────────────────────
 SAFETY_ROUTE_CACHE_ENABLED = os.getenv("SAFETY_ROUTE_CACHE_ENABLED", "true").lower() == "true"
@@ -176,14 +201,31 @@ _SAFETY_ROUTE_CACHE_TABLE_INITIALIZED: bool = False
 _safety_refresh_task: Optional[asyncio.Task] = None
 
 _SafetyScoringSessionLocal = None
+_SafetyScoringRefreshSession = None  # long-timeout session used only for mat-view refresh
+_safety_scoring_engine = None
+_safety_scoring_refresh_engine = None
 if SAFETY_SCORING_DATABASE_URL:
     _safety_scoring_engine = create_async_engine(
         SAFETY_SCORING_DATABASE_URL,
         echo=False,
         future=True,
     )
+    # Separate engine for long-running REFRESH MATERIALIZED VIEW queries.
+    # asyncpg command_timeout=None disables the client-side per-command deadline;
+    # we also SET statement_timeout=0 at the session level before each refresh.
+    _safety_scoring_refresh_engine = create_async_engine(
+        SAFETY_SCORING_DATABASE_URL,
+        echo=False,
+        future=True,
+        connect_args={"command_timeout": None},
+    )
     _SafetyScoringSessionLocal = sessionmaker(
         bind=_safety_scoring_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    _SafetyScoringRefreshSession = sessionmaker(
+        bind=_safety_scoring_refresh_engine,
         class_=AsyncSession,
         expire_on_commit=False,
     )
@@ -200,18 +242,81 @@ async def get_safety_scoring_db():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Safety factor conversion helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _composite_to_safety_factor(composite: float) -> float:
+    """
+    Map composite_safety_score [0, 1] → ways.safety_factor.
+
+    The neutral point N = SAFETY_NEUTRAL_COMPOSITE (default 0.35) maps to sf = 1.0.
+    Segments above N trend green (sf < 1); segments below N trend red (sf > 1).
+
+    Safe   zone [N, 1.0] → sf [1.0, SAFETY_FACTOR_MIN]
+    Danger zone [0.0, N] → sf [1.0, SAFETY_FACTOR_DANGEROUS_MAX]
+
+    Using a configurable N lets you calibrate per city so the population
+    median lands in the neutral band rather than all roads going orange.
+    Run `SELECT AVG(composite_safety_score) FROM saferoute.ways_safety_scores`
+    and set SAFETY_NEUTRAL_COMPOSITE ~10–15 pts below that average.
+    """
+    sf_safe = SAFETY_FACTOR_MIN
+    sf_danger = SAFETY_FACTOR_DANGEROUS_MAX
+    N = SAFETY_NEUTRAL_COMPOSITE
+    c = max(0.0, min(1.0, composite))
+    if c >= N:
+        # Safe zone: [N → 1.0] → sf [1.0 → sf_safe]
+        span = max(1.0 - N, 1e-9)
+        return round(1.0 - (c - N) / span * (1.0 - sf_safe), 4)
+    else:
+        # Danger zone: [0.0 → N] → sf [sf_danger → 1.0]
+        return round(1.0 + (N - c) / max(N, 1e-9) * (sf_danger - 1.0), 4)
+
+
+def _sf_to_score_0_100(avg_sf: float) -> float:
+    """
+    Convert a ways.safety_factor value to a 0–100 user-facing score.
+
+    sf = SAFETY_FACTOR_MIN (0.5) →  100  (fully safe  / green)
+    sf = 1.0                      →   50  (neutral     / grey)
+    sf = SAFETY_FACTOR_DANGEROUS_MAX (10) →  0  (max danger / red)
+
+    Piecewise-linear, sf=1.0 always maps to score 50 regardless of neutral composite.
+    """
+    sf_safe = SAFETY_FACTOR_MIN
+    sf_danger = SAFETY_FACTOR_DANGEROUS_MAX
+    if avg_sf <= 1.0:
+        return round(
+            max(0.0, min(100.0, 50.0 + (1.0 - avg_sf) / max(1.0 - sf_safe, 1e-9) * 50.0)), 1
+        )
+    else:
+        return round(
+            max(0.0, min(100.0, 50.0 - (avg_sf - 1.0) / max(sf_danger - 1.0, 1e-9) * 50.0)), 1
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Safety infrastructure helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def _build_mat_view_sql() -> str:
-    """Return CREATE MATERIALIZED VIEW SQL using the configured feature table names."""
+    """Return CREATE MATERIALIZED VIEW SQL using the configured feature table/column names."""
     tl = SAFETY_FEATURE_TABLE_LIGHTS
     tc = SAFETY_FEATURE_TABLE_CCTV
     tg = SAFETY_FEATURE_TABLE_GARDA
     tcr = SAFETY_FEATURE_TABLE_CRIME
-    bl, bc, bg = SAFETY_BUFFER_LIGHTS_M, SAFETY_BUFFER_CCTV_M, SAFETY_BUFFER_GARDA_M
-    bcr = SAFETY_BUFFER_CRIME_M
+    gl = SAFETY_GEOM_COL_LIGHTS  # e.g. "light_pt"
+    gc = SAFETY_GEOM_COL_CCTV  # e.g. "cctv_pt"
+    gg = SAFETY_GEOM_COL_GARDA  # e.g. "location"
+    # Convert metre buffers to degrees so ST_DWithin operates on the native
+    # geometry SRID (EPSG:4326, unit = degrees). This lets the GiST index kick
+    # in without any ::geography cast, making the query orders of magnitude faster.
+    bl = round(SAFETY_BUFFER_LIGHTS_M * _M_TO_DEG, 7)
+    bc = round(SAFETY_BUFFER_CCTV_M * _M_TO_DEG, 7)
+    bg = round(SAFETY_BUFFER_GARDA_M * _M_TO_DEG, 7)
+    bcr = round(SAFETY_BUFFER_CRIME_M * _M_TO_DEG, 7)
     wl, wc, wg, wcr = (
         SAFETY_WEIGHT_LIGHTS,
         SAFETY_WEIGHT_CCTV,
@@ -219,89 +324,94 @@ def _build_mat_view_sql() -> str:
         SAFETY_WEIGHT_CRIME,
     )
 
+    # Distance floor in degrees: ~1m in EPSG:4326 at lat 53°.
+    # Prevents division-by-zero for coincident points while keeping
+    # relative weighting sensible (planar degrees, not metres).
+    dist_floor = round(1.0 * _M_TO_DEG, 7)
+
     return f"""
     CREATE MATERIALIZED VIEW {SAFETY_SCORES_VIEW} AS
     WITH
-      way_buffers AS (
-        SELECT gid, geometry, length,
-          ST_Buffer(geometry::geography, {bl})::geometry   AS buf_l,
-          ST_Buffer(geometry::geography, {bc})::geometry   AS buf_c,
-          ST_Buffer(geometry::geography, {bg})::geometry   AS buf_g,
-          ST_Buffer(geometry::geography, {bcr})::geometry  AS buf_cr
-        FROM ways
-      ),
-      light_scores AS (
-        SELECT wb.gid,
+      -- AS MATERIALIZED: ensure PostgreSQL computes each CTE once and stores the
+      -- result set. Without this hint (PG12+), the planner may inline a CTE that
+      -- is referenced more than once (norms + final SELECT), recomputing it twice.
+      light_scores AS MATERIALIZED (
+        SELECT w.gid,
           COALESCE(SUM(1.0 / GREATEST(
-            ST_Distance(wb.geometry::geography, sl.geometry::geography), 1.0
+            ST_Distance(w.geometry, sl.{gl}), {dist_floor}
           )), 0.0) AS raw_score
-        FROM way_buffers wb
-        LEFT JOIN {tl} sl
-          ON sl.geometry && wb.buf_l
-          AND ST_DWithin(wb.geometry::geography, sl.geometry::geography, {bl})
-        GROUP BY wb.gid
+        FROM ways w
+        LEFT JOIN {tl} sl ON ST_DWithin(w.geometry, sl.{gl}, {bl})
+        GROUP BY w.gid
       ),
-      cctv_scores AS (
-        SELECT wb.gid,
+      cctv_scores AS MATERIALIZED (
+        SELECT w.gid,
           COALESCE(SUM(1.0 / GREATEST(
-            ST_Distance(wb.geometry::geography, cc.geometry::geography), 1.0
+            ST_Distance(w.geometry, cc.{gc}), {dist_floor}
           )), 0.0) AS raw_score
-        FROM way_buffers wb
-        LEFT JOIN {tc} cc
-          ON cc.geometry && wb.buf_c
-          AND ST_DWithin(wb.geometry::geography, cc.geometry::geography, {bc})
-        GROUP BY wb.gid
+        FROM ways w
+        LEFT JOIN {tc} cc ON ST_DWithin(w.geometry, cc.{gc}, {bc})
+        GROUP BY w.gid
       ),
-      garda_scores AS (
-        SELECT DISTINCT ON (wb.gid) wb.gid,
-          1.0 / GREATEST(
-            ST_Distance(wb.geometry::geography, gs.geometry::geography), 1.0
-          ) AS raw_score
-        FROM way_buffers wb
-        LEFT JOIN {tg} gs
-          ON gs.geometry && wb.buf_g
-          AND ST_DWithin(wb.geometry::geography, gs.geometry::geography, {bg})
-        ORDER BY wb.gid,
-          ST_Distance(wb.geometry::geography, gs.geometry::geography)
-      ),
-      -- Crime has no geometry: incidents are anchored to Garda stations via station_name.
-      -- High incident_count near a segment = LESS safe (inverted in composite formula).
-      crime_scores AS (
-        SELECT wb.gid,
-          COALESCE(SUM(
-            COALESCE(cr.incident_count, 0)::float
-            / GREATEST(ST_Distance(wb.geometry::geography, gs.geometry::geography), 1.0)
-          ), 0.0) AS raw_score
-        FROM way_buffers wb
-        LEFT JOIN {tg} gs
-          ON gs.geometry && wb.buf_cr
-          AND ST_DWithin(wb.geometry::geography, gs.geometry::geography, {bcr})
+      -- Pre-aggregate crime data per station BEFORE joining to ways.
+      -- Reduces the join from ways × stations × crime_rows → ways × stations.
+      crime_per_station AS MATERIALIZED (
+        SELECT gs.{gg} AS geom,
+          COALESCE(SUM(cr.incident_count), 0)::float AS total_incidents
+        FROM {tg} gs
         LEFT JOIN {tcr} cr ON cr.station_name = gs.station_name
-        GROUP BY wb.gid
+        GROUP BY gs.{gg}
       ),
+      -- Nearest Garda station per way via a correlated subquery + GiST index.
+      -- Avoids the DISTINCT ON (w.gid) ORDER BY sort on 588K × N_stations rows
+      -- that was generating hundreds of MB of temp files per minute.
+      garda_scores AS MATERIALIZED (
+        SELECT w.gid,
+          COALESCE((
+            SELECT 1.0 / GREATEST(ST_Distance(w.geometry, gs.{gg}), {dist_floor})
+            FROM {tg} gs
+            WHERE ST_DWithin(w.geometry, gs.{gg}, {bg})
+            ORDER BY ST_Distance(w.geometry, gs.{gg})
+            LIMIT 1
+          ), 0.0) AS raw_score
+        FROM ways w
+      ),
+      -- Crime: incidents per station joined to ways via pre-aggregated table.
+      -- Avoids the three-way join explosion (ways × stations × crime_rows).
+      crime_scores AS MATERIALIZED (
+        SELECT w.gid,
+          COALESCE(SUM(
+            cps.total_incidents
+            / GREATEST(ST_Distance(w.geometry, cps.geom), {dist_floor})
+          ), 0.0) AS raw_score
+        FROM ways w
+        LEFT JOIN crime_per_station cps ON ST_DWithin(w.geometry, cps.geom, {bcr})
+        GROUP BY w.gid
+      ),
+      -- Scalar subqueries aggregate each CTE independently, avoiding the implicit
+      -- Cartesian product that `FROM ls, cs, gs, cr` would create (even for a
+      -- pure MAX query, PostgreSQL does not always eliminate the cross join).
       norms AS (
         SELECT
-          NULLIF(MAX(ls.raw_score), 0)  AS light_max,
-          NULLIF(MAX(cs.raw_score), 0)  AS cctv_max,
-          NULLIF(MAX(gs.raw_score), 0)  AS garda_max,
-          NULLIF(MAX(cr.raw_score), 0)  AS crime_max
-        FROM light_scores ls, cctv_scores cs, garda_scores gs, crime_scores cr
+          (SELECT NULLIF(MAX(raw_score), 0) FROM light_scores) AS light_max,
+          (SELECT NULLIF(MAX(raw_score), 0) FROM cctv_scores)  AS cctv_max,
+          (SELECT NULLIF(MAX(raw_score), 0) FROM garda_scores) AS garda_max,
+          (SELECT NULLIF(MAX(raw_score), 0) FROM crime_scores) AS crime_max
       )
     SELECT
       w.gid,
       -- Composite safety score in [0, 1]; higher = safer.
-      -- Crime contribution is inverted: (1 - crime_norm) so high crime lowers the score.
+      -- Crime is inverted: (1 - crime_norm) so high crime lowers the score.
       LEAST(1.0, GREATEST(0.0,
           {wl}  * LEAST(COALESCE(ls.raw_score / norms.light_max,  0.0), 1.0)
         + {wc}  * LEAST(COALESCE(cs.raw_score / norms.cctv_max,   0.0), 1.0)
         + {wg}  * LEAST(COALESCE(gs.raw_score / norms.garda_max,  0.0), 1.0)
         + {wcr} * (1.0 - LEAST(COALESCE(cr.raw_score / norms.crime_max, 0.0), 1.0))
       )) AS composite_safety_score,
-      -- Per-factor normalised scores exposed for breakdown API and per-factor routing
+      -- Per-factor normalised scores (crime stored non-inverted; callers invert as needed)
       COALESCE(ls.raw_score / NULLIF(norms.light_max, 0),  0.0) AS light_score_norm,
       COALESCE(cs.raw_score / NULLIF(norms.cctv_max,  0),  0.0) AS cctv_score_norm,
       COALESCE(gs.raw_score / NULLIF(norms.garda_max, 0),  0.0) AS garda_score_norm,
-      -- Crime stored as density (not inverted) so callers can apply their own inversion
       COALESCE(cr.raw_score / NULLIF(norms.crime_max, 0),  0.0) AS crime_score_norm,
       NOW() AS computed_at
     FROM ways w
@@ -360,27 +470,20 @@ async def _ensure_safety_infrastructure() -> None:
                 )
             """))
 
-            # Only create the materialized view if it doesn't already exist.
-            existing = await session.execute(text("""
-                SELECT 1 FROM pg_matviews
-                WHERE schemaname = 'saferoute'
-                  AND matviewname = 'ways_safety_scores'
-            """))
-            if not existing.scalar():
+            # Mat view creation (and any forced recreation) is handled by the
+            # background _refresh_safety_scores task in AUTOCOMMIT mode so it
+            # doesn't block startup or run inside a transaction block.
+            if SAFETY_SCORES_RECREATE_VIEW:
+                print(
+                    f"SAFETY_SCORES_RECREATE_VIEW=true — dropping {SAFETY_SCORES_VIEW}; "
+                    "will be recreated by background refresh loop."
+                )
                 try:
-                    await session.execute(text(_build_mat_view_sql()))
                     await session.execute(
-                        text(f"CREATE UNIQUE INDEX ON {SAFETY_SCORES_VIEW} (gid)")
+                        text(f"DROP MATERIALIZED VIEW IF EXISTS {SAFETY_SCORES_VIEW} CASCADE")
                     )
-                    print(f"Created materialized view {SAFETY_SCORES_VIEW}")
-                except Exception as view_err:
-                    print(
-                        f"Could not create {SAFETY_SCORES_VIEW} "
-                        f"(feature tables may not exist yet): {view_err}"
-                    )
+                except Exception:
                     await session.rollback()
-                    _SAFETY_INFRA_INITIALIZED = True
-                    return
 
             await session.commit()
             _SAFETY_INFRA_INITIALIZED = True
@@ -394,37 +497,86 @@ async def _refresh_safety_scores() -> None:
     """
     Refresh the materialized view then write the computed safety_factor back to
     ways.safety_factor so pgRouting picks it up immediately.
+
+    Uses AUTOCOMMIT mode so:
+      - REFRESH MATERIALIZED VIEW CONCURRENTLY never errors with
+        "cannot run inside a transaction block"
+      - statement_timeout = 0 applies immediately without a surrounding txn
     """
-    if _SafetyScoringSessionLocal is None:
+    engine = _safety_scoring_refresh_engine or _safety_scoring_engine
+    if engine is None:
         return
     try:
-        async with _SafetyScoringSessionLocal() as session:
-            existing = await session.execute(text("""
-                SELECT 1 FROM pg_matviews
+        async with engine.connect() as conn:
+            await conn.execution_options(isolation_level="AUTOCOMMIT")
+            await conn.execute(text("SET statement_timeout = 0"))
+            # Disable parallel gather so PostgreSQL uses only one worker per CTE
+            # (prevents RAM multiplication on the 384Mi-limited container).
+            # work_mem intentionally left at default (4MB) — temp-file spills
+            # go to the 10Gi PVC which has plenty of room.
+            await conn.execute(text("SET max_parallel_workers_per_gather = 0"))
+
+            existing = await conn.execute(text("""
+                SELECT ispopulated FROM pg_matviews
                 WHERE schemaname = 'saferoute'
-                  AND matviewname = 'ways_safety_scores'
+                  AND matviewname = 'ways_safety_view'
             """))
-            if not existing.scalar():
-                print("ways_safety_scores view not found — skipping refresh.")
-                return
+            row = existing.first()
 
-            await session.execute(
-                text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {SAFETY_SCORES_VIEW}")
-            )
+            if row is None:
+                # View doesn't exist (or is in an orphaned/partial state from a
+                # prior crash). Drop any leftover pg_class entry before creating.
+                print(f"Creating and populating {SAFETY_SCORES_VIEW}…")
+                try:
+                    await conn.execute(
+                        text(f"DROP MATERIALIZED VIEW IF EXISTS {SAFETY_SCORES_VIEW} CASCADE")
+                    )
+                    await conn.execute(text(_build_mat_view_sql()))
+                    await conn.execute(text(f"CREATE UNIQUE INDEX ON {SAFETY_SCORES_VIEW} (gid)"))
+                    print(f"Created and populated {SAFETY_SCORES_VIEW}")
+                except Exception as create_err:
+                    print(f"Could not create {SAFETY_SCORES_VIEW}: {create_err}")
+                    return
+            elif not row[0]:
+                # View exists but is empty (was created WITH NO DATA in a prior
+                # attempt) — do a plain (non-concurrent) initial population.
+                print(f"Initial population of {SAFETY_SCORES_VIEW} (non-concurrent)…")
+                await conn.execute(text(f"REFRESH MATERIALIZED VIEW {SAFETY_SCORES_VIEW}"))
+            else:
+                # View already has data — use CONCURRENTLY to avoid locking readers.
+                await conn.execute(
+                    text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {SAFETY_SCORES_VIEW}")
+                )
 
-            sf_range = SAFETY_FACTOR_MAX - SAFETY_FACTOR_MIN
-            await session.execute(
+            # Piecewise-linear mapping with configurable neutral point N.
+            # composite ∈ [N, 1.0] (safe zone)   → sf ∈ [1.0, SAFETY_FACTOR_MIN]
+            # composite ∈ [0.0, N] (danger zone) → sf ∈ [1.0, SAFETY_FACTOR_DANGEROUS_MAX]
+            N = SAFETY_NEUTRAL_COMPOSITE
+            await conn.execute(
                 text(f"""
                 UPDATE ways w
-                SET safety_factor =
-                    :sf_min + (1.0 - mv.composite_safety_score) * :sf_range
+                SET safety_factor = CASE
+                    WHEN mv.composite_safety_score >= :neutral THEN
+                        GREATEST(:sf_safe,
+                            1.0 - (mv.composite_safety_score - :neutral)
+                                / GREATEST(1.0 - :neutral, 1e-9)
+                                * (1.0 - :sf_safe))
+                    ELSE
+                        LEAST(:sf_danger,
+                            1.0 + (:neutral - mv.composite_safety_score)
+                                / GREATEST(:neutral, 1e-9)
+                                * (:sf_danger - 1.0))
+                END
                 FROM {SAFETY_SCORES_VIEW} mv
                 WHERE w.gid = mv.gid
-            """),
-                {"sf_min": SAFETY_FACTOR_MIN, "sf_range": sf_range},
+                """),
+                {
+                    "neutral": N,
+                    "sf_safe": SAFETY_FACTOR_MIN,
+                    "sf_danger": SAFETY_FACTOR_DANGEROUS_MAX,
+                },
             )
 
-            await session.commit()
             print(f"Safety scores refreshed at {datetime.utcnow().isoformat()}Z")
     except Exception as e:
         print(f"Safety score refresh failed: {e}")
@@ -1288,24 +1440,11 @@ async def get_route(
         duration_seconds = total_distance / walking_speed_mps
 
         # Compute real path safety score from length-weighted avg safety_factor.
+        # sf=1.0 → 50 (neutral/grey), sf<1 → >50 (green/safe), sf>1 → <50 (red/danger).
         if path_sf_weighted and total_distance > 0:
             total_sf_len = sum(length for _, length in path_sf_weighted)
             avg_sf = sum(sf * length for sf, length in path_sf_weighted) / max(total_sf_len, 1e-9)
-            computed_safety_score = round(
-                max(
-                    0.0,
-                    min(
-                        100.0,
-                        (
-                            1.0
-                            - (avg_sf - SAFETY_FACTOR_MIN)
-                            / max(SAFETY_FACTOR_MAX - SAFETY_FACTOR_MIN, 1e-9)
-                        )
-                        * 100.0,
-                    ),
-                ),
-                1,
-            )
+            computed_safety_score = _sf_to_score_0_100(avg_sf)
         else:
             computed_safety_score = 50.0
 
@@ -1441,7 +1580,8 @@ async def get_factors(
                     mv.composite_safety_score,
                     mv.light_score_norm,
                     mv.cctv_score_norm,
-                    mv.garda_score_norm
+                    mv.garda_score_norm,
+                    mv.crime_score_norm
                 FROM {SAFETY_SCORES_VIEW} mv
                 JOIN ways w ON w.gid = mv.gid
                 ORDER BY w.geometry <-> ST_SetSRID(ST_MakePoint(:lon, :lat), 4326)
