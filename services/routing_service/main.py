@@ -2045,14 +2045,28 @@ async def health():
 
 
 @app.get("/api/danger_zones")
-async def get_danger_zones(db: AsyncSession = Depends(get_postgis_db)):
+async def get_danger_zones(
+    gid: Optional[int] = Query(
+        None, description="Filter by edge gid; omit to return all danger zones"
+    ),
+    db: AsyncSession = Depends(get_postgis_db),
+):
     try:
-        query = text("""
-            SELECT gid, safety_factor, ST_AsGeoJSON(geometry) AS geojson
-            FROM ways
-            WHERE safety_factor != 1.0
-            """)
-        rows = (await db.execute(query)).fetchall()
+        if gid is not None:
+            query = text("""
+                SELECT gid, safety_factor, ST_AsGeoJSON(geometry) AS geojson
+                FROM ways
+                WHERE safety_factor != 1.0
+                  AND gid = :gid
+                """)
+            rows = (await db.execute(query, {"gid": gid})).fetchall()
+        else:
+            query = text("""
+                SELECT gid, safety_factor, ST_AsGeoJSON(geometry) AS geojson
+                FROM ways
+                WHERE safety_factor != 1.0
+                """)
+            rows = (await db.execute(query)).fetchall()
         features = []
         for row in rows:
             features.append(
@@ -2073,8 +2087,13 @@ async def get_danger_zones(db: AsyncSession = Depends(get_postgis_db)):
 
 
 @app.get("/v1/routing-debug/danger-zones")
-async def get_danger_zones_v1(db: AsyncSession = Depends(get_postgis_db)):
-    return await get_danger_zones(db=db)
+async def get_danger_zones_v1(
+    gid: Optional[int] = Query(
+        None, description="Filter by edge gid; omit to return all danger zones"
+    ),
+    db: AsyncSession = Depends(get_postgis_db),
+):
+    return await get_danger_zones(gid=gid, db=db)
 
 
 @app.post("/api/danger_zones")
@@ -2177,7 +2196,7 @@ async def get_graph_geojson(
             SELECT gid, source, target, ST_AsGeoJSON(geometry) AS geojson, safety_factor
             FROM ways
             WHERE geometry && ST_MakeEnvelope(:min_lng, :min_lat, :max_lng, :max_lat, 4326)
-            LIMIT 2000
+            LIMIT 6000
             """)
         rows = (
             await db.execute(
