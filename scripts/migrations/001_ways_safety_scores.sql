@@ -33,6 +33,19 @@ CREATE TABLE IF NOT EXISTS saferoute.route_cache (
 CREATE INDEX IF NOT EXISTS idx_route_cache_expires_at
     ON saferoute.route_cache (expires_at);
 
+-- Progress / checkpoint row for batched ways.safety_factor updates (optional;
+-- the safety_scoring service also creates this if missing).
+CREATE TABLE IF NOT EXISTS saferoute.safety_ways_factor_sync_state (
+    lock_id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (lock_id = 1),
+    last_processed_gid      BIGINT NOT NULL DEFAULT 0,
+    last_run_started_at     TIMESTAMPTZ,
+    last_batch_at           TIMESTAMPTZ,
+    batches_in_run          INTEGER NOT NULL DEFAULT 0,
+    ways_updated_in_run     BIGINT NOT NULL DEFAULT 0
+);
+INSERT INTO saferoute.safety_ways_factor_sync_state (lock_id) VALUES (1)
+    ON CONFLICT (lock_id) DO NOTHING;
+
 -- ─── User safety weights persistence ─────────────────────────────────────────
 -- Stores each user's factor preferences so the weights endpoint has a backing
 -- store. The routing service reads these at route-calculation time.

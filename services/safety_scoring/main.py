@@ -42,6 +42,11 @@ from libs.cas_sync import cas_subscriber
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import ServiceAppConfig
 from libs.rate_limiter import RateLimiter, default_rate_limit_config
+from libs.safety_ways_factor_sync import (
+    SAFETY_FACTOR_SYNC_STATE_TABLE,
+    sync_ways_safety_factors_batched,
+    verify_ways_matview_alignment,
+)
 from libs.structured_logging import setup_structured_logging
 from libs.trace_context import TRACE_HEADER, get_or_create_trace_id, trace_id_var
 
@@ -149,7 +154,14 @@ SAFETY_FEATURE_TABLE_CRIME = os.getenv("SAFETY_FEATURE_TABLE_CRIME", "crime_stat
 SAFETY_GEOM_COL_LIGHTS = os.getenv("SAFETY_GEOM_COL_LIGHTS", "light_pt")
 SAFETY_GEOM_COL_CCTV = os.getenv("SAFETY_GEOM_COL_CCTV", "cctv_pt")
 SAFETY_GEOM_COL_GARDA = os.getenv("SAFETY_GEOM_COL_GARDA", "location")
-SAFETY_SCORES_VIEW = "saferoute.ways_safety_view"
+# Qualified name, e.g. saferoute.ways_safety_view. Override if a broken OID/type
+# blocks recreating the default name (set e.g. saferoute.ways_safety_view_v2).
+_raw_scores_view = os.getenv("SAFETY_SCORES_VIEW", "saferoute.ways_safety_view").strip()
+if "." in _raw_scores_view:
+    SAFETY_SCORES_VIEW_SCHEMA, SAFETY_SCORES_VIEW_NAME = _raw_scores_view.split(".", 1)
+else:
+    SAFETY_SCORES_VIEW_SCHEMA, SAFETY_SCORES_VIEW_NAME = "public", _raw_scores_view
+SAFETY_SCORES_VIEW = f"{SAFETY_SCORES_VIEW_SCHEMA}.{SAFETY_SCORES_VIEW_NAME}"
 
 # ── Spatial influence radii (metres) ─────────────────────────────────────────
 SAFETY_BUFFER_LIGHTS_M = float(os.getenv("SAFETY_BUFFER_LIGHTS_M", "60"))
@@ -186,6 +198,11 @@ SAFETY_FACTOR_MAX = float(os.getenv("ROUTE_SAFETY_FACTOR_MAX", "50.0"))
 # Calibrate by running: SELECT AVG(composite_safety_score) FROM saferoute.ways_safety_scores;
 # and picking a value ~10–15 pts below that average (so most roads are neutral/slightly-safe).
 SAFETY_NEUTRAL_COMPOSITE = float(os.getenv("SAFETY_NEUTRAL_COMPOSITE", "0.35"))
+# Tiny stable spread on composite [0,1] per ways.gid so edges with identical
+# feature-derived scores (common in uniform suburbs) do not all map to the same
+# safety_factor. Set 0 to disable. Typical 0.012–0.025; routing cost uses sf^exp so
+# keep this modest.
+SAFETY_COMPOSITE_GID_JITTER = float(os.getenv("SAFETY_COMPOSITE_GID_JITTER", "0.018"))
 # Set to "true" to DROP + recreate the materialized view on each startup.
 # Flip this after any formula change, then set back to "false" once deployed.
 SAFETY_SCORES_RECREATE_VIEW = os.getenv("SAFETY_SCORES_RECREATE_VIEW", "false").lower() == "true"
@@ -323,6 +340,8 @@ def _build_mat_view_sql() -> str:
         SAFETY_WEIGHT_GARDA,
         SAFETY_WEIGHT_CRIME,
     )
+    neutral_c = SAFETY_NEUTRAL_COMPOSITE
+    comp_jit = SAFETY_COMPOSITE_GID_JITTER
 
     # Distance floor in degrees: ~1m in EPSG:4326 at lat 53°.
     # Prevents division-by-zero for coincident points while keeping
@@ -402,11 +421,50 @@ def _build_mat_view_sql() -> str:
       w.gid,
       -- Composite safety score in [0, 1]; higher = safer.
       -- Crime is inverted: (1 - crime_norm) so high crime lowers the score.
-      LEAST(1.0, GREATEST(0.0,
-          {wl}  * LEAST(COALESCE(ls.raw_score / norms.light_max,  0.0), 1.0)
-        + {wc}  * LEAST(COALESCE(cs.raw_score / norms.cctv_max,   0.0), 1.0)
-        + {wg}  * LEAST(COALESCE(gs.raw_score / norms.garda_max,  0.0), 1.0)
-        + {wcr} * (1.0 - LEAST(COALESCE(cr.raw_score / norms.crime_max, 0.0), 1.0))
+      --
+      -- If a global norm (light_max, etc.) is NULL (no feature data / all zeros),
+      -- that factor is excluded and remaining weights are renormalized. Previously
+      -- crime with NULL crime_max became w_crime * 1.0 for every row → identical
+      -- composites and flat ways.safety_factor. When no factor has signal, use the
+      -- configured neutral composite so routes stay grey (sf → 1.0 at neutral N).
+      -- Per-gid jitter breaks ties: many segments share the same raw composite after
+      -- normalization; routing_service still consumes the single ways.safety_factor column.
+      LEAST(1.0::double precision, GREATEST(0.0::double precision,
+        (
+          CASE
+            WHEN norms.light_max IS NULL AND norms.cctv_max IS NULL
+             AND norms.garda_max IS NULL AND norms.crime_max IS NULL
+            THEN {neutral_c}::double precision
+            ELSE LEAST(1.0::double precision, GREATEST(0.0::double precision,
+              (
+                  CASE WHEN norms.light_max IS NOT NULL THEN {wl}::double precision
+                       * LEAST(COALESCE(ls.raw_score / norms.light_max, 0.0::double precision), 1.0::double precision)
+                       ELSE 0.0::double precision END
+                + CASE WHEN norms.cctv_max IS NOT NULL THEN {wc}::double precision
+                       * LEAST(COALESCE(cs.raw_score / norms.cctv_max, 0.0::double precision), 1.0::double precision)
+                       ELSE 0.0::double precision END
+                + CASE WHEN norms.garda_max IS NOT NULL THEN {wg}::double precision
+                       * LEAST(COALESCE(gs.raw_score / norms.garda_max, 0.0::double precision), 1.0::double precision)
+                       ELSE 0.0::double precision END
+                + CASE WHEN norms.crime_max IS NOT NULL THEN {wcr}::double precision
+                       * (1.0::double precision - LEAST(
+                           COALESCE(cr.raw_score / norms.crime_max, 0.0::double precision), 1.0::double precision))
+                       ELSE 0.0::double precision END
+              ) / NULLIF(
+                  (CASE WHEN norms.light_max IS NOT NULL THEN {wl}::double precision ELSE 0.0::double precision END)
+                + (CASE WHEN norms.cctv_max  IS NOT NULL THEN {wc}::double precision ELSE 0.0::double precision END)
+                + (CASE WHEN norms.garda_max IS NOT NULL THEN {wg}::double precision ELSE 0.0::double precision END)
+                + (CASE WHEN norms.crime_max IS NOT NULL THEN {wcr}::double precision ELSE 0.0::double precision END),
+                  0.0::double precision)
+            ))
+          END
+        )
+        + ({comp_jit}::double precision * (
+            2.0::double precision
+            * (MOD(ABS(hashtext(w.gid::text)), 1000001))::double precision
+            / 1000000.0::double precision
+            - 1.0::double precision
+          ))
       )) AS composite_safety_score,
       -- Per-factor normalised scores (crime stored non-inverted; callers invert as needed)
       COALESCE(ls.raw_score / NULLIF(norms.light_max, 0),  0.0) AS light_score_norm,
@@ -498,10 +556,12 @@ async def _refresh_safety_scores() -> None:
     Refresh the materialized view then write the computed safety_factor back to
     ways.safety_factor so pgRouting picks it up immediately.
 
-    Uses AUTOCOMMIT mode so:
-      - REFRESH MATERIALIZED VIEW CONCURRENTLY never errors with
-        "cannot run inside a transaction block"
-      - statement_timeout = 0 applies immediately without a surrounding txn
+    Uses AUTOCOMMIT mode so REFRESH MATERIALIZED VIEW CONCURRENTLY is allowed.
+
+    The heavy UPDATE uses batched commits (see saferoute.safety_ways_factor_sync_state)
+    plus optional PostgreSQL CHECKPOINT between batches — not a single long transaction.
+    statement_timeout is disabled only for REFRESH MATERIALIZED VIEW, which must run as
+    one statement; batched updates use the server default per batch.
     """
     engine = _safety_scoring_refresh_engine or _safety_scoring_engine
     if engine is None:
@@ -509,24 +569,26 @@ async def _refresh_safety_scores() -> None:
     try:
         async with engine.connect() as conn:
             await conn.execution_options(isolation_level="AUTOCOMMIT")
-            await conn.execute(text("SET statement_timeout = 0"))
             # Disable parallel gather so PostgreSQL uses only one worker per CTE
             # (prevents RAM multiplication on the 384Mi-limited container).
             # work_mem intentionally left at default (4MB) — temp-file spills
             # go to the 10Gi PVC which has plenty of room.
             await conn.execute(text("SET max_parallel_workers_per_gather = 0"))
 
-            existing = await conn.execute(text("""
+            existing = await conn.execute(
+                text("""
                 SELECT ispopulated FROM pg_matviews
-                WHERE schemaname = 'saferoute'
-                  AND matviewname = 'ways_safety_view'
-            """))
+                WHERE schemaname = :sch AND matviewname = :mv
+                """),
+                {"sch": SAFETY_SCORES_VIEW_SCHEMA, "mv": SAFETY_SCORES_VIEW_NAME},
+            )
             row = existing.first()
 
             if row is None:
                 # View doesn't exist (or is in an orphaned/partial state from a
                 # prior crash). Drop any leftover pg_class entry before creating.
                 print(f"Creating and populating {SAFETY_SCORES_VIEW}…")
+                await conn.execute(text("SET statement_timeout = 0"))
                 try:
                     await conn.execute(
                         text(f"DROP MATERIALIZED VIEW IF EXISTS {SAFETY_SCORES_VIEW} CASCADE")
@@ -537,45 +599,56 @@ async def _refresh_safety_scores() -> None:
                 except Exception as create_err:
                     print(f"Could not create {SAFETY_SCORES_VIEW}: {create_err}")
                     return
+                finally:
+                    await conn.execute(text("SET statement_timeout TO DEFAULT"))
             elif not row[0]:
                 # View exists but is empty (was created WITH NO DATA in a prior
                 # attempt) — do a plain (non-concurrent) initial population.
                 print(f"Initial population of {SAFETY_SCORES_VIEW} (non-concurrent)…")
-                await conn.execute(text(f"REFRESH MATERIALIZED VIEW {SAFETY_SCORES_VIEW}"))
+                await conn.execute(text("SET statement_timeout = 0"))
+                try:
+                    await conn.execute(text(f"REFRESH MATERIALIZED VIEW {SAFETY_SCORES_VIEW}"))
+                finally:
+                    await conn.execute(text("SET statement_timeout TO DEFAULT"))
             else:
-                # View already has data — use CONCURRENTLY to avoid locking readers.
-                await conn.execute(
-                    text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {SAFETY_SCORES_VIEW}")
-                )
+                # View already has data — prefer CONCURRENTLY; fall back if catalogs/indexes break.
+                await conn.execute(text("SET statement_timeout = 0"))
+                try:
+                    try:
+                        await conn.execute(
+                            text(f"REFRESH MATERIALIZED VIEW CONCURRENTLY {SAFETY_SCORES_VIEW}")
+                        )
+                    except Exception as conc_err:
+                        print(
+                            f"CONCURRENTLY refresh failed ({conc_err}); "
+                            f"retrying non-concurrent REFRESH {SAFETY_SCORES_VIEW}…"
+                        )
+                        await conn.execute(
+                            text(f"REFRESH MATERIALIZED VIEW {SAFETY_SCORES_VIEW}")
+                        )
+                finally:
+                    await conn.execute(text("SET statement_timeout TO DEFAULT"))
 
-            # Piecewise-linear mapping with configurable neutral point N.
-            # composite ∈ [N, 1.0] (safe zone)   → sf ∈ [1.0, SAFETY_FACTOR_MIN]
-            # composite ∈ [0.0, N] (danger zone) → sf ∈ [1.0, SAFETY_FACTOR_DANGEROUS_MAX]
             N = SAFETY_NEUTRAL_COMPOSITE
-            await conn.execute(
-                text(f"""
-                UPDATE ways w
-                SET safety_factor = CASE
-                    WHEN mv.composite_safety_score >= :neutral THEN
-                        GREATEST(:sf_safe,
-                            1.0 - (mv.composite_safety_score - :neutral)
-                                / GREATEST(1.0 - :neutral, 1e-9)
-                                * (1.0 - :sf_safe))
-                    ELSE
-                        LEAST(:sf_danger,
-                            1.0 + (:neutral - mv.composite_safety_score)
-                                / GREATEST(:neutral, 1e-9)
-                                * (:sf_danger - 1.0))
-                END
-                FROM {SAFETY_SCORES_VIEW} mv
-                WHERE w.gid = mv.gid
-                """),
-                {
-                    "neutral": N,
-                    "sf_safe": SAFETY_FACTOR_MIN,
-                    "sf_danger": SAFETY_FACTOR_DANGEROUS_MAX,
-                },
+            updated, batches = await sync_ways_safety_factors_batched(
+                conn,
+                matview_qualified=SAFETY_SCORES_VIEW,
+                neutral=N,
+                sf_safe=SAFETY_FACTOR_MIN,
+                sf_danger=SAFETY_FACTOR_DANGEROUS_MAX,
+                state_table_qualified=SAFETY_FACTOR_SYNC_STATE_TABLE,
             )
+            wc, mc, missing = await verify_ways_matview_alignment(conn, SAFETY_SCORES_VIEW)
+            if missing > 0 or wc != mc:
+                print(
+                    f"Safety sync verification: ways={wc} matview={mc} ways_missing_mv={missing} "
+                    f"(updated_rows={updated} batches={batches})"
+                )
+            else:
+                print(
+                    f"Safety sync verification OK: ways=matview={wc} rows, "
+                    f"updated={updated} in {batches} batches"
+                )
 
             print(f"Safety scores refreshed at {datetime.utcnow().isoformat()}Z")
     except Exception as e:
