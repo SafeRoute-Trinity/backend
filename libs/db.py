@@ -126,7 +126,9 @@ class DatabaseConnection:
         if "sslmode" in url.query:
             url = url.set(query=query)
 
-        return str(url), connect_args
+        # IMPORTANT: str(URL) masks the password as '***'.
+        # Use render_as_string(hide_password=False) to preserve the real password.
+        return url.render_as_string(hide_password=False), connect_args
 
     def __init__(self, config: DatabaseConfig):
         """
