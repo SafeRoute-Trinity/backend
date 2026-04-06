@@ -1,15 +1,30 @@
 """
-CAS (Compare-and-Swap) Logger for distributed consistency management.
+CAS (Compare-and-Swap) logging and state-machine validation for SafeRoute.
 
-Emits structured state-transition log entries that form a verifiable chain
-per ``trace_id``.  Each transition records the expected previous state and
-the new state, creating an auditable sequence that Azure Monitor / KQL can
-query to detect broken chains, skipped steps, or stuck operations.
+Requirements (what this module delivers)
+----------------------------------------
+- **Structured audit trail**: Every transition is one JSON log line (via the
+  root logger + ``libs.structured_logging.AzureJsonFormatter``) suitable for
+  Azure Log Analytics / KQL: ``trace_id``, ``instance_id``, ``cas_*`` fields.
+- **Replica visibility**: ``instance_id`` is added by the formatter from
+  ``POD_NAME`` / ``HOSTNAME`` (Kubernetes) or the machine hostname locally.
+- **Cross-replica ordering**: When the DB enforcer succeeds, logs include
+  ``cas_row_version`` (the ``version`` column in ``saferoute.cas_state``) so
+  you can sort events per ``trace_id`` consistently across pods.
+- **Conflicts**: Losing replica logs ``cas_conflict`` + ``[CONFLICT]`` before
+  ``CASConflictError`` propagates (HTTP 409 from the factory middleware).
 
-When an enforcer is attached (see ``libs/cas_enforcer``), every transition
-is **also** persisted atomically in PostgreSQL and broadcast to peer
-replicas via Redis pub/sub — giving true cross-replica consistency, not
-just observability.
+Tech stack alignment
+--------------------
+- **FastAPI**: Services call ``cas_log.begin`` / ``transition`` inside handlers;
+  ``trace_id`` comes from ``libs.trace_context`` (``X-Trace-ID``).
+- **PostgreSQL / PostGIS**: Persistence is optional at log time; when
+  ``CASEnforcer`` is attached (see ``libs.fastapi_service`` startup), rows
+  live in ``saferoute.cas_state``. URL resolution is in
+  ``libs.cas_enforcer.resolve_cas_database_url`` (PostGIS when ``POSTGIS_HOST``
+  or ``POSTGIS_DATABASE_URL`` is set).
+- **Redis**: Pub/sub on ``cas:state_changes`` is best-effort; enforcer still
+  runs if Redis is down (warning only).
 
 Usage::
 
@@ -19,19 +34,13 @@ Usage::
     await cas_log.transition(Op.EMERGENCY_CALL, "INIT", "EMERGENCY_CREATED",
                              detail={"emergency_id": str(eid)})
 
-KQL consistency check::
+KQL sketch::
 
     ContainerLog
     | extend p = parse_json(LogEntry)
     | where isnotempty(tostring(p.cas_operation))
     | where p.trace_id == "<id>"
     | order by toint(p.cas_row_version) asc, toint(p.cas_sequence) asc
-    | extend prev = prev(tostring(p.cas_new_state))
-    | where isnotempty(prev) and tostring(p.cas_expected_state) != prev
-
-Use ``instance_id`` (pod name in Kubernetes) to see which replica emitted a
-line; use ``cas_row_version`` (PostgreSQL row version after a successful
-enforcer write) as the authoritative ordering key across replicas.
 """
 
 from __future__ import annotations
@@ -194,19 +203,17 @@ def _is_valid(op: Op, expected: str, new: str) -> bool:
 
 class CASLogger:
     """
-    Async CAS state-transition logger with optional DB enforcement.
+    Async CAS state-transition logger with optional ``CASEnforcer``.
 
-    In *log-only* mode (no enforcer attached) the calls still emit structured
-    JSON via Python logging — useful for local dev and tests.  When an
-    enforcer is attached the same call also writes to ``cas_state`` in
-    PostgreSQL and publishes to Redis.
+    Log fields on the ``LogRecord`` must stay in sync with
+    ``libs.structured_logging.CAS_LOG_EXTRA_KEYS`` (pytest enforces the contract).
     """
 
     def __init__(self) -> None:
         self._enforcer: Optional[CASEnforcer] = None
 
-    def attach_enforcer(self, enforcer: CASEnforcer) -> None:
-        """Wire the DB-backed enforcer (call once at startup)."""
+    def attach_enforcer(self, enforcer: Optional[CASEnforcer]) -> None:
+        """Wire the DB-backed enforcer at startup, or ``None`` to detach (e.g. tests)."""
         self._enforcer = enforcer
 
     async def begin(

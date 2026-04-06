@@ -1,20 +1,23 @@
 """
 Structured JSON logging for Azure Monitor / Log Analytics.
 
-Azure Monitor's DaemonSet agent (Container Insights) scrapes container
-stdout/stderr automatically.  When the output is structured JSON, Azure
-Log Analytics can parse each field natively in KQL via ``parse_json()``.
+Stack
+-----
+- **Ingest**: Container Insights scrapes stdout; each log line is one JSON object.
+- **Services**: FastAPI apps call ``setup_structured_logging(service_name)`` from
+  ``FastAPIServiceFactory`` or (e.g. safety-scoring) at module startup.
+- **Request correlation**: ``trace_id`` comes from ``libs.trace_context`` (HTTP
+  ``X-Trace-ID`` / ``TRACE_HEADER``).
+- **Replicas**: ``instance_id`` is ``POD_NAME`` or ``HOSTNAME`` (Kubernetes pod
+  name) or the machine hostname for local dev.
+- **CAS** (``libs.cas_logger``): transition lines add the extra keys listed in
+  ``CAS_LOG_EXTRA_KEYS`` when present on the ``LogRecord`` (including
+  ``cas_row_version`` after a successful enforcer write to ``saferoute.cas_state``).
 
-This module replaces Python's default plain-text log formatter with a
-JSON formatter so that every ``logger.info(...)`` call in any service
-produces a single JSON line like:
+Example base line::
 
-    {"timestamp":"2026-03-19T14:30:00.123456+00:00","service":"sos",
-     "level":"ERROR","trace_id":"a1b2c3d4-...","message":"...",
-     "module":"main","function":"call","line":214}
-
-Call ``setup_structured_logging("sos")`` once at service startup.
-The ``FastAPIServiceFactory`` does this automatically.
+    {"timestamp":"...","service":"sos","instance_id":"...","level":"INFO",
+     "trace_id":"...","message":"...","module":"...","function":"...","line":42}
 """
 
 from __future__ import annotations
@@ -25,9 +28,22 @@ import os
 import socket
 import traceback
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Final, Tuple
 
 from libs.trace_context import trace_id_var
+
+# Copied onto JSON output when set on the LogRecord (see libs.cas_logger).
+CAS_LOG_EXTRA_KEYS: Final[Tuple[str, ...]] = (
+    "cas_operation",
+    "cas_sequence",
+    "cas_expected_state",
+    "cas_new_state",
+    "cas_payload_hash",
+    "cas_valid",
+    "cas_detail",
+    "cas_row_version",
+    "cas_conflict",
+)
 
 
 def _logging_instance_id() -> str:
@@ -63,18 +79,7 @@ class AzureJsonFormatter(logging.Formatter):
         if record.exc_info and record.exc_info[1]:
             payload["exception"] = "".join(traceback.format_exception(*record.exc_info))
 
-        _CAS_KEYS = (
-            "cas_operation",
-            "cas_sequence",
-            "cas_expected_state",
-            "cas_new_state",
-            "cas_payload_hash",
-            "cas_valid",
-            "cas_detail",
-            "cas_row_version",
-            "cas_conflict",
-        )
-        for key in _CAS_KEYS:
+        for key in CAS_LOG_EXTRA_KEYS:
             val = getattr(record, key, None)
             if val is not None:
                 payload[key] = val

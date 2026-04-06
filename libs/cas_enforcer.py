@@ -16,6 +16,13 @@ Flow:
 
 The enforcer owns a **dedicated** async engine so it works regardless of
 whether the calling service talks to Postgres or PostGIS.
+
+**URL resolution** — ``resolve_cas_database_url`` (used by ``initialize``):
+``CAS_DATABASE_URL`` → ``POSTGIS_DATABASE_URL`` → PostGIS DSN if
+``POSTGIS_HOST`` is set → ``DATABASE_URL`` → else ``POSTGRES_*``.
+PostGIS is preferred before ``DATABASE_URL`` so services that read/write
+``ways`` on PostGIS (e.g. safety-scoring) persist ``cas_state`` on the same
+DB even when ``DATABASE_URL`` points at a separate application Postgres.
 """
 
 from __future__ import annotations
@@ -39,6 +46,64 @@ logger = logging.getLogger("cas.enforcer")
 
 CAS_CHANNEL = "cas:state_changes"
 CAS_STATE_TTL_HOURS = int(os.getenv("CAS_STATE_TTL_HOURS", "24"))
+
+
+def _normalize_async_database_url(url: str) -> str:
+    u = url.strip()
+    if u.startswith("postgresql://"):
+        return u.replace("postgresql://", "postgresql+asyncpg://", 1)
+    if u.startswith("postgres://"):
+        return u.replace("postgres://", "postgresql+asyncpg://", 1)
+    return u
+
+
+def _build_postgis_async_url() -> str:
+    from urllib.parse import quote_plus
+
+    host = os.getenv("POSTGIS_HOST", "127.0.0.1")
+    port = os.getenv("POSTGIS_PORT", "5433")
+    user = os.getenv("POSTGIS_USER", "saferoute")
+    pw = quote_plus(os.getenv("POSTGIS_PASSWORD", ""))
+    db = os.getenv("POSTGIS_DATABASE", "saferoute_geo")
+    return f"postgresql+asyncpg://{user}:{pw}@{host}:{port}/{db}"
+
+
+def _build_postgres_async_url() -> str:
+    from urllib.parse import quote_plus
+
+    host = os.getenv("POSTGRES_HOST", "127.0.0.1")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    user = os.getenv("POSTGRES_USER", "saferoute")
+    pw = quote_plus(os.getenv("POSTGRES_PASSWORD", ""))
+    db = os.getenv("POSTGRES_DATABASE", "saferoute")
+    return f"postgresql+asyncpg://{user}:{pw}@{host}:{port}/{db}"
+
+
+def resolve_cas_database_url(explicit: Optional[str]) -> str:
+    """
+    Pick the DB URL for ``cas_state``.
+
+    Order: explicit arg → ``CAS_DATABASE_URL`` → ``POSTGIS_DATABASE_URL`` →
+    if ``POSTGIS_HOST`` is set, PostGIS DSN from ``POSTGIS_*`` →
+    ``DATABASE_URL`` → else PostgreSQL DSN from ``POSTGRES_*``.
+
+    PostGIS is checked before ``DATABASE_URL`` so CAS rows land with routing
+    data; set ``CAS_DATABASE_URL`` to override.
+    """
+    if explicit and explicit.strip():
+        return _normalize_async_database_url(explicit)
+    raw = os.getenv("CAS_DATABASE_URL", "").strip()
+    if raw:
+        return _normalize_async_database_url(raw)
+    raw = os.getenv("POSTGIS_DATABASE_URL", "").strip()
+    if raw:
+        return _normalize_async_database_url(raw)
+    if os.getenv("POSTGIS_HOST", "").strip():
+        return _build_postgis_async_url()
+    raw = os.getenv("DATABASE_URL", "").strip()
+    if raw:
+        return _normalize_async_database_url(raw)
+    return _build_postgres_async_url()
 
 
 class CASConflictError(Exception):
@@ -84,27 +149,12 @@ class CASEnforcer:
         service_name:
             Identifies the pod / service writing the state row.
         database_url:
-            Explicit ``postgresql+asyncpg://`` URL.  Falls back to the
-            ``DATABASE_URL`` / ``POSTGRES_*`` env vars used by ``libs/db.py``.
+            Explicit ``postgresql+asyncpg://`` URL.  If omitted, see
+            ``resolve_cas_database_url`` (PostGIS when ``POSTGIS_HOST`` is set).
         """
-        from urllib.parse import quote_plus
-
         self._service = service_name
 
-        if not database_url:
-            database_url = os.getenv("DATABASE_URL")
-        if not database_url:
-            host = os.getenv("POSTGRES_HOST", "127.0.0.1")
-            port = os.getenv("POSTGRES_PORT", "5432")
-            user = os.getenv("POSTGRES_USER", "saferoute")
-            pw = quote_plus(os.getenv("POSTGRES_PASSWORD", ""))
-            db = os.getenv("POSTGRES_DATABASE", "saferoute")
-            database_url = f"postgresql+asyncpg://{user}:{pw}@{host}:{port}/{db}"
-        else:
-            if database_url.startswith("postgresql://"):
-                database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-            elif database_url.startswith("postgres://"):
-                database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+        database_url = resolve_cas_database_url(database_url or "")
 
         self._engine = create_async_engine(database_url, pool_size=5, max_overflow=2)
         self._session_maker = sessionmaker(
