@@ -16,7 +16,7 @@ from typing import Any, Dict, List
 import pytest
 
 from libs.cas_logger import Op, cas_log
-from libs.structured_logging import AzureJsonFormatter, CAS_LOG_EXTRA_KEYS, setup_structured_logging
+from libs.structured_logging import CAS_LOG_EXTRA_KEYS, AzureJsonFormatter, setup_structured_logging
 from libs.trace_context import trace_id_var
 
 

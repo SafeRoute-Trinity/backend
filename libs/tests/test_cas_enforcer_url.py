@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from libs.cas_enforcer import resolve_cas_database_url
@@ -29,7 +27,9 @@ def clear_db_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(key, raising=False)
 
 
-def test_postgis_host_wins_over_database_url(monkeypatch: pytest.MonkeyPatch, clear_db_env: None) -> None:
+def test_postgis_host_wins_over_database_url(
+    monkeypatch: pytest.MonkeyPatch, clear_db_env: None
+) -> None:
     """Safety-scoring: ways on PostGIS; CAS must not follow DATABASE_URL alone."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://app:secret@db.internal:5432/appdb")
     monkeypatch.setenv("POSTGIS_HOST", "127.0.0.1")
@@ -44,7 +44,9 @@ def test_postgis_host_wins_over_database_url(monkeypatch: pytest.MonkeyPatch, cl
     assert "db.internal" not in url
 
 
-def test_cas_database_url_wins_over_everything(monkeypatch: pytest.MonkeyPatch, clear_db_env: None) -> None:
+def test_cas_database_url_wins_over_everything(
+    monkeypatch: pytest.MonkeyPatch, clear_db_env: None
+) -> None:
     monkeypatch.setenv("CAS_DATABASE_URL", "postgresql://cas:cas@casdb:5432/casdb")
     monkeypatch.setenv("POSTGIS_HOST", "127.0.0.1")
     monkeypatch.setenv("DATABASE_URL", "postgresql://app:app@other:5432/other")
