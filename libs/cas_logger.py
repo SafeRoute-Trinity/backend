@@ -25,9 +25,13 @@ KQL consistency check::
     | extend p = parse_json(LogEntry)
     | where isnotempty(tostring(p.cas_operation))
     | where p.trace_id == "<id>"
-    | order by toint(p.cas_sequence) asc
+    | order by toint(p.cas_row_version) asc, toint(p.cas_sequence) asc
     | extend prev = prev(tostring(p.cas_new_state))
     | where isnotempty(prev) and tostring(p.cas_expected_state) != prev
+
+Use ``instance_id`` (pod name in Kubernetes) to see which replica emitted a
+line; use ``cas_row_version`` (PostgreSQL row version after a successful
+enforcer write) as the authoritative ordering key across replicas.
 """
 
 from __future__ import annotations
@@ -164,6 +168,13 @@ def _next_seq() -> int:
     return seq
 
 
+def _norm_row_version(v: Optional[int]) -> Optional[int]:
+    """Enforcer returns 0 when skipped; omit from logs."""
+    if v is None or v <= 0:
+        return None
+    return v
+
+
 def _payload_hash(detail: Optional[Dict[str, Any]]) -> str:
     if not detail:
         return ""
@@ -203,18 +214,24 @@ class CASLogger:
         operation: Op,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Reset sequence and emit the INIT marker for a new operation."""
+        """Reset sequence, persist INIT when enforcer is ready, then emit one log line."""
         _cas_sequence.set(0)
-        self._emit(operation, "NONE", "INIT", detail)
-
+        row_version: Optional[int] = None
         if self._enforcer and self._enforcer.ready:
             try:
-                await self._enforcer.begin(operation, detail)
+                row_version = await self._enforcer.begin(operation, detail)
             except Exception:
                 logger.warning(
                     "CAS enforcer begin failed (table missing or DB down?) — logging only",
                     exc_info=True,
                 )
+        self._emit(
+            operation,
+            "NONE",
+            "INIT",
+            detail,
+            cas_row_version=_norm_row_version(row_version),
+        )
 
     async def transition(
         self,
@@ -223,18 +240,41 @@ class CASLogger:
         new: str,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Log (and optionally enforce) a single state transition."""
-        self._emit(operation, expected, new, detail)
+        """Persist transition when enforcer is ready, then emit with DB row version."""
+        from libs.cas_enforcer import CASConflictError
 
-        if self._enforcer and self._enforcer.ready:
-            try:
-                await self._enforcer.transition(operation, expected, new, detail)
-            except Exception as exc:
-                # Lazy import avoids circular import (cas_enforcer imports cas_logger).
-                from libs.cas_enforcer import CASConflictError
+        enforcer = self._enforcer if self._enforcer and self._enforcer.ready else None
 
-                if isinstance(exc, CASConflictError):
+        if not _is_valid(operation, expected, new):
+            self._emit(operation, expected, new, detail)
+            if enforcer:
+                try:
+                    await enforcer.transition(operation, expected, new, detail)
+                except CASConflictError:
                     raise
+                except Exception:
+                    logger.warning(
+                        "CAS enforcer transition failed (%s -> %s) — logging only",
+                        expected,
+                        new,
+                        exc_info=True,
+                    )
+            return
+
+        row_version: Optional[int] = None
+        if enforcer:
+            try:
+                row_version = await enforcer.transition(operation, expected, new, detail)
+            except CASConflictError:
+                self._emit(
+                    operation,
+                    expected,
+                    new,
+                    detail,
+                    cas_conflict=True,
+                )
+                raise
+            except Exception:
                 logger.warning(
                     "CAS enforcer transition failed (%s -> %s) — logging only",
                     expected,
@@ -242,18 +282,29 @@ class CASLogger:
                     exc_info=True,
                 )
 
+        self._emit(
+            operation,
+            expected,
+            new,
+            detail,
+            cas_row_version=_norm_row_version(row_version),
+        )
+
     def _emit(
         self,
         operation: Op,
         expected: str,
         new: str,
         detail: Optional[Dict[str, Any]],
+        *,
+        cas_row_version: Optional[int] = None,
+        cas_conflict: bool = False,
     ) -> None:
         """Write the structured log line (always, regardless of enforcer)."""
         seq = _next_seq()
         valid = _is_valid(operation, expected, new)
 
-        extra = {
+        extra: Dict[str, Any] = {
             "cas_operation": operation.value,
             "cas_sequence": seq,
             "cas_expected_state": expected,
@@ -263,10 +314,16 @@ class CASLogger:
         }
         if detail:
             extra["cas_detail"] = detail
+        if cas_row_version is not None:
+            extra["cas_row_version"] = cas_row_version
+        if cas_conflict:
+            extra["cas_conflict"] = True
 
         msg = f"CAS {operation.value}: {expected} -> {new}"
 
-        if valid:
+        if cas_conflict:
+            logger.warning(msg + " [CONFLICT]", extra=extra)
+        elif valid:
             logger.info(msg, extra=extra)
         else:
             logger.warning(msg + " [INVALID TRANSITION]", extra=extra)

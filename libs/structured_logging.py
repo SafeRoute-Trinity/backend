@@ -21,11 +21,22 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import socket
 import traceback
 from datetime import datetime, timezone
 from typing import Any, Dict
 
 from libs.trace_context import trace_id_var
+
+
+def _logging_instance_id() -> str:
+    """Stable per-process id: K8s pod name (POD_NAME / HOSTNAME) or machine hostname."""
+    return (
+        os.getenv("POD_NAME", "").strip()
+        or os.getenv("HOSTNAME", "").strip()
+        or socket.gethostname()
+    )
 
 
 class AzureJsonFormatter(logging.Formatter):
@@ -34,11 +45,13 @@ class AzureJsonFormatter(logging.Formatter):
     def __init__(self, service_name: str) -> None:
         super().__init__()
         self.service_name = service_name
+        self._instance_id = _logging_instance_id()
 
     def format(self, record: logging.LogRecord) -> str:
         payload: Dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
             "service": self.service_name,
+            "instance_id": self._instance_id,
             "level": record.levelname,
             "trace_id": trace_id_var.get(""),
             "message": record.getMessage(),
@@ -58,6 +71,8 @@ class AzureJsonFormatter(logging.Formatter):
             "cas_payload_hash",
             "cas_valid",
             "cas_detail",
+            "cas_row_version",
+            "cas_conflict",
         )
         for key in _CAS_KEYS:
             val = getattr(record, key, None)
