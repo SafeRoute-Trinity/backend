@@ -44,6 +44,8 @@ from libs.fastapi_service import (
     ServiceAppConfig,
 )
 from libs.http_client import close_shared_async_clients, get_shared_async_client
+from models.emergency import Emergency
+from models.feedback import Feedback
 from models.user_models import Contact, TrustedContact, User, UserPreferences
 
 # Initialize database connections
@@ -111,6 +113,30 @@ def extract_user_id_from_auth(auth: dict) -> str:
     """
     auth_sub = auth.get("sub", "")
     return auth_sub.split("|", 1)[-1] if "|" in auth_sub else auth_sub
+
+
+async def delete_user_and_related_data(db, user_id: str) -> bool:
+    """
+    Delete feedback and emergency rows for this user, then delete the users row.
+
+    Other tables (e.g. user_preferences, contacts, trusted_contacts) are not
+    deleted here; rely on DB foreign keys / CASCADE where configured.
+
+    Returns:
+        True if a row in saferoute.users was deleted, False if user_id was not found.
+    """
+    result = await db.execute(select(User).where(User.user_id == user_id))
+    if result.scalar_one_or_none() is None:
+        return False
+    try:
+        await db.execute(delete(Feedback).where(Feedback.user_id == user_id))
+        await db.execute(delete(Emergency).where(Emergency.user_id == user_id))
+        await db.execute(delete(User).where(User.user_id == user_id))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return True
 
 
 def _user_advisory_lock_key(user_id: str) -> int:
@@ -659,6 +685,45 @@ async def get_user(
     }
 
     return UserResponse(**payload)
+
+
+@app.delete(
+    "/v1/users/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["User Management"],
+    summary="Delete own account (feedback, emergency, user row)",
+)
+async def delete_user_account(
+    user_id: str,
+    auth: dict = Depends(verify_token),
+    db=Depends(get_db),
+):
+    """
+    Delete feedback and emergency for this user, then the users row.
+
+    Other related rows rely on database constraints where present.
+    Does not call Auth0 Management API.
+
+    Callers may only delete their own user_id (matches JWT subject).
+    """
+    caller_id = extract_user_id_from_auth(auth)
+    if caller_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You may only delete your own account",
+        )
+    try:
+        existed = await delete_user_and_related_data(db, user_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user: {e}",
+        ) from e
+    if not existed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found",
+        )
 
 
 # --- COMMENTED OUT: Auth0 handles registration/login ---
