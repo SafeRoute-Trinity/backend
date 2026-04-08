@@ -44,6 +44,7 @@ from models.audit import Audit
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from common.constants import REDIS_DB, REDIS_HOST, REDIS_PORT
+from libs.cas_logger import Op, cas_log
 from libs.fastapi_service import (
     CORSMiddlewareConfig,
     FastAPIServiceFactory,
@@ -122,6 +123,9 @@ TRANSIT_CACHE_TABLE_LOCK = asyncio.Lock()
 ROUTE_SAFETY_FACTOR_MIN = float(os.getenv("ROUTE_SAFETY_FACTOR_MIN", "0.5"))
 ROUTE_SAFETY_FACTOR_MAX = float(os.getenv("ROUTE_SAFETY_FACTOR_MAX", "50"))
 ROUTE_SAFETY_FACTOR_EXPONENT = float(os.getenv("ROUTE_SAFETY_FACTOR_EXPONENT", "0.65"))
+# Upper bound used only for score display (sf=1.0 → 50, sf=this → 0).
+# Keep in sync with SAFETY_FACTOR_DANGEROUS_MAX in safety_scoring service.
+ROUTE_SAFETY_FACTOR_DANGEROUS_MAX = float(os.getenv("SAFETY_FACTOR_DANGEROUS_MAX", "10.0"))
 ROUTE_MAX_DETOUR_RATIO = float(os.getenv("ROUTE_MAX_DETOUR_RATIO", "1.45"))
 ROUTE_RESULT_CACHE_ENABLED = os.getenv("ROUTE_RESULT_CACHE_ENABLED", "true").lower() == "true"
 ROUTE_RESULT_CACHE_BACKEND = os.getenv("ROUTE_RESULT_CACHE_BACKEND", "redis").strip().lower()
@@ -297,10 +301,21 @@ class WeightUpdateRequest(BaseModel):
     safety_factor: float
 
 
+class SafetyWeightsInput(BaseModel):
+    """Per-user factor importance weights for route cost scaling (all default 1.0)."""
+
+    cctv_coverage: float = 1.0
+    street_lighting: float = 1.0
+    business_activity: float = 1.0
+    crime_rate: float = 1.0
+    pedestrian_traffic: float = 1.0
+
+
 class RoutePreferences(BaseModel):
     optimize_for: Literal["safety", "time", "distance", "balanced"]
     avoid: Optional[List[str]] = None
     transport_mode: Literal["walking", "cycling", "driving", "public_transit"]
+    safety_weights: Optional[SafetyWeightsInput] = None
 
 
 class RouteCalculateRequest(BaseModel):
@@ -1219,6 +1234,151 @@ async def _store_transit_itinerary_cache(
             pass
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Walking route cache  (PostGIS DB, saferoute schema)
+# ─────────────────────────────────────────────────────────────────────────────
+
+ROUTE_CACHE_TABLE = "saferoute.route_cache"
+ROUTE_CACHE_TTL_SECONDS = int(os.getenv("ROUTE_CACHE_TTL_SECONDS", "3600"))
+ROUTE_CACHE_ENABLED = os.getenv("ROUTE_CACHE_ENABLED", "true").lower() == "true"
+_ROUTE_CACHE_TABLE_INITIALIZED = False
+
+
+async def _ensure_route_cache_table(db: AsyncSession) -> None:
+    global _ROUTE_CACHE_TABLE_INITIALIZED
+    if _ROUTE_CACHE_TABLE_INITIALIZED:
+        return
+    try:
+        await db.execute(text("CREATE SCHEMA IF NOT EXISTS saferoute"))
+        await db.execute(text(f"""
+            CREATE TABLE IF NOT EXISTS {ROUTE_CACHE_TABLE} (
+                cache_key         TEXT PRIMARY KEY,
+                origin_lat        DOUBLE PRECISION NOT NULL,
+                origin_lon        DOUBLE PRECISION NOT NULL,
+                destination_lat   DOUBLE PRECISION NOT NULL,
+                destination_lon   DOUBLE PRECISION NOT NULL,
+                weights_hash      TEXT NOT NULL DEFAULT 'default',
+                response_payload  JSONB NOT NULL,
+                safety_score      DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                expires_at        TIMESTAMPTZ NOT NULL,
+                hit_count         INTEGER NOT NULL DEFAULT 0,
+                last_hit_at       TIMESTAMPTZ
+            )
+        """))
+        await db.execute(text(f"""
+            CREATE INDEX IF NOT EXISTS idx_route_cache_expires_at
+            ON {ROUTE_CACHE_TABLE} (expires_at)
+        """))
+        await db.commit()
+        _ROUTE_CACHE_TABLE_INITIALIZED = True
+    except Exception as e:
+        logger.warning("Route cache table init failed (non-fatal): %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+
+def _walking_route_cache_key(origin: "Point", destination: "Point", scalar: float) -> str:
+    sig = sha256(f"{scalar:.4f}".encode()).hexdigest()[:6]
+    return (
+        f"walk:{origin.lat:.5f},{origin.lon:.5f}:{destination.lat:.5f},{destination.lon:.5f}:{sig}"
+    )
+
+
+async def _get_cached_walking_route(db: AsyncSession, cache_key: str) -> Optional[Dict[str, Any]]:
+    if not ROUTE_CACHE_ENABLED:
+        return None
+    try:
+        await _ensure_route_cache_table(db)
+        result = await db.execute(
+            text(f"""
+                SELECT response_payload
+                FROM {ROUTE_CACHE_TABLE}
+                WHERE cache_key = :k AND expires_at > NOW()
+                LIMIT 1
+            """),
+            {"k": cache_key},
+        )
+        row = result.first()
+        if not row:
+            return None
+        await db.execute(
+            text(f"""
+                UPDATE {ROUTE_CACHE_TABLE}
+                SET hit_count = hit_count + 1, last_hit_at = NOW()
+                WHERE cache_key = :k
+            """),
+            {"k": cache_key},
+        )
+        await db.commit()
+        payload = row.response_payload
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return payload if isinstance(payload, dict) else None
+    except Exception as e:
+        logger.warning("Walking route cache read failed: %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+async def _store_walking_route_cache(
+    db: AsyncSession,
+    cache_key: str,
+    origin: "Point",
+    destination: "Point",
+    scalar: float,
+    payload: Dict[str, Any],
+    safety_score: float,
+) -> None:
+    if not ROUTE_CACHE_ENABLED:
+        return
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=max(60, ROUTE_CACHE_TTL_SECONDS))
+    sig = sha256(f"{scalar:.4f}".encode()).hexdigest()[:6]
+    try:
+        await _ensure_route_cache_table(db)
+        await db.execute(
+            text(f"""
+                INSERT INTO {ROUTE_CACHE_TABLE} (
+                    cache_key, origin_lat, origin_lon,
+                    destination_lat, destination_lon,
+                    weights_hash, response_payload, safety_score, expires_at
+                ) VALUES (
+                    :k, :olat, :olon, :dlat, :dlon,
+                    :whash, CAST(:payload AS JSONB), :score, :exp
+                )
+                ON CONFLICT (cache_key) DO UPDATE SET
+                    response_payload = EXCLUDED.response_payload,
+                    safety_score     = EXCLUDED.safety_score,
+                    expires_at       = EXCLUDED.expires_at,
+                    hit_count        = {ROUTE_CACHE_TABLE}.hit_count + 1,
+                    last_hit_at      = NOW()
+            """),
+            {
+                "k": cache_key,
+                "olat": origin.lat,
+                "olon": origin.lon,
+                "dlat": destination.lat,
+                "dlon": destination.lon,
+                "whash": sig,
+                "payload": json.dumps(payload),
+                "score": safety_score,
+                "exp": expires_at,
+            },
+        )
+        await db.commit()
+    except Exception as e:
+        logger.warning("Walking route cache write failed: %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+
 async def _plan_transit_with_google(
     body: TransitPlanRequest, departure_time: datetime
 ) -> Optional[Dict[str, Any]]:
@@ -1595,6 +1755,7 @@ async def _compute_weighted_route_geojson(
     request: RouteRequest,
     db: AsyncSession,
     algorithm: Literal["astar", "dijkstra", "bd_dijkstra"] = "dijkstra",
+    user_safety_scalar: float = 1.0,
 ) -> Dict[str, Any]:
     node_query = text("""
         WITH p AS (
@@ -1646,6 +1807,7 @@ async def _compute_weighted_route_geojson(
             d.agg_cost,
             ST_AsGeoJSON(w.geometry) as geojson,
             w.length,
+            w.safety_factor,
             w.source,
             w.target
         FROM """
@@ -1737,11 +1899,17 @@ async def _compute_weighted_route_geojson(
     sf_exp = max(0.01, ROUTE_SAFETY_FACTOR_EXPONENT)
     max_detour_ratio = max(1.0, ROUTE_MAX_DETOUR_RATIO)
 
+    # Clamp scalar so it only amplifies/reduces penalty, never produces nonsensical costs.
+    _scalar = max(0.3, min(3.0, user_safety_scalar))
     weighted_subgraph_cost_expr = (
-        f"w.length * POWER(LEAST(GREATEST(w.safety_factor, {sf_min}), {sf_max}), {sf_exp})"
+        f"w.length * POWER("
+        f"LEAST(GREATEST(w.safety_factor * {_scalar:.4f}, {sf_min}), {sf_max})"
+        f", {sf_exp})"
     )
     weighted_fullgraph_cost_expr = (
-        f"length * POWER(LEAST(GREATEST(safety_factor, {sf_min}), {sf_max}), {sf_exp})"
+        f"length * POWER("
+        f"LEAST(GREATEST(safety_factor * {_scalar:.4f}, {sf_min}), {sf_max})"
+        f", {sf_exp})"
     )
     routes = await _query_routes(
         subgraph_cost_expr=weighted_subgraph_cost_expr,
@@ -1908,6 +2076,7 @@ async def _compute_weighted_route_geojson(
     features: List[Dict[str, Any]] = []
     total_distance = 0.0
     road_coords: List[List[float]] = []
+    path_sf_weighted: List[tuple] = []  # (safety_factor, length)
     start_hint = [float(request.start.lng), float(request.start.lat)]
 
     for route_row in selected_routes:
@@ -1922,6 +2091,9 @@ async def _compute_weighted_route_geojson(
 
         if route_row.length:
             total_distance += float(route_row.length)
+            sf = getattr(route_row, "safety_factor", None)
+            if sf is not None:
+                path_sf_weighted.append((float(sf), float(route_row.length)))
 
     road_coords = _prune_backtrack_spikes(road_coords)
 
@@ -1957,6 +2129,27 @@ async def _compute_weighted_route_geojson(
     )
 
     duration_seconds = total_distance / WALKING_SPEED_MPS
+
+    # Compute length-weighted average safety_factor → user-facing 0–100 score.
+    # sf=1.0 → 50 (neutral/grey), sf<1 → >50 (green/safe), sf>1 → <50 (red/danger).
+    if path_sf_weighted and total_distance > 0:
+        total_sf_len = sum(length for _, length in path_sf_weighted)
+        avg_sf = sum(sf * ln for sf, ln in path_sf_weighted) / max(total_sf_len, 1e-9)
+        _sf_danger_max = ROUTE_SAFETY_FACTOR_DANGEROUS_MAX
+        if avg_sf <= 1.0:
+            computed_safety_score = round(
+                max(0.0, min(100.0, 50.0 + (1.0 - avg_sf) / max(1.0 - sf_min, 1e-9) * 50.0)), 1
+            )
+        else:
+            computed_safety_score = round(
+                max(
+                    0.0, min(100.0, 50.0 - (avg_sf - 1.0) / max(_sf_danger_max - 1.0, 1e-9) * 50.0)
+                ),
+                1,
+            )
+    else:
+        computed_safety_score = 50.0
+
     return {
         "type": "FeatureCollection",
         "features": features,
@@ -1975,7 +2168,9 @@ async def _compute_weighted_route_geojson(
                 "safety_factor_min": sf_min,
                 "safety_factor_max": sf_max,
                 "safety_factor_exponent": sf_exp,
+                "user_safety_scalar": round(_scalar, 4),
             },
+            "safety_score": computed_safety_score,
         },
     }
 
@@ -2502,6 +2697,89 @@ async def calc(
                     ),
                 ],
             )
+    # Derive user safety scalar from optional per-factor weights in the request.
+    user_safety_scalar = 1.0
+    if body.preferences.safety_weights:
+        sw = body.preferences.safety_weights
+        total_w = (
+            sw.cctv_coverage
+            + sw.street_lighting
+            + sw.business_activity
+            + sw.crime_rate
+            + sw.pedestrian_traffic
+        )
+        user_safety_scalar = max(0.3, min(3.0, total_w / 5.0))
+
+    # Check walking route cache before running pgRouting.
+    _route_cache_key = _walking_route_cache_key(body.origin, body.destination, user_safety_scalar)
+    if route_geojson is None and body.preferences.transport_mode == "walking":
+        cached = await _get_cached_walking_route(postgisDB, _route_cache_key)
+        if cached is not None:
+            route_geojson = cached
+            logger.info("Walking route served from cache for key %s", _route_cache_key)
+            await cas_log.transition(
+                Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid), "cache": "hit"}
+            )
+
+    if route_geojson is None:
+        try:
+            route_geojson = await _compute_weighted_route_geojson(
+                request=route_request,
+                db=postgisDB,
+                algorithm=algorithm,
+                user_safety_scalar=user_safety_scalar,
+            )
+            # Store to cache for walking routes
+            if body.preferences.transport_mode == "walking" and route_geojson:
+                _computed_score = float(
+                    (route_geojson.get("properties") or {}).get("safety_score", 50.0)
+                )
+                await _store_walking_route_cache(
+                    postgisDB,
+                    _route_cache_key,
+                    body.origin,
+                    body.destination,
+                    user_safety_scalar,
+                    route_geojson,
+                    _computed_score,
+                )
+            await cas_log.transition(
+                Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid)}
+            )
+        except Exception as e:
+            logger.warning("Falling back to default route in /v1/routes/calculate: %s", e)
+
+    if route_geojson:
+        summary = (route_geojson.get("properties") or {}).get("summary") or {}
+        distance_meters = int(round(float(summary.get("distance_meters", 0))))
+        duration_seconds = int(round(float(summary.get("duration", 0))))
+        # Use real computed safety score from the route; fall back to neutral 50.
+        safety_score = float((route_geojson.get("properties") or {}).get("safety_score", 50.0))
+        opt = RouteOption(
+            route_index=0,
+            is_primary=True,
+            geometry=json.dumps(route_geojson),
+            distance_m=max(distance_meters, 0),
+            duration_s=max(duration_seconds, 0),
+            safety_score=safety_score,
+            waypoints=_extract_waypoints_from_geojson(route_geojson, body.origin, body.destination),
+        )
+    else:
+        await cas_log.transition(
+            Op.ROUTE_CALCULATE, "INIT", "ROUTE_FALLBACK", {"route_id": str(rid)}
+        )
+        opt = RouteOption(
+            route_index=0,
+            is_primary=True,
+            geometry="encoded_polyline_demo",
+            distance_m=2450,
+            duration_s=1800,
+            safety_score=87.5,
+            waypoints=[
+                Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
+                Waypoint(lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"),
+            ],
+        )
 
     ROUTES[rid] = {
         "route_id": rid,

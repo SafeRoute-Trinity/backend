@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Dict, Optional
 
 from sqlalchemy import DateTime, Integer, String, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB
@@ -64,9 +65,9 @@ class CASState(Base):
 
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
-    payload_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
 
-    detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    detail: Mapped[Optional[Dict]] = mapped_column(JSONB, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
