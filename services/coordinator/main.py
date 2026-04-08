@@ -303,7 +303,7 @@ async def _drive_prepare(
     )
     errors: list[str] = []
     all_yes = True
-    for (ok, data, err), p in zip(results, SOS_2PC_PARTICIPANTS):
+    for (ok, data, err), p in zip(results, SOS_2PC_PARTICIPANTS, strict=True):
         if not ok:
             all_yes = False
             errors.append(f"{p['name']}: {err}")
@@ -360,7 +360,7 @@ async def _drive_abort(client: httpx.AsyncClient, tx_id: uuid.UUID, reason: str)
         return_exceptions=False,
     )
     errors: list[str] = []
-    for (ok, _data, err), p in zip(results, SOS_2PC_PARTICIPANTS):
+    for (ok, _data, err), p in zip(results, SOS_2PC_PARTICIPANTS, strict=True):
         if not ok:
             errors.append(f"{p['name']}: {err}")
     return errors
