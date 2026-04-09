@@ -297,16 +297,33 @@ class DatabaseFactory:
                 echo=os.getenv("POSTGIS_ECHO", "false").lower() == "true",
             )
 
-        # Otherwise, use individual environment variables
-        # Check for SSL mode: POSTGIS_SSLMODE
-        sslmode = os.getenv("POSTGIS_SSLMODE")
+        # Otherwise, use individual environment variables.
+        # When POSTGIS_* is omitted (common in K8s), fall back to POSTGRES_* for
+        # host/port/user/password/ssl so pgRouting + transit can reach the same
+        # cluster Postgres/PostGIS without duplicating env. Database name still
+        # defaults to POSTGIS_DATABASE (typically saferoute_geo).
+        # Check for SSL mode: POSTGIS_SSLMODE, else POSTGRES_SSLMODE
+        sslmode = os.getenv("POSTGIS_SSLMODE") or os.getenv("POSTGRES_SSLMODE")
+
+        pg_host = (os.getenv("POSTGIS_HOST") or "").strip() or os.getenv(
+            "POSTGRES_HOST", "127.0.0.1"
+        )
+        pg_port_str = (os.getenv("POSTGIS_PORT") or "").strip() or os.getenv(
+            "POSTGRES_PORT", "5433"
+        )
+        pg_user = (os.getenv("POSTGIS_USER") or "").strip() or os.getenv(
+            "POSTGRES_USER", "saferoute"
+        )
+        pg_password = os.getenv("POSTGIS_PASSWORD")
+        if pg_password is None or pg_password == "":
+            pg_password = os.getenv("POSTGRES_PASSWORD", "")
 
         return DatabaseConfig(
             db_type=DatabaseType.POSTGIS,
-            host=os.getenv("POSTGIS_HOST", "127.0.0.1"),
-            port=int(os.getenv("POSTGIS_PORT", "5433")),
-            user=os.getenv("POSTGIS_USER", "saferoute"),
-            password=os.getenv("POSTGIS_PASSWORD", ""),
+            host=pg_host,
+            port=int(pg_port_str),
+            user=pg_user,
+            password=pg_password,
             database=os.getenv("POSTGIS_DATABASE", "saferoute_geo"),
             echo=os.getenv("POSTGIS_ECHO", "false").lower() == "true",
             sslmode=sslmode,

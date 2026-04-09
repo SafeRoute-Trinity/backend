@@ -2437,6 +2437,21 @@ async def get_graph_geojson_v1(
     )
 
 
+@app.get("/v1/transit/plan")
+async def transit_plan_get_help():
+    """
+    GET is not used for planning; this handler exists so clients that open the
+    URL in a browser (or misconfigure GET) receive 200 with instructions instead
+    of 404. Planning requires POST with a JSON body.
+    """
+    return {
+        "detail": "Use POST with a JSON body (TransitPlanRequest). See /docs.",
+        "method": "POST",
+        "path": "/v1/transit/plan",
+        "content_type": "application/json",
+    }
+
+
 @app.post("/v1/transit/plan", response_model=TransitPlanResponse)
 async def plan_transit(body: TransitPlanRequest, db: AsyncSession = Depends(get_postgis_db)):
     departure_time = body.departure_time or datetime.utcnow()
