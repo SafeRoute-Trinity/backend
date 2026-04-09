@@ -1,5 +1,6 @@
-# 使用官方 Python 基础镜像 (指定 linux/amd64 架构以兼容 AKS)
- FROM --platform=linux/amd64 python:3.11
+# 使用官方 Python 基础镜像
+# NOTE: Don't pin --platform here; pass it at build time (docker buildx --platform=...).
+FROM python:3.11
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1 \
