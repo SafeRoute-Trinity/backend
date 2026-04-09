@@ -3,6 +3,7 @@
 import uuid
 from datetime import datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from fastapi.testclient import TestClient
 
@@ -571,3 +572,83 @@ def test_reset_danger_zone_404_when_edge_not_found():
         assert "Edge not found" in response.json().get("detail", "")
     finally:
         _clear_overrides()
+
+
+def test_simple_risk_zones():
+    """Test simplified high-risk zones endpoint."""
+
+    async def override_get_postgis_db():
+        mock_db = AsyncMock()
+        mock_result = Mock()
+        mock_mappings = Mock()
+        mock_mappings.all.return_value = [
+            {
+                "gid": 123,
+                "safety_factor": 1.7,
+                "geojson": '{"type":"LineString","coordinates":[[1,2],[3,4]]}',
+            }
+        ]
+        mock_result.mappings.return_value = mock_mappings
+        mock_db.execute.return_value = mock_result
+        yield mock_db
+
+    app.dependency_overrides[get_postgis_db] = override_get_postgis_db
+    try:
+        response = client.get("/api/simple_risk_zones")
+    finally:
+        app.dependency_overrides.pop(get_postgis_db, None)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "zones" in data
+    assert data["zones"] == [
+        {
+            "id": 123,
+            "safety_factor": 1.7,
+            "geometry": {"type": "LineString", "coordinates": [[1, 2], [3, 4]]},
+        }
+    ]
+
+
+def test_high_risk_alert():
+    """Test high-risk alert endpoint with nearby risky road segments."""
+
+    async def override_get_postgis_db():
+        mock_db = AsyncMock()
+        mock_result = Mock()
+        mock_mappings = Mock()
+        mock_mappings.all.return_value = [
+            {
+                "gid": 321,
+                "safety_factor": 1.8,
+                "distance_m": 12.345,
+                "geojson": '{"type":"LineString","coordinates":[[10,20],[30,40]]}',
+            }
+        ]
+        mock_result.mappings.return_value = mock_mappings
+        mock_db.execute.return_value = mock_result
+        yield mock_db
+
+    app.dependency_overrides[get_postgis_db] = override_get_postgis_db
+    try:
+        response = client.post(
+            "/api/high_risk_alert",
+            json={"lat": 53.3498, "lng": -6.2603, "radius_m": 30},
+        )
+    finally:
+        app.dependency_overrides.pop(get_postgis_db, None)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["in_high_risk_area"] is True
+    assert data["threshold"] == 1.5
+    assert data["radius_m"] == 30
+    assert data["user_location"] == {"lat": 53.3498, "lng": -6.2603}
+    assert data["matches"] == [
+        {
+            "id": 321,
+            "safety_factor": 1.8,
+            "distance_m": 12.35,
+            "geometry": {"type": "LineString", "coordinates": [[10, 20], [30, 40]]},
+        }
+    ]
