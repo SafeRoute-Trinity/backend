@@ -3,6 +3,7 @@
 # Docs: http://127.0.0.1:20001/docs
 
 import asyncio
+import json
 import os
 import sys
 import traceback
@@ -34,6 +35,18 @@ from libs.fastapi_service import (
 from libs.outbox import ensure_outbox_tables
 from libs.rabbitmq import RabbitMQClient
 from libs.twilio_client import get_twilio_client
+from libs.two_pc import (
+    P_ABORTED,
+    P_COMMITTED,
+    P_PREPARED,
+    AbortRequest,
+    AbortResponse,
+    CommitRequest,
+    CommitResponse,
+    PrepareRequest,
+    PrepareResponse,
+    ensure_participant_tx_table,
+)
 from services.notification.manager import NotificationManager
 from services.notification.schemas import (
     CreateResp,
@@ -128,11 +141,21 @@ async def _handle_sos_message(payload: dict) -> None:
         logger.warning("RabbitMQ consumer: unknown message type '%s', skipping.", msg_type)
 
 
+NOTIF_PARTICIPANT_TABLE = "notif_participant_tx"
+
+
 @app.on_event("startup")
 async def _startup():
     connected = await _mq.connect()
     if connected:
         await _mq.consume(QUEUE_SOS_NOTIFICATION, _handle_sos_message)
+    # Ensure 2PC participant table exists. Best-effort.
+    try:
+        connection = db_factory.get_connection(DatabaseType.POSTGRES)
+        async with connection.session_maker() as session:
+            await ensure_participant_tx_table(session, NOTIF_PARTICIPANT_TABLE)
+    except Exception:
+        logger.exception("Failed to ensure notif_participant_tx table on startup")
 
 
 @app.on_event("shutdown")
@@ -361,6 +384,164 @@ async def test_sms(body: TestSMSRequest, db: AsyncSession = Depends(get_db)):
         except Exception:
             logger.exception("Failed to write audit for notification.test_sms_failed")
         raise HTTPException(status_code=500, detail=f"Failed to send SMS: {str(e)}")
+
+
+# ===================== 2PC Participant Endpoints =====================
+#
+# Notification is the second participant in the SOS 2PC. On commit, we
+# enqueue a dispatch message onto the existing SOS notification queue —
+# the existing consumer will then place the actual Twilio call. The 2PC
+# guarantees the *intent* is durable; the call itself remains async.
+
+
+@app.post("/v1/notifications/2pc/prepare", response_model=PrepareResponse)
+async def notif_2pc_prepare(req: PrepareRequest, db: AsyncSession = Depends(get_db)):
+    existing = (
+        await db.execute(
+            text("SELECT state FROM saferoute.notif_participant_tx WHERE tx_id = :tx_id"),
+            {"tx_id": str(req.tx_id)},
+        )
+    ).first()
+    if existing is not None:
+        state = existing[0]
+        if state in (P_PREPARED, P_COMMITTED):
+            return PrepareResponse(tx_id=req.tx_id, vote="YES")
+        return PrepareResponse(tx_id=req.tx_id, vote="NO", reason="already aborted")
+
+    # Minimal payload validation: must have phone + user_id
+    if not req.payload.get("phone") or not req.payload.get("user_id"):
+        return PrepareResponse(tx_id=req.tx_id, vote="NO", reason="missing phone or user_id")
+
+    expires_at = datetime.utcnow() + timedelta(seconds=req.expires_in_seconds)
+    try:
+        await db.execute(
+            text("""
+                INSERT INTO saferoute.notif_participant_tx
+                    (tx_id, state, payload, expires_at)
+                VALUES (:tx_id, :state, CAST(:payload AS JSONB), :expires_at)
+                """),
+            {
+                "tx_id": str(req.tx_id),
+                "state": P_PREPARED,
+                "payload": json.dumps(req.payload),
+                "expires_at": expires_at,
+            },
+        )
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.exception("notif 2pc prepare failed")
+        return PrepareResponse(tx_id=req.tx_id, vote="NO", reason=str(e))
+
+    return PrepareResponse(tx_id=req.tx_id, vote="YES")
+
+
+@app.post("/v1/notifications/2pc/commit", response_model=CommitResponse)
+async def notif_2pc_commit(req: CommitRequest, db: AsyncSession = Depends(get_db)):
+    row = (
+        await db.execute(
+            text(
+                "SELECT state, payload, result FROM saferoute.notif_participant_tx "
+                "WHERE tx_id = :tx_id FOR UPDATE"
+            ),
+            {"tx_id": str(req.tx_id)},
+        )
+    ).first()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown tx_id")
+
+    state, payload, result = row[0], row[1], row[2]
+    if state == P_COMMITTED:
+        return CommitResponse(tx_id=req.tx_id, status="committed", result=result or {})
+    if state != P_PREPARED:
+        raise HTTPException(status_code=409, detail=f"cannot commit from state {state}")
+
+    # Enqueue the actual dispatch onto the existing queue. The notification
+    # consumer (this same service) will pick it up and call Twilio. The 2PC
+    # only guarantees durable agreement to act; the side-effect is async.
+    notification_payload = {
+        "type": "call",
+        "emergency_id": str(req.tx_id),  # correlation only
+        "phone_number": payload.get("phone"),
+        "user_location": {"lat": payload.get("lat"), "lon": payload.get("lon")},
+        "call_reason": f"SOS {payload.get('trigger_type', 'manual')}",
+        "user_id": payload.get("user_id"),
+        "sos_id": str(req.tx_id),
+        "tx_id": str(req.tx_id),
+    }
+
+    published = False
+    try:
+        published = await _mq.publish(QUEUE_SOS_NOTIFICATION, notification_payload)
+    except Exception:
+        logger.exception("notif 2pc commit: MQ publish raised")
+
+    if not published:
+        # MQ down. Per the 2PC contract we cannot abort after the commit
+        # point — the coordinator's recovery loop will retry this commit.
+        raise HTTPException(status_code=503, detail="notification dispatch queue unavailable")
+
+    result_obj = {"dispatched": True, "queue": QUEUE_SOS_NOTIFICATION}
+    await db.execute(
+        text("""
+            UPDATE saferoute.notif_participant_tx
+            SET state = :state,
+                result = CAST(:result AS JSONB),
+                updated_at = NOW()
+            WHERE tx_id = :tx_id
+            """),
+        {
+            "state": P_COMMITTED,
+            "result": json.dumps(result_obj),
+            "tx_id": str(req.tx_id),
+        },
+    )
+    await db.commit()
+
+    return CommitResponse(tx_id=req.tx_id, status="committed", result=result_obj)
+
+
+@app.post("/v1/notifications/2pc/abort", response_model=AbortResponse)
+async def notif_2pc_abort(req: AbortRequest, db: AsyncSession = Depends(get_db)):
+    row = (
+        await db.execute(
+            text(
+                "SELECT state FROM saferoute.notif_participant_tx "
+                "WHERE tx_id = :tx_id FOR UPDATE"
+            ),
+            {"tx_id": str(req.tx_id)},
+        )
+    ).first()
+
+    if row is None:
+        await db.execute(
+            text("""
+                INSERT INTO saferoute.notif_participant_tx
+                    (tx_id, state, payload, expires_at)
+                VALUES (:tx_id, :state, CAST('{}' AS JSONB), NOW())
+                ON CONFLICT (tx_id) DO NOTHING
+                """),
+            {"tx_id": str(req.tx_id), "state": P_ABORTED},
+        )
+        await db.commit()
+        return AbortResponse(tx_id=req.tx_id, status="aborted")
+
+    state = row[0]
+    if state == P_COMMITTED:
+        raise HTTPException(status_code=409, detail="cannot abort an already-committed tx")
+    if state == P_ABORTED:
+        return AbortResponse(tx_id=req.tx_id, status="aborted")
+
+    await db.execute(
+        text(
+            "UPDATE saferoute.notif_participant_tx "
+            "SET state = :state, updated_at = NOW() WHERE tx_id = :tx_id"
+        ),
+        {"state": P_ABORTED, "tx_id": str(req.tx_id)},
+    )
+    await db.commit()
+    return AbortResponse(tx_id=req.tx_id, status="aborted")
 
 
 async def _claim_outbox_events(connection, limit: int) -> list[dict]:

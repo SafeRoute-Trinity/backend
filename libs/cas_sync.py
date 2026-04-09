@@ -26,6 +26,7 @@ to the event bus.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -59,7 +60,15 @@ class CASSyncSubscriber:
 
         redis_host = os.getenv("REDIS_HOST", "localhost")
         redis_port = int(os.getenv("REDIS_PORT", "6379"))
-        redis_password = os.getenv("REDIS_PASSWORD") or None
+        _raw_password = os.getenv("REDIS_PASSWORD", "")
+        if _raw_password:
+            try:
+                _decoded = base64.b64decode(_raw_password).decode("utf-8")
+                if _decoded and _decoded != _raw_password:
+                    _raw_password = _decoded
+            except Exception:
+                pass
+        redis_password = _raw_password or None
 
         try:
             self._redis = aioredis.Redis(

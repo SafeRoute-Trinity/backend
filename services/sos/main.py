@@ -2,22 +2,41 @@
 # uvicorn services.sos.main:app --host 0.0.0.0 --port 20006 --reload
 # Docs: http://127.0.0.1:20006/docs
 
+import asyncio
+import json
 import logging
 import os
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal, Optional, Union
 
 import httpx
 from dotenv import load_dotenv
 from fastapi import Depends, HTTPException, Path
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from libs.audit_logger import write_audit
 from libs.cas_logger import Op, cas_log
 from libs.db import DatabaseType, get_database_factory, initialize_databases
+from libs.two_pc import (
+    P_ABORTED,
+    P_COMMITTED,
+    P_PREPARED,
+    AbortRequest,
+    AbortResponse,
+    CommitRequest,
+    CommitResponse,
+    PrepareRequest,
+    PrepareResponse,
+    ensure_participant_tx_table,
+)
+from models.emergency import Emergency
+from models.user_models import (  # noqa: F401  (registers `saferoute.users` for FK resolution)
+    User,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -66,9 +85,20 @@ factory = FastAPIServiceFactory(service_config)
 app = factory.create_app()
 
 
+SOS_PARTICIPANT_TABLE = "sos_participant_tx"
+
+
 @app.on_event("startup")
 async def _startup():
     await _mq.connect()
+    # Ensure 2PC participant table exists. Best-effort: a missing DB at
+    # startup must not stop the service from booting (matches outbox pattern).
+    try:
+        connection = db_factory.get_connection(DatabaseType.POSTGRES)
+        async with connection.session_maker() as session:
+            await ensure_participant_tx_table(session, SOS_PARTICIPANT_TABLE)
+    except Exception:
+        logger.exception("Failed to ensure sos_participant_tx table on startup")
 
 
 @app.on_event("shutdown")
@@ -183,69 +213,57 @@ async def root():
 @app.post("/v1/emergency/call", response_model=EmergencyCallResponse)
 async def call(body: EmergencyCallRequest):
     """
-    Coordinator-backed SOS call:
-      - coordinator atomically writes Emergency + outbox event
-      - notification worker later consumes the outbox and places the call
+    SOS call via 2-Phase Commit through the coordinator service.
+
+    The coordinator orchestrates prepare/commit across the SOS and
+    notification participants. There is no direct-to-MQ fallback: the
+    durability + cross-service agreement guarantees of 2PC are part of
+    the SOS contract, so a missing coordinator must surface as a 503.
     """
     await cas_log.begin(Op.EMERGENCY_CALL, {"user_id": body.user_id})
+    await cas_log.transition(Op.EMERGENCY_CALL, "INIT", "NOTIFICATION_REQUESTED")
 
     payload = body.model_dump(mode="json")
 
-    await cas_log.transition(Op.EMERGENCY_CALL, "INIT", "NOTIFICATION_REQUESTED")
+    # Tight retries with backoff. Total worst-case ~1.4s before giving up,
+    # so a slow/dead coordinator does not wedge the SOS endpoint.
+    last_err: Optional[Exception] = None
     data: dict = {}
-    call_status = "failed"
-    emergency_id = uuid.uuid4()
-
-    notification_payload = {
-        "type": "call",
-        "emergency_id": str(emergency_id),
-        "phone_number": body.phone,
-        "user_location": {"lat": body.lat, "lon": body.lon},
-        "call_reason": f"SOS {body.trigger_type}",
-        "user_id": body.user_id,
-        "sos_id": str(emergency_id),
-    }
-
-    published = await _mq.publish(QUEUE_SOS_NOTIFICATION, notification_payload)
-
-    if published:
-        call_status = "initiated"
-        data = {"call_id": f"CALL-{emergency_id}", "status": call_status}
-        await cas_log.transition(
-            Op.EMERGENCY_CALL,
-            "NOTIFICATION_REQUESTED",
-            "NOTIFICATION_SENT",
-            {"call_status": call_status},
-        )
-    else:
-        # RabbitMQ unavailable — fall back to coordinator
+    for attempt in range(3):
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
+            async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.post(
-                    f"{COORDINATOR_SERVICE_URL}/v1/coordinator/sos/call",
+                    f"{COORDINATOR_SERVICE_URL}/v1/coordinator/sos/2pc/call",
                     json=payload,
                     headers=_trace_headers(),
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                await cas_log.transition(
-                    Op.EMERGENCY_CALL,
-                    "NOTIFICATION_REQUESTED",
-                    "NOTIFICATION_SENT",
-                    {"call_status": data.get("status", "failed")},
-                )
+                last_err = None
+                break
         except httpx.HTTPError as e:
-            await cas_log.transition(
-                Op.EMERGENCY_CALL,
-                "NOTIFICATION_REQUESTED",
-                "NOTIFICATION_FAILED",
-                {"error": str(e)},
-            )
-            logger.exception("Coordinator call failed for SOS emergency")
-            raise HTTPException(
-                status_code=503,
-                detail=f"Failed to queue SOS emergency call: {str(e)}",
-            )
+            last_err = e
+            await asyncio.sleep(0.2 * (2**attempt))
+
+    if last_err is not None:
+        await cas_log.transition(
+            Op.EMERGENCY_CALL,
+            "NOTIFICATION_REQUESTED",
+            "NOTIFICATION_FAILED",
+            {"error": str(last_err)},
+        )
+        logger.exception("2PC SOS call failed via coordinator")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to commit SOS emergency call via 2PC: {str(last_err)}",
+        )
+
+    await cas_log.transition(
+        Op.EMERGENCY_CALL,
+        "NOTIFICATION_REQUESTED",
+        "NOTIFICATION_SENT",
+        {"call_status": data.get("status", "failed")},
+    )
 
     emergency_id = data.get("emergency_id")
     call_status = data.get("status", "failed")
@@ -406,6 +424,194 @@ async def get_status(emergency_id: str = Path(..., description="SOS event to che
         },
     )
     return EmergencyStatusResponse(**s)
+
+
+# ===================== 2PC Participant Endpoints =====================
+#
+# These endpoints make the SOS service a participant in the coordinator's
+# Two-Phase Commit protocol for SOS emergency calls. They are designed to
+# be idempotent on tx_id so the coordinator's recovery loop can safely
+# replay commit/abort after a crash.
+
+
+def _row_to_state(row) -> Optional[str]:
+    return row[0] if row is not None else None
+
+
+@app.post("/v1/sos/2pc/prepare", response_model=PrepareResponse)
+async def sos_2pc_prepare(req: PrepareRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Phase 1: validate the payload and durably reserve the tx slot.
+
+    Vote YES => we have written a PREPARED row and promise to be able to
+    commit if asked. Vote NO => the coordinator must abort the whole tx.
+    """
+    # Idempotency: if we have already seen this tx_id, return the same vote.
+    existing = (
+        await db.execute(
+            text("SELECT state FROM saferoute.sos_participant_tx WHERE tx_id = :tx_id"),
+            {"tx_id": str(req.tx_id)},
+        )
+    ).first()
+    state = _row_to_state(existing)
+    if state in (P_PREPARED, P_COMMITTED):
+        return PrepareResponse(tx_id=req.tx_id, vote="YES")
+    if state == P_ABORTED:
+        return PrepareResponse(tx_id=req.tx_id, vote="NO", reason="already aborted")
+
+    # Validate the payload — invalid payload is a legitimate NO vote.
+    try:
+        EmergencyCallRequest(**req.payload)
+    except Exception as e:
+        return PrepareResponse(tx_id=req.tx_id, vote="NO", reason=f"invalid payload: {e}")
+
+    expires_at = datetime.utcnow() + timedelta(seconds=req.expires_in_seconds)
+    try:
+        await db.execute(
+            text("""
+                INSERT INTO saferoute.sos_participant_tx
+                    (tx_id, state, payload, expires_at)
+                VALUES (:tx_id, :state, CAST(:payload AS JSONB), :expires_at)
+                """),
+            {
+                "tx_id": str(req.tx_id),
+                "state": P_PREPARED,
+                "payload": json.dumps(req.payload),
+                "expires_at": expires_at,
+            },
+        )
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.exception("sos 2pc prepare failed")
+        return PrepareResponse(tx_id=req.tx_id, vote="NO", reason=str(e))
+
+    return PrepareResponse(tx_id=req.tx_id, vote="YES")
+
+
+@app.post("/v1/sos/2pc/commit", response_model=CommitResponse)
+async def sos_2pc_commit(req: CommitRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Phase 2 commit: materialize the real Emergency row and flip state.
+
+    Idempotent: a second commit on an already-COMMITTED tx returns the
+    previously-recorded emergency_id without writing again.
+    """
+    row = (
+        await db.execute(
+            text(
+                "SELECT state, payload, result FROM saferoute.sos_participant_tx "
+                "WHERE tx_id = :tx_id FOR UPDATE"
+            ),
+            {"tx_id": str(req.tx_id)},
+        )
+    ).first()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown tx_id")
+
+    state, payload, result = row[0], row[1], row[2]
+
+    if state == P_COMMITTED:
+        return CommitResponse(tx_id=req.tx_id, status="committed", result=result or {})
+    if state != P_PREPARED:
+        raise HTTPException(status_code=409, detail=f"cannot commit from state {state}")
+
+    emergency_id = uuid.uuid4()
+    try:
+        db.add(
+            Emergency(
+                emergency_id=emergency_id,
+                user_id=payload["user_id"],
+                route_id=_uuid_or_none(payload.get("route_id")),
+                lat=payload["lat"],
+                lon=payload["lon"],
+                trigger_type=payload["trigger_type"],
+                messaging_id=None,
+                message=f"SOS {payload['trigger_type']}",
+            )
+        )
+        result_obj = {
+            "emergency_id": str(emergency_id),
+            "call_id": f"CALL-{emergency_id}",
+        }
+        await db.execute(
+            text("""
+                UPDATE saferoute.sos_participant_tx
+                SET state = :state,
+                    result = CAST(:result AS JSONB),
+                    updated_at = NOW()
+                WHERE tx_id = :tx_id
+                """),
+            {
+                "state": P_COMMITTED,
+                "result": json.dumps(result_obj),
+                "tx_id": str(req.tx_id),
+            },
+        )
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        logger.exception("sos 2pc commit failed")
+        raise HTTPException(status_code=500, detail="commit failed")
+
+    SOS_CALLS_TOTAL.inc()
+    STATUS[str(emergency_id)] = {
+        "emergency_id": emergency_id,
+        "call_status": "initiated",
+        "sms_status": "not_sent",
+        "last_update": datetime.utcnow(),
+    }
+    return CommitResponse(tx_id=req.tx_id, status="committed", result=result_obj)
+
+
+@app.post("/v1/sos/2pc/abort", response_model=AbortResponse)
+async def sos_2pc_abort(req: AbortRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Phase 2 abort: drop the tentative reservation. Idempotent.
+
+    Presumed-abort: if we have never heard of this tx_id, we still return
+    OK (and write a tombstone) so the coordinator can retire it.
+    """
+    row = (
+        await db.execute(
+            text(
+                "SELECT state FROM saferoute.sos_participant_tx " "WHERE tx_id = :tx_id FOR UPDATE"
+            ),
+            {"tx_id": str(req.tx_id)},
+        )
+    ).first()
+
+    if row is None:
+        # Presumed-abort tombstone so we never accept a late prepare for this id.
+        await db.execute(
+            text("""
+                INSERT INTO saferoute.sos_participant_tx
+                    (tx_id, state, payload, expires_at)
+                VALUES (:tx_id, :state, CAST('{}' AS JSONB), NOW())
+                ON CONFLICT (tx_id) DO NOTHING
+                """),
+            {"tx_id": str(req.tx_id), "state": P_ABORTED},
+        )
+        await db.commit()
+        return AbortResponse(tx_id=req.tx_id, status="aborted")
+
+    state = row[0]
+    if state == P_COMMITTED:
+        # Cannot un-commit. This is a coordinator bug — surface it loudly.
+        raise HTTPException(status_code=409, detail="cannot abort an already-committed tx")
+    if state == P_ABORTED:
+        return AbortResponse(tx_id=req.tx_id, status="aborted")
+
+    await db.execute(
+        text(
+            "UPDATE saferoute.sos_participant_tx "
+            "SET state = :state, updated_at = NOW() WHERE tx_id = :tx_id"
+        ),
+        {"state": P_ABORTED, "tx_id": str(req.tx_id)},
+    )
+    await db.commit()
+    return AbortResponse(tx_id=req.tx_id, status="aborted")
 
 
 @app.post("/v1/test/sms", response_model=TestSMSResponse)

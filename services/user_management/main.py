@@ -44,7 +44,9 @@ from libs.fastapi_service import (
     ServiceAppConfig,
 )
 from libs.http_client import close_shared_async_clients, get_shared_async_client
-from models.user_models import Contact, TrustedContact, User, UserPreferences
+from models.emergency import Emergency
+from models.feedback import Feedback
+from models.user_models import TrustedContact, User, UserPreferences
 
 # Initialize database connections
 initialize_databases([DatabaseType.POSTGRES])
@@ -111,6 +113,30 @@ def extract_user_id_from_auth(auth: dict) -> str:
     """
     auth_sub = auth.get("sub", "")
     return auth_sub.split("|", 1)[-1] if "|" in auth_sub else auth_sub
+
+
+async def delete_user_and_related_data(db, user_id: str) -> bool:
+    """
+    Delete feedback and emergency rows for this user, then delete the users row.
+
+    Other tables (e.g. user_preferences, contacts, trusted_contacts) are not
+    deleted here; rely on DB foreign keys / CASCADE where configured.
+
+    Returns:
+        True if a row in saferoute.users was deleted, False if user_id was not found.
+    """
+    result = await db.execute(select(User).where(User.user_id == user_id))
+    if result.scalar_one_or_none() is None:
+        return False
+    try:
+        await db.execute(delete(Feedback).where(Feedback.user_id == user_id))
+        await db.execute(delete(Emergency).where(Emergency.user_id == user_id))
+        await db.execute(delete(User).where(User.user_id == user_id))
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        raise
+    return True
 
 
 def _user_advisory_lock_key(user_id: str) -> int:
@@ -201,37 +227,6 @@ class AuditLogResponse(BaseModel):
     event_id: Optional[uuid.UUID] = None
     message: str
     created_at: datetime
-    updated_at: datetime
-
-
-# ======== Contact Models ===========================
-class ContactItem(BaseModel):
-    name: str
-    phone: str
-    relationship: Optional[str] = None
-    is_primary: Optional[bool] = False
-
-
-class ContactsSetRequest(BaseModel):
-    contacts: List[ContactItem]
-
-
-class ContactDTO(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    contact_id: uuid.UUID
-    user_id: str
-    name: str
-    phone: str
-    relationship: Optional[str] = None
-    is_primary: bool
-    created_at: datetime
-    updated_at: datetime
-
-
-class ContactsSetResponse(BaseModel):
-    user_id: str
-    status: Literal["contacts_set"]
-    contacts: List[ContactDTO]
     updated_at: datetime
 
 
@@ -406,6 +401,12 @@ class TrustedContactsListPaginatedResponse(BaseModel):
     user_id: str
     data: List[TrustedContactDTO]
     pagination: PaginationMeta
+
+
+class TrustedContactsSetRequest(BaseModel):
+    """Request model for replacing the full trusted contacts list."""
+
+    contacts: List[TrustedContactUpsertRequest]
 
 
 # ========= User Management Endpoints =========
@@ -659,6 +660,45 @@ async def get_user(
     }
 
     return UserResponse(**payload)
+
+
+@app.delete(
+    "/v1/users/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    tags=["User Management"],
+    summary="Delete own account (feedback, emergency, user row)",
+)
+async def delete_user_account(
+    user_id: str,
+    auth: dict = Depends(verify_token),
+    db=Depends(get_db),
+):
+    """
+    Delete feedback and emergency for this user, then the users row.
+
+    Other related rows rely on database constraints where present.
+    Does not call Auth0 Management API.
+
+    Callers may only delete their own user_id (matches JWT subject).
+    """
+    caller_id = extract_user_id_from_auth(auth)
+    if caller_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You may only delete your own account",
+        )
+    try:
+        existed = await delete_user_and_related_data(db, user_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user: {e}",
+        ) from e
+    if not existed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found",
+        )
 
 
 # --- COMMENTED OUT: Auth0 handles registration/login ---
@@ -973,7 +1013,7 @@ async def list_trusted_contacts(
 )
 async def set_trusted_contacts(
     user_id: str,
-    body: ContactsSetRequest,
+    body: TrustedContactsSetRequest,
     db=Depends(get_db),
 ):
     """
@@ -1021,53 +1061,6 @@ async def set_trusted_contacts(
         user_id=user_id,
         status="trusted_contacts_set",
         contacts=[TrustedContactDTO.model_validate(r) for r in rows],
-        updated_at=now,
-    )
-
-
-@app.put(
-    "/v1/users/{user_id}/contacts",
-    response_model=ContactsSetResponse,
-    tags=["User Management"],
-)
-async def set_contacts(
-    user_id: str,
-    body: ContactsSetRequest,
-    db=Depends(get_db),
-):
-    now = datetime.utcnow()
-
-    # 可选：最多一个 primary
-    if sum(1 for c in body.contacts if c.is_primary) > 1:
-        raise HTTPException(status_code=400, detail="Only one contact can be primary")
-
-    # 1) delete old
-    await db.execute(delete(Contact).where(Contact.user_id == user_id))
-
-    # 2) insert new (contacts 表：contact_id/created_at/updated_at 都有默认，可不手动填)
-    rows = [
-        Contact(
-            user_id=user_id,
-            name=c.name,
-            phone=c.phone,
-            relationship=c.relationship,
-            is_primary=bool(c.is_primary),
-        )
-        for c in body.contacts
-    ]
-    db.add_all(rows)
-    await db.flush()
-
-    try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        raise HTTPException(status_code=400, detail="Could not set contacts")
-
-    return ContactsSetResponse(
-        user_id=user_id,
-        status="contacts_set",
-        contacts=[ContactDTO.model_validate(r) for r in rows],
         updated_at=now,
     )
 

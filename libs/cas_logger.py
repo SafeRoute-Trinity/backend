@@ -1,15 +1,30 @@
 """
-CAS (Compare-and-Swap) Logger for distributed consistency management.
+CAS (Compare-and-Swap) logging and state-machine validation for SafeRoute.
 
-Emits structured state-transition log entries that form a verifiable chain
-per ``trace_id``.  Each transition records the expected previous state and
-the new state, creating an auditable sequence that Azure Monitor / KQL can
-query to detect broken chains, skipped steps, or stuck operations.
+Requirements (what this module delivers)
+----------------------------------------
+- **Structured audit trail**: Every transition is one JSON log line (via the
+  root logger + ``libs.structured_logging.AzureJsonFormatter``) suitable for
+  Azure Log Analytics / KQL: ``trace_id``, ``instance_id``, ``cas_*`` fields.
+- **Replica visibility**: ``instance_id`` is added by the formatter from
+  ``POD_NAME`` / ``HOSTNAME`` (Kubernetes) or the machine hostname locally.
+- **Cross-replica ordering**: When the DB enforcer succeeds, logs include
+  ``cas_row_version`` (the ``version`` column in ``saferoute.cas_state``) so
+  you can sort events per ``trace_id`` consistently across pods.
+- **Conflicts**: Losing replica logs ``cas_conflict`` + ``[CONFLICT]`` before
+  ``CASConflictError`` propagates (HTTP 409 from the factory middleware).
 
-When an enforcer is attached (see ``libs/cas_enforcer``), every transition
-is **also** persisted atomically in PostgreSQL and broadcast to peer
-replicas via Redis pub/sub — giving true cross-replica consistency, not
-just observability.
+Tech stack alignment
+--------------------
+- **FastAPI**: Services call ``cas_log.begin`` / ``transition`` inside handlers;
+  ``trace_id`` comes from ``libs.trace_context`` (``X-Trace-ID``).
+- **PostgreSQL / PostGIS**: Persistence is optional at log time; when
+  ``CASEnforcer`` is attached (see ``libs.fastapi_service`` startup), rows
+  live in ``saferoute.cas_state``. URL resolution is in
+  ``libs.cas_enforcer.resolve_cas_database_url`` (PostGIS when ``POSTGIS_HOST``
+  or ``POSTGIS_DATABASE_URL`` is set).
+- **Redis**: Pub/sub on ``cas:state_changes`` is best-effort; enforcer still
+  runs if Redis is down (warning only).
 
 Usage::
 
@@ -19,15 +34,13 @@ Usage::
     await cas_log.transition(Op.EMERGENCY_CALL, "INIT", "EMERGENCY_CREATED",
                              detail={"emergency_id": str(eid)})
 
-KQL consistency check::
+KQL sketch::
 
     ContainerLog
     | extend p = parse_json(LogEntry)
     | where isnotempty(tostring(p.cas_operation))
     | where p.trace_id == "<id>"
-    | order by toint(p.cas_sequence) asc
-    | extend prev = prev(tostring(p.cas_new_state))
-    | where isnotempty(prev) and tostring(p.cas_expected_state) != prev
+    | order by toint(p.cas_row_version) asc, toint(p.cas_sequence) asc
 """
 
 from __future__ import annotations
@@ -164,6 +177,13 @@ def _next_seq() -> int:
     return seq
 
 
+def _norm_row_version(v: Optional[int]) -> Optional[int]:
+    """Enforcer returns 0 when skipped; omit from logs."""
+    if v is None or v <= 0:
+        return None
+    return v
+
+
 def _payload_hash(detail: Optional[Dict[str, Any]]) -> str:
     if not detail:
         return ""
@@ -183,19 +203,17 @@ def _is_valid(op: Op, expected: str, new: str) -> bool:
 
 class CASLogger:
     """
-    Async CAS state-transition logger with optional DB enforcement.
+    Async CAS state-transition logger with optional ``CASEnforcer``.
 
-    In *log-only* mode (no enforcer attached) the calls still emit structured
-    JSON via Python logging — useful for local dev and tests.  When an
-    enforcer is attached the same call also writes to ``cas_state`` in
-    PostgreSQL and publishes to Redis.
+    Log fields on the ``LogRecord`` must stay in sync with
+    ``libs.structured_logging.CAS_LOG_EXTRA_KEYS`` (pytest enforces the contract).
     """
 
     def __init__(self) -> None:
         self._enforcer: Optional[CASEnforcer] = None
 
-    def attach_enforcer(self, enforcer: CASEnforcer) -> None:
-        """Wire the DB-backed enforcer (call once at startup)."""
+    def attach_enforcer(self, enforcer: Optional[CASEnforcer]) -> None:
+        """Wire the DB-backed enforcer at startup, or ``None`` to detach (e.g. tests)."""
         self._enforcer = enforcer
 
     async def begin(
@@ -203,18 +221,24 @@ class CASLogger:
         operation: Op,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Reset sequence and emit the INIT marker for a new operation."""
+        """Reset sequence, persist INIT when enforcer is ready, then emit one log line."""
         _cas_sequence.set(0)
-        self._emit(operation, "NONE", "INIT", detail)
-
+        row_version: Optional[int] = None
         if self._enforcer and self._enforcer.ready:
             try:
-                await self._enforcer.begin(operation, detail)
+                row_version = await self._enforcer.begin(operation, detail)
             except Exception:
                 logger.warning(
                     "CAS enforcer begin failed (table missing or DB down?) — logging only",
                     exc_info=True,
                 )
+        self._emit(
+            operation,
+            "NONE",
+            "INIT",
+            detail,
+            cas_row_version=_norm_row_version(row_version),
+        )
 
     async def transition(
         self,
@@ -223,18 +247,41 @@ class CASLogger:
         new: str,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Log (and optionally enforce) a single state transition."""
-        self._emit(operation, expected, new, detail)
+        """Persist transition when enforcer is ready, then emit with DB row version."""
+        from libs.cas_enforcer import CASConflictError
 
-        if self._enforcer and self._enforcer.ready:
-            try:
-                await self._enforcer.transition(operation, expected, new, detail)
-            except Exception as exc:
-                # Lazy import avoids circular import (cas_enforcer imports cas_logger).
-                from libs.cas_enforcer import CASConflictError
+        enforcer = self._enforcer if self._enforcer and self._enforcer.ready else None
 
-                if isinstance(exc, CASConflictError):
+        if not _is_valid(operation, expected, new):
+            self._emit(operation, expected, new, detail)
+            if enforcer:
+                try:
+                    await enforcer.transition(operation, expected, new, detail)
+                except CASConflictError:
                     raise
+                except Exception:
+                    logger.warning(
+                        "CAS enforcer transition failed (%s -> %s) — logging only",
+                        expected,
+                        new,
+                        exc_info=True,
+                    )
+            return
+
+        row_version: Optional[int] = None
+        if enforcer:
+            try:
+                row_version = await enforcer.transition(operation, expected, new, detail)
+            except CASConflictError:
+                self._emit(
+                    operation,
+                    expected,
+                    new,
+                    detail,
+                    cas_conflict=True,
+                )
+                raise
+            except Exception:
                 logger.warning(
                     "CAS enforcer transition failed (%s -> %s) — logging only",
                     expected,
@@ -242,18 +289,29 @@ class CASLogger:
                     exc_info=True,
                 )
 
+        self._emit(
+            operation,
+            expected,
+            new,
+            detail,
+            cas_row_version=_norm_row_version(row_version),
+        )
+
     def _emit(
         self,
         operation: Op,
         expected: str,
         new: str,
         detail: Optional[Dict[str, Any]],
+        *,
+        cas_row_version: Optional[int] = None,
+        cas_conflict: bool = False,
     ) -> None:
         """Write the structured log line (always, regardless of enforcer)."""
         seq = _next_seq()
         valid = _is_valid(operation, expected, new)
 
-        extra = {
+        extra: Dict[str, Any] = {
             "cas_operation": operation.value,
             "cas_sequence": seq,
             "cas_expected_state": expected,
@@ -263,10 +321,16 @@ class CASLogger:
         }
         if detail:
             extra["cas_detail"] = detail
+        if cas_row_version is not None:
+            extra["cas_row_version"] = cas_row_version
+        if cas_conflict:
+            extra["cas_conflict"] = True
 
         msg = f"CAS {operation.value}: {expected} -> {new}"
 
-        if valid:
+        if cas_conflict:
+            logger.warning(msg + " [CONFLICT]", extra=extra)
+        elif valid:
             logger.info(msg, extra=extra)
         else:
             logger.warning(msg + " [INVALID TRANSITION]", extra=extra)
