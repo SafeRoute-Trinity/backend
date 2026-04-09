@@ -207,6 +207,17 @@ class Coordinate(BaseModel):
     lng: float = Field(..., ge=-180, le=180)
 
 
+class HighRiskAlertRequest(BaseModel):
+    lat: float = Field(..., ge=-90, le=90)
+    lng: float = Field(..., ge=-180, le=180)
+    radius_m: float = Field(
+        30.0,
+        gt=0,
+        le=500,
+        description="Search radius in meters for nearby high-risk road segments",
+    )
+
+
 class RouteRequest(BaseModel):
     start: Coordinate
     end: Coordinate
@@ -588,6 +599,9 @@ class NavigationSessionListResponse(BaseModel):
     pagination: PaginationMeta
 
 
+HIGH_RISK_SAFETY_FACTOR_THRESHOLD = 1.5
+
+
 @app.get("/")
 async def root():
     return {"service": "routing_service", "status": "running"}
@@ -643,6 +657,91 @@ async def get_danger_zones(db: AsyncSession = Depends(get_postgis_db)):
         return {"type": "FeatureCollection", "features": features}
     except Exception as e:
         logger.exception("Failed to load danger zones")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/api/simple_risk_zones")
+async def get_simple_risk_zones(db: AsyncSession = Depends(get_postgis_db)):
+    try:
+        query = text(
+            """
+            SELECT gid, safety_factor, ST_AsGeoJSON(geometry) AS geojson
+            FROM ways
+            WHERE safety_factor > :threshold
+              AND geometry IS NOT NULL
+            ORDER BY safety_factor DESC, gid
+            LIMIT 50
+            """
+        )
+        rows = (await db.execute(query, {"threshold": HIGH_RISK_SAFETY_FACTOR_THRESHOLD})).mappings().all()
+        zones = [
+            {
+                "id": row["gid"],
+                "safety_factor": row["safety_factor"],
+                "geometry": json.loads(row["geojson"]),
+            }
+            for row in rows
+        ]
+        return {"zones": zones}
+    except Exception as e:
+        logger.exception("Failed to load simple risk zones")
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.post("/api/high_risk_alert")
+async def get_high_risk_alert(
+    body: HighRiskAlertRequest,
+    db: AsyncSession = Depends(get_postgis_db),
+):
+    try:
+        query = text(
+            """
+            WITH user_point AS (
+                SELECT ST_SetSRID(ST_MakePoint(:lng, :lat), 4326) AS geom
+            )
+            SELECT
+                w.gid,
+                w.safety_factor,
+                ST_AsGeoJSON(w.geometry) AS geojson,
+                ST_Distance(w.geometry::geography, up.geom::geography) AS distance_m
+            FROM ways w
+            CROSS JOIN user_point up
+            WHERE w.geometry IS NOT NULL
+              AND w.safety_factor > :threshold
+              AND ST_DWithin(w.geometry::geography, up.geom::geography, :radius_m)
+            ORDER BY distance_m ASC, w.safety_factor DESC, w.gid
+            LIMIT 10
+            """
+        )
+        rows = (await db.execute(
+            query,
+            {
+                "lat": body.lat,
+                "lng": body.lng,
+                "radius_m": body.radius_m,
+                "threshold": HIGH_RISK_SAFETY_FACTOR_THRESHOLD,
+            },
+        )).mappings().all()
+
+        matches = [
+            {
+                "id": row["gid"],
+                "safety_factor": row["safety_factor"],
+                "distance_m": round(float(row["distance_m"]), 2),
+                "geometry": json.loads(row["geojson"]),
+            }
+            for row in rows
+        ]
+
+        return {
+            "in_high_risk_area": len(matches) > 0,
+            "threshold": HIGH_RISK_SAFETY_FACTOR_THRESHOLD,
+            "radius_m": body.radius_m,
+            "user_location": {"lat": body.lat, "lng": body.lng},
+            "matches": matches,
+        }
+    except Exception as e:
+        logger.exception("Failed to evaluate high-risk alert")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
