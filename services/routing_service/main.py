@@ -2298,17 +2298,19 @@ async def get_danger_zones(
 @app.get("/api/simple_risk_zones")
 async def get_simple_risk_zones(db: AsyncSession = Depends(get_postgis_db)):
     try:
-        query = text(
-            """
+        query = text("""
             SELECT gid, safety_factor, ST_AsGeoJSON(geometry) AS geojson
             FROM ways
             WHERE safety_factor > :threshold
               AND geometry IS NOT NULL
             ORDER BY safety_factor DESC, gid
             LIMIT 50
-            """
+            """)
+        rows = (
+            (await db.execute(query, {"threshold": HIGH_RISK_SAFETY_FACTOR_THRESHOLD}))
+            .mappings()
+            .all()
         )
-        rows = (await db.execute(query, {"threshold": HIGH_RISK_SAFETY_FACTOR_THRESHOLD})).mappings().all()
         zones = [
             {
                 "id": row["gid"],
@@ -2329,8 +2331,7 @@ async def get_high_risk_alert(
     db: AsyncSession = Depends(get_postgis_db),
 ):
     try:
-        query = text(
-            """
+        query = text("""
             WITH user_point AS (
                 SELECT ST_SetSRID(ST_MakePoint(:lng, :lat), 4326) AS geom
             )
@@ -2346,17 +2347,22 @@ async def get_high_risk_alert(
               AND ST_DWithin(w.geometry::geography, up.geom::geography, :radius_m)
             ORDER BY distance_m ASC, w.safety_factor DESC, w.gid
             LIMIT 10
-            """
+            """)
+        rows = (
+            (
+                await db.execute(
+                    query,
+                    {
+                        "lat": body.lat,
+                        "lng": body.lng,
+                        "radius_m": body.radius_m,
+                        "threshold": HIGH_RISK_SAFETY_FACTOR_THRESHOLD,
+                    },
+                )
+            )
+            .mappings()
+            .all()
         )
-        rows = (await db.execute(
-            query,
-            {
-                "lat": body.lat,
-                "lng": body.lng,
-                "radius_m": body.radius_m,
-                "threshold": HIGH_RISK_SAFETY_FACTOR_THRESHOLD,
-            },
-        )).mappings().all()
 
         matches = [
             {
