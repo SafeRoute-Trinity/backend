@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from contextvars import ContextVar
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, Optional, Set
@@ -58,6 +59,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger("cas")
 
 _cas_sequence: ContextVar[int] = ContextVar("cas_sequence", default=0)
+
+# Some operations are safe to execute concurrently across replicas. For these,
+# CAS conflicts are treated as non-fatal (observability still records the conflict
+# from the enforcer), preventing spurious HTTP 409s for idempotent flows.
+#
+# Configure with CAS_NONFATAL_CONFLICT_OPS="route_calculate,..." (operation values).
+_CAS_NONFATAL_CONFLICT_OPS: Set[str] = {
+    op.strip()
+    for op in os.getenv("CAS_NONFATAL_CONFLICT_OPS", "route_calculate").split(",")
+    if op.strip()
+}
 
 
 class Op(str, Enum):
@@ -253,11 +265,29 @@ class CASLogger:
         enforcer = self._enforcer if self._enforcer and self._enforcer.ready else None
 
         if not _is_valid(operation, expected, new):
+            # Always log invalid transitions for observability, but still attempt to
+            # enforce them when the enforcer is available so replica races are visible.
             self._emit(operation, expected, new, detail)
             if enforcer:
                 try:
                     await enforcer.transition(operation, expected, new, detail)
                 except CASConflictError:
+                    self._emit(
+                        operation,
+                        expected,
+                        new,
+                        detail,
+                        cas_conflict=True,
+                    )
+                    if operation.value in _CAS_NONFATAL_CONFLICT_OPS:
+                        logger.warning(
+                            "CAS conflict ignored for op=%s (expected %s -> %s)",
+                            operation.value,
+                            expected,
+                            new,
+                            exc_info=True,
+                        )
+                        return
                     raise
                 except Exception:
                     logger.warning(
@@ -280,6 +310,15 @@ class CASLogger:
                     detail,
                     cas_conflict=True,
                 )
+                if operation.value in _CAS_NONFATAL_CONFLICT_OPS:
+                    logger.warning(
+                        "CAS conflict ignored for op=%s (expected %s -> %s)",
+                        operation.value,
+                        expected,
+                        new,
+                        exc_info=True,
+                    )
+                    return
                 raise
             except Exception:
                 logger.warning(
