@@ -22,6 +22,7 @@ pytestmark = pytest.mark.unit
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _creds(token: str) -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
@@ -58,6 +59,7 @@ def _mock_userinfo_raises(exc):
 # Happy path
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_verify_valid_token_returns_payload():
     """A 200 from /userinfo returns the claims dict."""
@@ -88,6 +90,7 @@ async def test_verify_valid_token_is_cached():
 # ---------------------------------------------------------------------------
 # 401 cases
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_verify_invalid_token_returns_401():
@@ -134,6 +137,7 @@ async def test_verify_missing_sub_returns_401():
 # ---------------------------------------------------------------------------
 # Network error cases
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_verify_timeout_returns_401():

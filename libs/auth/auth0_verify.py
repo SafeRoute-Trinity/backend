@@ -54,6 +54,7 @@ def _cache_set(token: str, payload: dict) -> None:
 # verify_token dependency
 # ---------------------------------------------------------------------------
 
+
 async def verify_token(
     credentials=Depends(security),
 ) -> dict:
