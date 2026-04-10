@@ -35,12 +35,10 @@ from fastapi.security import HTTPBearer
 from jwt import ExpiredSignatureError, InvalidTokenError
 from jwt.algorithms import RSAAlgorithm
 
-from common.constants import API_AUDIENCE, AUTH0_DOMAIN
+from common.constants import API_AUDIENCE, AUTH0_CLIENT_ID, AUTH0_DOMAIN
 
 # Security scheme
 security = HTTPBearer()
-
-AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "ZHAiPyzoAyaaiKM0do7J05YNUrLgXFcG")
 
 # ---------------------------------------------------------------------------
 # Per-issuer JWKS cache — keys rotate rarely so cache for 1 hour per issuer
@@ -292,9 +290,16 @@ async def verify_token(
             detail="Token has expired",
         ) from e
     except InvalidTokenError as e:
+        msg = str(e)
+        hint = ""
+        if "audience" in msg.lower():
+            hint = (
+                " Ensure AUTH0_CLIENT_ID matches your mobile/web Auth0 Application "
+                "client ID (id_token `aud`), or add values via AUTH0_ADDITIONAL_AUDIENCES."
+            )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {e}",
+            detail=f"Invalid token: {e}{hint}",
         ) from e
 
     if not payload.get("sub"):
