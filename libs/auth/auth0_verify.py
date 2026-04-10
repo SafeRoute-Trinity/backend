@@ -94,6 +94,12 @@ def _allowed_audiences() -> list[str]:
             auds.append(stripped)
         elif not API_AUDIENCE.endswith("/"):
             auds.append(API_AUDIENCE + "/")
+    # ROPG / native login without a custom API audience: access_token JWTs are often
+    # minted for Auth0's OIDC userinfo endpoint (mobile client uses id_token || access_token).
+    if AUTH0_DOMAIN:
+        userinfo_root = f"{_canonical_issuer(f'https://{AUTH0_DOMAIN}')}/userinfo"
+        auds.append(userinfo_root)
+        auds.append(userinfo_root + "/")
     for part in os.getenv("AUTH0_ADDITIONAL_AUDIENCES", "").split(","):
         part = part.strip()
         if part:
