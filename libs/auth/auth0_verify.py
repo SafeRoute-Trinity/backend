@@ -45,6 +45,11 @@ _CACHE_TTL = int(os.getenv("AUTH0_TOKEN_CACHE_TTL", "300"))  # 5 minutes default
 _cache: dict[str, tuple[dict, float]] = {}  # token -> (payload, expiry_ts)
 _cache_lock = threading.Lock()
 
+# JWKS cache — keys rotate rarely so cache for 1 hour
+_jwks_cache: dict | None = None
+_jwks_fetched_at: float = 0.0
+_JWKS_CACHE_TTL = 3600
+
 
 def _cache_get(token: str) -> dict | None:
     with _cache_lock:
@@ -59,6 +64,24 @@ def _cache_get(token: str) -> dict | None:
 def _cache_set(token: str, payload: dict) -> None:
     with _cache_lock:
         _cache[token] = (payload, time.monotonic() + _CACHE_TTL)
+
+
+async def _get_jwks() -> dict:
+    """Fetch JWKS from Auth0, with a 1-hour in-process cache."""
+    global _jwks_cache, _jwks_fetched_at
+    now = time.monotonic()
+    if _jwks_cache and (now - _jwks_fetched_at) < _JWKS_CACHE_TTL:
+        return _jwks_cache
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        resp = await client.get(JWKS_URL)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Failed to fetch Auth0 JWKS: {resp.status_code}",
+        )
+    _jwks_cache = resp.json()
+    _jwks_fetched_at = now
+    return _jwks_cache
 
 
 # ---------------------------------------------------------------------------
