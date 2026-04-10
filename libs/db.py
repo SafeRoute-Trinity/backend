@@ -271,25 +271,37 @@ class DatabaseFactory:
             sslmode=sslmode,
         )
 
+    @staticmethod
+    def _normalize_postgis_async_url(database_url: str) -> str:
+        """Convert common Postgres URL schemes to SQLAlchemy asyncpg form."""
+        if database_url.startswith("postgresql+psycopg2://"):
+            database_url = database_url.replace(
+                "postgresql+psycopg2://", "postgresql+asyncpg://", 1
+            )
+        elif database_url.startswith("postgresql://"):
+            database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif database_url.startswith("postgres://"):
+            database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+        return database_url
+
     def _create_postgis_config(self) -> DatabaseConfig:
         """
         Create PostGIS database configuration from environment variables.
 
         Priority:
         1. POSTGIS_DATABASE_URL (if set, used directly)
-        2. Individual environment variables (POSTGIS_HOST, etc.) + SSL mode
+        2. GEO_DATABASE_URL (legacy / docker-compose alias; same as above)
+        3. Individual environment variables (POSTGIS_HOST, etc.) + SSL mode
 
         Returns:
             DatabaseConfig for PostGIS
         """
         # Check for full database URL first (highest priority)
-        database_url = os.getenv("POSTGIS_DATABASE_URL")
+        database_url = (
+            os.getenv("POSTGIS_DATABASE_URL") or os.getenv("GEO_DATABASE_URL") or ""
+        ).strip()
         if database_url:
-            # Convert postgresql:// to postgresql+asyncpg:// if needed
-            if database_url.startswith("postgresql://"):
-                database_url = database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-            elif database_url.startswith("postgres://"):
-                database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+            database_url = self._normalize_postgis_async_url(database_url)
 
             return DatabaseConfig(
                 db_type=DatabaseType.POSTGIS,
