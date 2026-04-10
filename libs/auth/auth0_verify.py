@@ -132,9 +132,11 @@ async def _get_signing_key(token: str):
         key_data = _find_key(jwks, kid)
 
     if key_data is None:
+        available = [k.get("kid") for k in jwks.get("keys", [])]
+        print(f"[Auth0] kid={kid} not in JWKS. Available kids: {available}. JWKS URL: {JWKS_URL}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Token verification failed: no matching signing key for kid={kid}",
+            detail=f"Token verification failed: no signing key for kid={kid} (available: {available})",
         )
 
     return RSAAlgorithm.from_jwk(key_data)
