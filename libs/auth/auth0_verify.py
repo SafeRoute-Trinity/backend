@@ -96,9 +96,15 @@ async def verify_token(
         ) from e
 
     if resp.status_code == 401:
+        try:
+            body = resp.json()
+            auth0_error = f"{body.get('error', '')} {body.get('error_description', '')}".strip()
+        except Exception:
+            auth0_error = resp.text[:200]
+        print(f"[Auth0] /userinfo returned 401: {auth0_error}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
+            detail=f"Invalid or expired token: {auth0_error}",
         )
 
     if resp.status_code != 200:
