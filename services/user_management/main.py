@@ -682,13 +682,15 @@ async def delete_user_account(
     Callers may only delete their own user_id (matches JWT subject).
     """
     caller_id = extract_user_id_from_auth(auth)
-    if caller_id != user_id:
+    # Strip auth0| prefix from URL parameter to match the stripped JWT sub and DB storage format
+    stripped_user_id = user_id.split("|", 1)[-1] if "|" in user_id else user_id
+    if caller_id != stripped_user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You may only delete your own account",
         )
     try:
-        existed = await delete_user_and_related_data(db, user_id)
+        existed = await delete_user_and_related_data(db, stripped_user_id)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
