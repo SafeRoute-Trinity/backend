@@ -7,13 +7,14 @@ Tests mock _jwks_client.get_signing_key_from_jwt and pyjwt.decode.
 These are UNIT tests — they do not hit real Auth0 endpoints.
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from fastapi import HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 from jwt import ExpiredSignatureError, InvalidTokenError
 
-from libs.auth.auth0_verify import verify_token, _cache, _cache_lock
+from libs.auth.auth0_verify import _cache, _cache_lock, verify_token
 
 pytestmark = pytest.mark.unit
 
