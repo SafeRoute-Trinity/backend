@@ -2783,7 +2783,17 @@ async def calc(
                         algorithm=algorithm,
                     )
             except Exception as e:
-                logger.warning("Falling back to default route in /v1/routes/calculate: %s", e)
+                logger.error(
+                    "pgRouting weighted route failed in /v1/routes/calculate: %s",
+                    e,
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Route calculation failed: {e}. "
+                    "Check that the 'ways' table exists, is populated with road data, "
+                    "and pgRouting is installed on the PostGIS database.",
+                ) from e
 
         if route_geojson:
             summary = (route_geojson.get("properties") or {}).get("summary") or {}
@@ -2802,21 +2812,6 @@ async def calc(
                 ),
             )
             await _store_route_option_cache(cache_key, opt)
-        else:
-            opt = RouteOption(
-                route_index=0,
-                is_primary=True,
-                geometry="encoded_polyline_demo",
-                distance_m=2450,
-                duration_s=1800,
-                safety_score=87.5,
-                waypoints=[
-                    Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
-                    Waypoint(
-                        lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"
-                    ),
-                ],
-            )
     # Derive user safety scalar from optional per-factor weights in the request.
     user_safety_scalar = 1.0
     if body.preferences.safety_weights:
@@ -2830,44 +2825,51 @@ async def calc(
         )
         user_safety_scalar = max(0.3, min(3.0, total_w / 5.0))
 
-    # Check walking route cache before running pgRouting.
+    # Check walking route cache before running pgRouting (safety-scalar pass).
     _route_cache_key = _walking_route_cache_key(body.origin, body.destination, user_safety_scalar)
     if route_geojson is None and body.preferences.transport_mode == "walking":
-        cached = await _get_cached_walking_route(postgisDB, _route_cache_key)
-        if cached is not None:
-            route_geojson = cached
-            logger.info("Walking route served from cache for key %s", _route_cache_key)
-            await cas_log.transition(
-                Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid), "cache": "hit"}
-            )
+        try:
+            postgis_connection2 = db_factory.get_connection(DatabaseType.POSTGIS)
+            async with postgis_connection2.session_maker() as postgisDB2:
+                cached = await _get_cached_walking_route(postgisDB2, _route_cache_key)
+                if cached is not None:
+                    route_geojson = cached
+                    logger.info("Walking route served from cache for key %s", _route_cache_key)
+                    await cas_log.transition(
+                        Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid), "cache": "hit"}
+                    )
+        except Exception as e:
+            logger.warning("Walking route cache lookup failed (non-fatal): %s", e)
 
     if route_geojson is None:
         try:
-            route_geojson = await _compute_weighted_route_geojson(
-                request=route_request,
-                db=postgisDB,
-                algorithm=algorithm,
-                user_safety_scalar=user_safety_scalar,
-            )
-            # Store to cache for walking routes
-            if body.preferences.transport_mode == "walking" and route_geojson:
-                _computed_score = float(
-                    (route_geojson.get("properties") or {}).get("safety_score", 50.0)
+            postgis_connection3 = db_factory.get_connection(DatabaseType.POSTGIS)
+            async with postgis_connection3.session_maker() as postgisDB3:
+                route_geojson = await _compute_weighted_route_geojson(
+                    request=route_request,
+                    db=postgisDB3,
+                    algorithm=algorithm,
+                    user_safety_scalar=user_safety_scalar,
                 )
-                await _store_walking_route_cache(
-                    postgisDB,
-                    _route_cache_key,
-                    body.origin,
-                    body.destination,
-                    user_safety_scalar,
-                    route_geojson,
-                    _computed_score,
-                )
+                # Store to cache for walking routes
+                if body.preferences.transport_mode == "walking" and route_geojson:
+                    _computed_score = float(
+                        (route_geojson.get("properties") or {}).get("safety_score", 50.0)
+                    )
+                    await _store_walking_route_cache(
+                        postgisDB3,
+                        _route_cache_key,
+                        body.origin,
+                        body.destination,
+                        user_safety_scalar,
+                        route_geojson,
+                        _computed_score,
+                    )
             await cas_log.transition(
                 Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid)}
             )
-        except Exception as e:
-            logger.warning("Falling back to default route in /v1/routes/calculate: %s", e)
+        except HTTPException:
+            raise
 
     if route_geojson:
         summary = (route_geojson.get("properties") or {}).get("summary") or {}
@@ -2883,22 +2885,6 @@ async def calc(
             duration_s=max(duration_seconds, 0),
             safety_score=safety_score,
             waypoints=_extract_waypoints_from_geojson(route_geojson, body.origin, body.destination),
-        )
-    else:
-        await cas_log.transition(
-            Op.ROUTE_CALCULATE, "INIT", "ROUTE_FALLBACK", {"route_id": str(rid)}
-        )
-        opt = RouteOption(
-            route_index=0,
-            is_primary=True,
-            geometry="encoded_polyline_demo",
-            distance_m=2450,
-            duration_s=1800,
-            safety_score=87.5,
-            waypoints=[
-                Waypoint(lat=body.origin.lat, lon=body.origin.lon, instruction="Start"),
-                Waypoint(lat=body.destination.lat, lon=body.destination.lon, instruction="Arrive"),
-            ],
         )
 
     ROUTES[rid] = {
