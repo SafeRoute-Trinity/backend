@@ -15,6 +15,7 @@ from typing import Any, Dict, Generic, List, Optional, TypeVar
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from fastapi.security import HTTPAuthorizationCredentials
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -911,9 +912,8 @@ async def submit_system_feedback(body: SystemFeedbackSubmitRequest, request: Req
     if auth_header.startswith("Bearer "):
         try:
             token = auth_header.split(" ", 1)[1]
-            payload = verify_token(
-                type("Creds", (), {"credentials": token})()
-            )
+            creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+            payload = await verify_token(credentials=creds)
             user_id = payload.get("sub", user_id)
             user_email = payload.get("email", user_email)
         except Exception:
