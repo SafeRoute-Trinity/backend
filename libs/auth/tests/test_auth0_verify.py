@@ -49,7 +49,10 @@ async def test_verify_valid_token_returns_payload():
     _clear_cache()
     decoded = {"sub": "auth0|abc123", "email": "u@example.com"}
 
-    with patch("libs.auth.auth0_verify._jwks_client.get_signing_key_from_jwt", return_value=_mock_signing_key()):
+    with patch(
+        "libs.auth.auth0_verify._jwks_client.get_signing_key_from_jwt",
+        return_value=_mock_signing_key(),
+    ):
         with patch("libs.auth.auth0_verify.pyjwt.decode", return_value=decoded):
             payload = await verify_token(credentials=_creds("valid.jwt.token"))
 
@@ -83,7 +86,10 @@ async def test_verify_invalid_token_returns_401():
     """An invalid JWT raises 401."""
     _clear_cache()
 
-    with patch("libs.auth.auth0_verify._jwks_client.get_signing_key_from_jwt", return_value=_mock_signing_key()):
+    with patch(
+        "libs.auth.auth0_verify._jwks_client.get_signing_key_from_jwt",
+        return_value=_mock_signing_key(),
+    ):
         with patch(
             "libs.auth.auth0_verify.pyjwt.decode",
             side_effect=InvalidTokenError("Signature verification failed"),
@@ -100,7 +106,10 @@ async def test_verify_expired_token_returns_401():
     """An expired JWT raises 401."""
     _clear_cache()
 
-    with patch("libs.auth.auth0_verify._jwks_client.get_signing_key_from_jwt", return_value=_mock_signing_key()):
+    with patch(
+        "libs.auth.auth0_verify._jwks_client.get_signing_key_from_jwt",
+        return_value=_mock_signing_key(),
+    ):
         with patch(
             "libs.auth.auth0_verify.pyjwt.decode",
             side_effect=ExpiredSignatureError("Token is expired"),
@@ -118,7 +127,10 @@ async def test_verify_missing_sub_returns_401():
     _clear_cache()
     decoded = {"email": "u@example.com"}  # No sub
 
-    with patch("libs.auth.auth0_verify._jwks_client.get_signing_key_from_jwt", return_value=_mock_signing_key()):
+    with patch(
+        "libs.auth.auth0_verify._jwks_client.get_signing_key_from_jwt",
+        return_value=_mock_signing_key(),
+    ):
         with patch("libs.auth.auth0_verify.pyjwt.decode", return_value=decoded):
             with pytest.raises(HTTPException) as exc_info:
                 await verify_token(credentials=_creds("no-sub.jwt.token"))
