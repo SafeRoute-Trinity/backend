@@ -35,9 +35,6 @@ AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "ZHAiPyzoAyaaiKM0do7J05YNUrLgXFcG
 JWKS_URL = f"https://{AUTH0_DOMAIN}/.well-known/jwks.json"
 ISSUER = f"https://{AUTH0_DOMAIN}/"
 
-# PyJWT's PyJWKClient handles key caching internally (lifespan=300s by default)
-_jwks_client = PyJWKClient(JWKS_URL, cache_keys=True, lifespan=3600)
-
 # ---------------------------------------------------------------------------
 # Async JWKS cache — keys rotate rarely so cache for 1 hour
 # ---------------------------------------------------------------------------
