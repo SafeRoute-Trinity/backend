@@ -36,6 +36,13 @@ from models.audit import Audit
 # In Docker, main.py is at /app/, and libs/ and models/ are also at /app/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+
+from common.constants import AUTH0_DOMAIN
 from libs.auth.auth0_verify import verify_token
 from libs.db import DatabaseType, get_database_factory, initialize_databases
 from libs.fastapi_service import (
@@ -551,12 +558,11 @@ async def get_current_user(
 
         # Fetch profile from Auth0 /userinfo using the bearer token
         profile = {}
-        auth0_domain = os.getenv("AUTH0_DOMAIN", "saferouteapp.eu.auth0.com")
         try:
             token = request.headers.get("Authorization", "").replace("Bearer ", "")
             client = get_shared_async_client(timeout_seconds=5.0)
             resp = await client.get(
-                f"https://{auth0_domain}/userinfo",
+                f"https://{AUTH0_DOMAIN}/userinfo",
                 headers={"Authorization": f"Bearer {token}"},
             )
             if resp.status_code == 200:
