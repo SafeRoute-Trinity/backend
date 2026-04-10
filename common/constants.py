@@ -27,6 +27,31 @@ def _normalize_auth0_domain(raw: str | None) -> str:
     return d if d else default
 
 
+_DEFAULT_AUTH0_CLIENT_ID = "ZHAiPyzoAyaaiKM0do7J05YNUrLgXFcG"
+_DEFAULT_API_AUDIENCE = "https://saferouteapp.eu.auth0.com/api/v2"
+
+
+def _normalize_auth0_client_id(raw: str | None) -> str:
+    """
+    Native / SPA Auth0 application client ID (matches id_token ``aud``).
+
+    Empty AUTH0_CLIENT_ID in env (e.g. misconfigured K8s secret) makes PyJWT reject
+    all id_tokens with \"Invalid audience\" because only API_AUDIENCE was allowed.
+    """
+    if raw is None:
+        return _DEFAULT_AUTH0_CLIENT_ID
+    c = raw.strip()
+    return c if c else _DEFAULT_AUTH0_CLIENT_ID
+
+
+def _normalize_api_audience(raw: str | None) -> str:
+    """API identifier for access_tokens; empty env falls back to default."""
+    if raw is None:
+        return _DEFAULT_API_AUDIENCE
+    a = raw.strip()
+    return a if a else _DEFAULT_API_AUDIENCE
+
+
 # ========= Service Configuration =========
 # Service configuration: service_name -> (module_path, port)
 SERVICES = {
@@ -47,7 +72,8 @@ DOCS_SERVICE = ("docs.main", 8080)
 # ========= Auth Configuration =========
 # Auth0 configuration
 AUTH0_DOMAIN = _normalize_auth0_domain(os.getenv("AUTH0_DOMAIN"))
-API_AUDIENCE = os.getenv("API_AUDIENCE", "https://saferouteapp.eu.auth0.com/api/v2")
+AUTH0_CLIENT_ID = _normalize_auth0_client_id(os.getenv("AUTH0_CLIENT_ID"))
+API_AUDIENCE = _normalize_api_audience(os.getenv("API_AUDIENCE"))
 ISSUER = f"https://{AUTH0_DOMAIN}/"
 JWKS_URL = f"{ISSUER}.well-known/jwks.json"
 ALGORITHMS = ["RS256"]
