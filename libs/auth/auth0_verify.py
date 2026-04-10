@@ -133,10 +133,25 @@ async def _get_signing_key(token: str):
 
     if key_data is None:
         available = [k.get("kid") for k in jwks.get("keys", [])]
-        print(f"[Auth0] kid={kid} not in JWKS. Available kids: {available}. JWKS URL: {JWKS_URL}")
+        # Decode without verification to expose iss/aud for diagnostics
+        try:
+            unverified = pyjwt.decode(
+                token, options={"verify_signature": False, "verify_aud": False}
+            )
+            token_iss = unverified.get("iss", "?")
+            token_aud = unverified.get("aud", "?")
+        except Exception:
+            token_iss = token_aud = "decode_failed"
+        print(
+            f"[Auth0] kid={kid} not in JWKS. Available: {available}. "
+            f"Token iss={token_iss} aud={token_aud} alg={alg}"
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Token verification failed: no signing key for kid={kid} (available: {available})",
+            detail=(
+                f"Token verification failed: no signing key for kid={kid} "
+                f"(iss={token_iss}, aud={token_aud})"
+            ),
         )
 
     return RSAAlgorithm.from_jwk(key_data)
@@ -168,6 +183,7 @@ async def verify_token(
     if cached:
         return cached
 
+    print(f"[Auth0] Verifying token (first 40 chars): {token[:40]}...")
     signing_key = await _get_signing_key(token)
 
     try:
