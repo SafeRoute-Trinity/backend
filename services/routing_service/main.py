@@ -2836,7 +2836,10 @@ async def calc(
                     route_geojson = cached
                     logger.info("Walking route served from cache for key %s", _route_cache_key)
                     await cas_log.transition(
-                        Op.ROUTE_CALCULATE, "INIT", "ROUTE_COMPUTED", {"route_id": str(rid), "cache": "hit"}
+                        Op.ROUTE_CALCULATE,
+                        "INIT",
+                        "ROUTE_COMPUTED",
+                        {"route_id": str(rid), "cache": "hit"},
                     )
         except Exception as e:
             logger.warning("Walking route cache lookup failed (non-fatal): %s", e)
