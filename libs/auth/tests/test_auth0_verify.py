@@ -7,12 +7,13 @@ so tests mock jose.jwt.decode and the JWKS fetch rather than httpx /userinfo.
 These are UNIT tests — they use mocked Auth0 endpoints.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 from fastapi import HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 
-from libs.auth.auth0_verify import verify_token, _cache, _cache_lock
+from libs.auth.auth0_verify import _cache, _cache_lock, verify_token
 
 pytestmark = pytest.mark.unit
 
