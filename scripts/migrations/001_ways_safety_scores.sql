@@ -60,14 +60,4 @@ CREATE TABLE IF NOT EXISTS saferoute.user_safety_weights (
 );
 
 -- ─── Spatial indexes on external feature tables ───────────────────────────────
--- Uncomment and run once your feature tables are populated.
--- Adjust table names to match your actual schema if different.
---
--- CREATE INDEX IF NOT EXISTS idx_street_lights_geom
---     ON street_lights USING GIST (geometry);
---
--- CREATE INDEX IF NOT EXISTS idx_cctv_cameras_geom
---     ON cctv_cameras USING GIST (geometry);
---
--- CREATE INDEX IF NOT EXISTS idx_garda_stations_geom
---     ON garda_stations USING GIST (geometry);
+-- Prefer scripts/migrations/003_dcc_spatial_indexes.sql (cctv_pt, light_pt, location).

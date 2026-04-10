@@ -7,7 +7,7 @@ Tests mock _jwks_client.get_signing_key_from_jwt and pyjwt.decode.
 These are UNIT tests — they do not hit real Auth0 endpoints.
 """
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException, status
