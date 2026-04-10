@@ -142,8 +142,8 @@ def resolve_conn_params(args: argparse.Namespace) -> dict:
 # Fetch crime min/max for normalization across all stations with crime data
 CRIME_BOUNDS_SQL = """
 SELECT
-    MIN(incident_count)::float AS min_crime,
-    MAX(incident_count)::float AS max_crime
+    COALESCE(MIN(incident_count)::float, 0) AS min_crime,
+    COALESCE(MAX(incident_count)::float, 0) AS max_crime
 FROM crime_statistics
 """
 
@@ -157,8 +157,8 @@ BATCH_SCORE_SQL = """
 WITH
 crime_bounds AS (
     SELECT
-        MIN(incident_count)::float AS min_crime,
-        MAX(incident_count)::float AS max_crime
+        COALESCE(MIN(incident_count)::float, 0) AS min_crime,
+        COALESCE(MAX(incident_count)::float, 0) AS max_crime
     FROM crime_statistics
 ),
 edge_midpoints AS (
@@ -172,13 +172,14 @@ edge_midpoints AS (
 ),
 nearest_garda AS (
     -- KNN order (geometry <->) uses GiST index; multiply by ~111320 for approx metres
+    -- LEFT JOIN crime: station may be missing from crime_statistics (name mismatch / no row)
     SELECT DISTINCT ON (em.gid)
         em.gid,
-        cs.incident_count                                   AS gs_crime,
+        COALESCE(cs.incident_count, 0)::float              AS gs_crime,
         ST_Distance(em.midpoint, gs.location) * 111320.0   AS dist_m
     FROM edge_midpoints em
     CROSS JOIN garda_stations gs
-    JOIN  crime_statistics cs ON cs.station_name = gs.station_name
+    LEFT JOIN crime_statistics cs ON cs.station_name = gs.station_name
     ORDER BY em.gid, em.midpoint <-> gs.location
 ),
 cctv_counts AS (
@@ -269,10 +270,11 @@ def run(args: argparse.Namespace) -> int:
             cur.execute(CRIME_BOUNDS_SQL)
             row = cur.fetchone()
             min_crime, max_crime = row[0], row[1]
+            min_crime = float(min_crime or 0)
+            max_crime = float(max_crime or 0)
             crime_range = max_crime - min_crime
             print(
-                f"Crime bounds: min={min_crime:.0f}  max={max_crime:.0f}  "
-                f"range={crime_range:.0f}  (normalised across {41} stations)",
+                f"Crime bounds: min={min_crime:.0f}  max={max_crime:.0f}  range={crime_range:.0f}",
                 flush=True,
             )
 
