@@ -6,8 +6,11 @@ Utilities for PostGIS schema deployment and data loading.
 - apply-geo-tables: run only geo_feature_tables.sql (use after load-dump).
 - load-dump: stream a pg_dump plain SQL file (e.g. postgis_env.sql) into psql after
   stripping pg_dump 17 \\restrict lines for older clients.
-- upload: insert rows into geo feature tables from CSV or JSON (see geo_feature_tables.sql).
-- import-dcc-cctv: map Dublin DCC traffic CCTV CSV (ID,Road_1,Latitude,Longitude) into public.cctv_cameras  using columns camera_id, source_id, road, cctv_pt (updated_at defaults in DB).
+- upload: insert rows into any existing public table from CSV or JSON. Header names must
+  match PostgreSQL column names (after strip). Types are read from pg_catalog; geometry
+  columns accept WKT/EWKT; json/jsonb accept JSON text or objects; uuid[] accepts
+  Postgres array text e.g. {uuid1,uuid2}.
+- import-dcc-cctv: convenience import for DCC traffic CCTV CSV into cctv_cameras.
 
 Connection: set one of POSTGIS_DATABASE_URL, DATABASE_URL, or POSTGRES_URL (postgresql://...).
 SQLAlchemy-style URLs with +asyncpg are normalized for psql/psycopg2.
@@ -19,86 +22,29 @@ import argparse
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import psycopg2
 from psycopg2.extensions import connection as PGConnection
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-ALLOWED_UPLOAD_TABLES = frozenset(
-    {
-        "route_segment",
-        "routes",
-        "cctv_cameras",
-        "street_lights",
-        "garda_stations",
-        "crime_statistics",
-    }
-)
+# public table names: letters, digits, underscore; must start with letter or _
+_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# Columns that receive WKT/EWKT and are bound via ST_GeomFromEWKT(...)
-GEOMETRY_COLUMNS: Dict[str, Set[str]] = {
-    "route_segment": {"geom"},
-    "routes": {"origin", "destination", "full_route"},
-    "cctv_cameras": {"cctv_pt"},
-    "street_lights": {"light_pt"},
-    "garda_stations": {"location"},
-}
-
-UUID_ARRAY_COLUMNS: Dict[str, Set[str]] = {
-    "routes": {"route_segment_ids"},
-}
-
-JSON_COLUMNS: Dict[str, Set[str]] = {
-    "street_lights": {"unit_type"},
-}
-
-TABLE_COLUMNS: Dict[str, Set[str]] = {
-    "route_segment": {"route_segment_id", "name", "weight", "geom"},
-    "routes": {
-        "route_id",
-        "route_segment_ids",
-        "user_id",
-        "transport_mode",
-        "origin",
-        "destination",
-        "full_route",
-        "average_safety_score",
-        "created_at",
-        "updated_at",
-    },
-    "cctv_cameras": {"camera_id", "source_id", "road", "cctv_pt", "updated_at"},
-    "street_lights": {
-        "light_id",
-        "source_id",
-        "site_name",
-        "unit_no",
-        "unit_type",
-        "light_pt",
-        "updated_at",
-    },
-    "garda_stations": {
-        "station_id",
-        "station_name",
-        "address1",
-        "address2",
-        "address3",
-        "phone",
-        "website",
-        "location",
-    },
-    "crime_statistics": {
-        "crime_stat_id",
-        "station_name",
-        "incident_count",
-    },
-}
+def _safe_array_cast(pg_type: str) -> bool:
+    """format_type from pg_catalog; block obvious SQL injection in CAST(... AS t)."""
+    if not pg_type or pg_type.strip() != pg_type:
+        return False
+    if any(x in pg_type for x in (";", "--", "/*", "'", '"', "\n", "\x00")):
+        return False
+    return bool(re.fullmatch(r"[a-zA-Z0-9_ ()\[\],]+", pg_type))
 
 
 def normalize_db_url(raw: Optional[str]) -> Optional[str]:
@@ -217,9 +163,61 @@ def _connect(dsn: str) -> PGConnection:
     return psycopg2.connect(dsn)
 
 
-def _parse_uuid_array(value: Any) -> Optional[List[str]]:
-    if value is None or value == "":
-        return None
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def fetch_public_table_columns(cur: Any, table: str) -> Dict[str, str]:
+    """
+    column_name -> pg_catalog.format_type(atttypid, atttypmod) e.g. uuid, geometry(Point,4326), text[].
+    """
+    cur.execute(
+        """
+        SELECT a.attname AS column_name,
+               pg_catalog.format_type(a.atttypid, a.atttypmod) AS pg_type
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relname = %s
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+        ORDER BY a.attnum
+        """,
+        (table,),
+    )
+    rows = cur.fetchall()
+    if not rows:
+        raise SystemExit(f"Table public.{table} does not exist or has no columns.")
+    return {r[0]: r[1] for r in rows}
+
+
+def _binding_for_pg_type(pg_type: str) -> Tuple[str, Optional[str]]:
+    """
+    Returns (kind, optional_cast_suffix).
+    kind: geometry | jsonb | uuid_array | array_cast | scalar
+    """
+    t = pg_type.strip()
+    tl = t.lower()
+    if tl.startswith("geometry") or tl == "geometry":
+        return "geometry", None
+    if tl.startswith("geography"):
+        return "geography", None
+    if tl in ("json", "jsonb") or tl.startswith("json "):
+        return "jsonb", None
+    if "jsonb" in tl or tl.startswith("jsonb"):
+        return "jsonb", None
+    if tl.endswith("[]"):
+        inner = tl[:-2].strip()
+        if inner == "uuid":
+            return "uuid_array", None
+        if not _safe_array_cast(t):
+            raise ValueError(f"Unsupported or unsafe array type for cast: {pg_type!r}")
+        return "array_cast", t
+    return "scalar", None
+
+
+def _parse_uuid_array(value: Any) -> List[str]:
     if isinstance(value, list):
         return [str(x) for x in value]
     s = str(value).strip()
@@ -228,53 +226,66 @@ def _parse_uuid_array(value: Any) -> Optional[List[str]]:
         if not inner:
             return []
         return [p.strip().strip('"') for p in inner.split(",")]
-    raise ValueError(f"Cannot parse uuid[] from {value!r}")
+    raise ValueError(f"Expected uuid[] as {{...}} or JSON list, got {value!r}")
 
 
-def _scalar_param(table: str, column: str, raw: Any) -> Any:
-    if column in JSON_COLUMNS.get(table, set()):
-        if isinstance(raw, (dict, list)):
-            return json.dumps(raw)
-        return str(raw)
-    return raw
-
-
-def _quote_ident(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
-def upload_row(cur: Any, table: str, row: Dict[str, Any], on_conflict: str) -> None:
-    if table not in ALLOWED_UPLOAD_TABLES:
-        raise ValueError(f"Upload not allowed for table {table!r}")
-
-    allowed = TABLE_COLUMNS[table]
+def upload_row(
+    cur: Any,
+    table: str,
+    row: Dict[str, Any],
+    col_types: Dict[str, str],
+    on_conflict: str,
+ *,
+    warn_unknown: bool = True,
+) -> None:
+    """Insert one row; keys must match public.table columns (case-sensitive after strip)."""
     columns: List[str] = []
     fragments: List[str] = []
     params: List[Any] = []
+
+    unknown = [k for k in row if k.strip() and k.strip() not in col_types]
+    if unknown and warn_unknown:
+        print(
+            f"Warning: skipping unknown columns not in public.{table}: {unknown}",
+            file=sys.stderr,
+        )
 
     for key in sorted(row.keys()):
         raw = row[key]
         if raw is None or str(raw).strip() == "":
             continue
         col = key.strip()
-        if col not in allowed:
-            raise ValueError(f"Column {col!r} is not allowed for table {table!r}")
+        if col not in col_types:
+            continue
 
-        if col in UUID_ARRAY_COLUMNS.get(table, set()):
-            arr = _parse_uuid_array(raw)
-            if arr is None:
-                continue
-            columns.append(col)
-            fragments.append("%s::uuid[]")
-            params.append("{" + ",".join(arr) + "}")
-        elif col in GEOMETRY_COLUMNS.get(table, set()):
+        pg_type = col_types[col]
+        kind, cast_type = _binding_for_pg_type(pg_type)
+
+        if kind == "geometry":
             columns.append(col)
             fragments.append("ST_GeomFromEWKT(%s)")
             params.append(str(raw))
-        elif col in JSON_COLUMNS.get(table, set()):
+        elif kind == "geography":
+            columns.append(col)
+            fragments.append("ST_GeogFromEWKT(%s)")
+            params.append(str(raw))
+        elif kind == "jsonb":
             columns.append(col)
             fragments.append("%s::jsonb")
-            params.append(_scalar_param(table, col, raw))
+            if isinstance(raw, (dict, list)):
+                params.append(json.dumps(raw))
+            else:
+                params.append(str(raw))
+        elif kind == "uuid_array":
+            arr = _parse_uuid_array(raw)
+            columns.append(col)
+            fragments.append("%s::uuid[]")
+            params.append("{" + ",".join(arr) + "}")
+        elif kind == "array_cast":
+            assert cast_type is not None
+            columns.append(col)
+            fragments.append("CAST(%s AS " + cast_type + ")")
+            params.append(str(raw))
         else:
             columns.append(col)
             fragments.append("%s")
@@ -315,18 +326,23 @@ def cmd_upload(
     path: Path,
     fmt: str,
     on_conflict: str,
+    encoding: str,
+    *,
+    strict_columns: bool,
 ) -> None:
-    if table not in ALLOWED_UPLOAD_TABLES:
-        raise SystemExit(f"Table must be one of: {', '.join(sorted(ALLOWED_UPLOAD_TABLES))}")
+    if not _TABLE_NAME_RE.match(table):
+        raise SystemExit(
+            f"Invalid table name {table!r}; use a single identifier [A-Za-z_][A-Za-z0-9_]*."
+        )
 
     rows: List[Dict[str, Any]]
     if fmt == "json":
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding=encoding))
         if not isinstance(data, list):
             raise SystemExit("JSON upload file must be an array of objects.")
         rows = [r for r in data if isinstance(r, dict)]
     elif fmt == "csv":
-        with path.open(newline="", encoding="utf-8") as fh:
+        with path.open(newline="", encoding=encoding) as fh:
             reader = csv.DictReader(fh)
             if not reader.fieldnames:
                 raise SystemExit("CSV has no header row.")
@@ -338,14 +354,35 @@ def cmd_upload(
     try:
         with conn:
             with conn.cursor() as cur:
+                col_types = fetch_public_table_columns(cur, table)
+                all_keys: set[str] = set()
+                for r in rows:
+                    all_keys |= {k.strip() for k in r if k and k.strip()}
+                unknown = sorted(all_keys - set(col_types))
+                if unknown:
+                    if strict_columns:
+                        raise SystemExit(
+                            f"Strict mode: columns not in public.{table}: {unknown}. "
+                            f"Table has: {sorted(col_types)}"
+                        )
+                    print(
+                        f"Warning: skipping columns not in public.{table}: {unknown}",
+                        file=sys.stderr,
+                    )
                 for row in rows:
-                    upload_row(cur, table, row, on_conflict)
+                    upload_row(
+                        cur,
+                        table,
+                        row,
+                        col_types,
+                        on_conflict,
+                        warn_unknown=False,
+                    )
     finally:
         conn.close()
     print(f"Uploaded {len(rows)} row(s) into public.{table}.", file=sys.stderr)
 
 
-# Stable UUID for all rows from the DCC traffic CCTV dataset (data lineage).
 _DCC_TRAFFIC_CCTV_SOURCE_UUID = uuid.uuid5(
     uuid.NAMESPACE_DNS,
     "saferoute.source.dcc_trafficcctv",
@@ -353,10 +390,7 @@ _DCC_TRAFFIC_CCTV_SOURCE_UUID = uuid.uuid5(
 
 
 def cmd_import_dcc_traffic_cctv(dsn: str, path: Path, on_conflict: str) -> None:
-    """
-    Import Dublin City Council-style export: ID, Road_1, Latitude, Longitude
-    -> public.cctv_cameras (camera_id, source_id, road, cctv_pt).
-    """
+    """DCC CSV ID,Road_1,Latitude,Longitude -> public.cctv_cameras."""
     if not path.is_file():
         raise SystemExit(f"CSV not found: {path}")
 
@@ -366,6 +400,7 @@ def cmd_import_dcc_traffic_cctv(dsn: str, path: Path, on_conflict: str) -> None:
     try:
         with conn:
             with conn.cursor() as cur:
+                col_types = fetch_public_table_columns(cur, "cctv_cameras")
                 with path.open(newline="", encoding="utf-8-sig") as fh:
                     reader = csv.DictReader(fh)
                     if not reader.fieldnames:
@@ -399,7 +434,9 @@ def cmd_import_dcc_traffic_cctv(dsn: str, path: Path, on_conflict: str) -> None:
                                 "road": road,
                                 "cctv_pt": ewkt,
                             },
+                            col_types,
                             on_conflict,
+                            warn_unknown=False,
                         )
                         n += 1
     finally:
@@ -439,23 +476,34 @@ def build_parser() -> argparse.ArgumentParser:
 
     s3 = sub.add_parser(
         "upload",
-        help="Insert into public geo tables from CSV or JSON.",
+        help="Insert into any public table from CSV or JSON (headers = column names).",
     )
     s3.add_argument(
         "table",
-        choices=sorted(ALLOWED_UPLOAD_TABLES),
+        help="Destination table name in schema public (e.g. cctv_cameras).",
     )
     s3.add_argument("file", type=Path)
     s3.add_argument(
         "--format",
         choices=("csv", "json"),
-        required=True,
+        default="csv",
+        help="Default csv.",
+    )
+    s3.add_argument(
+        "--encoding",
+        default="utf-8-sig",
+        help="Text encoding for CSV/JSON (default utf-8-sig for Excel-friendly CSV).",
+    )
+    s3.add_argument(
+        "--strict-columns",
+        action="store_true",
+        help="Fail if the file has columns that are not in the table (default: warn and skip).",
     )
     s3.add_argument(
         "--on-conflict",
         choices=("error", "nothing"),
         default="error",
-        help="nothing = ON CONFLICT DO NOTHING (requires unique/PK conflict).",
+        help="nothing = ON CONFLICT DO NOTHING (PK/unique violation).",
     )
 
     s4 = sub.add_parser(
@@ -484,10 +532,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     elif args.command == "load-dump":
         cmd_load_dump(dsn, args.dump_file)
     elif args.command == "upload":
-        if args.on_conflict == "nothing":
-            cmd_upload(dsn, args.table, args.file, args.format, "nothing")
-        else:
-            cmd_upload(dsn, args.table, args.file, args.format, "error")
+        mode = "nothing" if args.on_conflict == "nothing" else "error"
+        cmd_upload(
+            dsn,
+            args.table,
+            args.file,
+            args.format,
+            mode,
+            args.encoding,
+            strict_columns=args.strict_columns,
+        )
     elif args.command == "import-dcc-cctv":
         mode = "nothing" if args.on_conflict == "nothing" else "error"
         cmd_import_dcc_traffic_cctv(dsn, args.file, mode)
