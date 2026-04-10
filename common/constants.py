@@ -6,6 +6,27 @@ This module contains all shared constants used across the application.
 
 import os
 
+
+def _normalize_auth0_domain(raw: str | None) -> str:
+    """
+    Host-only Auth0 domain (e.g. saferouteapp.eu.auth0.com).
+
+    os.getenv("AUTH0_DOMAIN", "default") does not apply when the variable is set
+    but empty (common in K8s/Compose), which previously broke JWT issuer trust.
+    """
+    default = "saferouteapp.eu.auth0.com"
+    if raw is None:
+        return default
+    d = raw.strip().lower()
+    if not d:
+        return default
+    for prefix in ("https://", "http://"):
+        if d.startswith(prefix):
+            d = d[len(prefix) :]
+    d = d.split("/")[0].rstrip(".")
+    return d if d else default
+
+
 # ========= Service Configuration =========
 # Service configuration: service_name -> (module_path, port)
 SERVICES = {
@@ -25,7 +46,7 @@ DOCS_SERVICE = ("docs.main", 8080)
 
 # ========= Auth Configuration =========
 # Auth0 configuration
-AUTH0_DOMAIN = os.getenv("AUTH0_DOMAIN", "saferouteapp.eu.auth0.com")
+AUTH0_DOMAIN = _normalize_auth0_domain(os.getenv("AUTH0_DOMAIN"))
 API_AUDIENCE = os.getenv("API_AUDIENCE", "https://saferouteapp.eu.auth0.com/api/v2")
 ISSUER = f"https://{AUTH0_DOMAIN}/"
 JWKS_URL = f"{ISSUER}.well-known/jwks.json"

@@ -11,6 +11,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - PORT=80
+      - AUTH0_DOMAIN=saferouteapp.eu.auth0.com
+      - AUTH0_CLIENT_ID=ZHAiPyzoAyaaiKM0do7J05YNUrLgXFcG
     restart: unless-stopped
 
   notification-service:
