@@ -1,15 +1,20 @@
 """
 Auth0 verification module for FastAPI.
 
-Verifies tokens by calling Auth0's /userinfo endpoint (token introspection).
-This approach works with both opaque tokens and JWTs regardless of audience,
-which is required because the mobile app uses the password grant without a
-custom API audience.
+Verifies ID tokens via Auth0's JWKS endpoint (RS256 local verification).
+The mobile app uses the Resource Owner Password Grant which, when the Auth0
+application has a Default Audience set to the Management API, returns an
+opaque access token that cannot be used with /userinfo. The id_token is
+always a verifiable RS256 JWT regardless of audience configuration, so we
+use that for backend authentication.
+
+The frontend must send the id_token as the Bearer token.
 
 Use verify_token as a FastAPI dependency to protect routes.
 
 Environment variables:
     AUTH0_DOMAIN: Auth0 domain (e.g., saferouteapp.eu.auth0.com)
+    AUTH0_CLIENT_ID: Auth0 application client ID
 """
 
 import os
@@ -19,20 +24,28 @@ import time
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPBearer
+from jose import JWTError, jwt
 
 from common.constants import AUTH0_DOMAIN
 
 # Security scheme
 security = HTTPBearer()
 
+AUTH0_CLIENT_ID = os.getenv("AUTH0_CLIENT_ID", "ZHAiPyzoAyaaiKM0do7J05YNUrLgXFcG")
+JWKS_URL = f"https://{AUTH0_DOMAIN}/.well-known/jwks.json"
+ISSUER = f"https://{AUTH0_DOMAIN}/"
+
 # ---------------------------------------------------------------------------
 # Simple in-process token cache
-# Avoids a /userinfo round-trip on every request for the same token.
-# Entries expire after CACHE_TTL seconds.
 # ---------------------------------------------------------------------------
 _CACHE_TTL = int(os.getenv("AUTH0_TOKEN_CACHE_TTL", "300"))  # 5 minutes default
 _cache: dict[str, tuple[dict, float]] = {}  # token -> (payload, expiry_ts)
 _cache_lock = threading.Lock()
+
+# JWKS cache — keys rotate rarely so cache for 1 hour
+_jwks_cache: dict | None = None
+_jwks_fetched_at: float = 0.0
+_JWKS_CACHE_TTL = 3600
 
 
 def _cache_get(token: str) -> dict | None:
@@ -50,6 +63,24 @@ def _cache_set(token: str, payload: dict) -> None:
         _cache[token] = (payload, time.monotonic() + _CACHE_TTL)
 
 
+async def _get_jwks() -> dict:
+    """Fetch JWKS from Auth0, with a 1-hour in-process cache."""
+    global _jwks_cache, _jwks_fetched_at
+    now = time.monotonic()
+    if _jwks_cache and (now - _jwks_fetched_at) < _JWKS_CACHE_TTL:
+        return _jwks_cache
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        resp = await client.get(JWKS_URL)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Failed to fetch Auth0 JWKS: {resp.status_code}",
+        )
+    _jwks_cache = resp.json()
+    _jwks_fetched_at = now
+    return _jwks_cache
+
+
 # ---------------------------------------------------------------------------
 # verify_token dependency
 # ---------------------------------------------------------------------------
@@ -59,15 +90,17 @@ async def verify_token(
     credentials=Depends(security),
 ) -> dict:
     """
-    Verify an Auth0 access token via /userinfo introspection.
+    Verify an Auth0 id_token via JWKS (RS256 local verification).
 
-    Works with any token type (opaque or JWT) issued by Auth0, so no specific
-    API audience is required on the client side.
+    The frontend sends the id_token (not the access_token) as the Bearer
+    token. The id_token is always a verifiable RS256 JWT regardless of what
+    audience the access_token was issued for.
 
     Returns a dict with at least {"sub": "<auth0-user-id>", ...}.
 
     Raises:
-        HTTPException 401: if Auth0 rejects the token or the call fails.
+        HTTPException 401: if the token is invalid, expired, or cannot be
+                           verified against Auth0's public keys.
     """
     token = credentials.credentials
 
@@ -76,51 +109,39 @@ async def verify_token(
     if cached:
         return cached
 
-    userinfo_url = f"https://{AUTH0_DOMAIN}/userinfo"
-
+    # Fetch JWKS
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            resp = await client.get(
-                userinfo_url,
-                headers={"Authorization": f"Bearer {token}"},
-            )
-    except httpx.TimeoutException as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token verification timed out",
-        ) from e
+        jwks = await _get_jwks()
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Token verification failed: {e}",
+            detail=f"Token verification failed: could not fetch JWKS: {e}",
         ) from e
 
-    if resp.status_code == 401:
-        try:
-            body = resp.json()
-            auth0_error = f"{body.get('error', '')} {body.get('error_description', '')}".strip()
-        except Exception:
-            auth0_error = resp.text[:200]
-        print(f"[Auth0] /userinfo returned 401: {auth0_error}")
+    # Decode and verify the JWT
+    try:
+        payload: dict = jwt.decode(
+            token,
+            jwks,
+            algorithms=["RS256"],
+            audience=AUTH0_CLIENT_ID,
+            issuer=ISSUER,
+        )
+    except JWTError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid or expired token: {auth0_error}",
-        )
+            detail=f"Invalid or expired token: {e}",
+        ) from e
 
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Token verification failed: Auth0 returned {resp.status_code}",
-        )
-
-    payload: dict = resp.json()
     if not payload.get("sub"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token verification failed: missing sub claim",
         )
 
-    print(f"[Auth0] Token verified via /userinfo for user: {payload.get('sub')}")
+    print(f"[Auth0] ID token verified for user: {payload.get('sub')}")
     _cache_set(token, payload)
     return payload
 
