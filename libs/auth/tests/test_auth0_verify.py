@@ -21,6 +21,7 @@ pytestmark = pytest.mark.unit
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _creds(token: str) -> HTTPAuthorizationCredentials:
     return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
@@ -34,6 +35,7 @@ def _mock_jwks_fetch(status_code: int = 200, keys: list | None = None):
     """Return an async context-manager mock for httpx.AsyncClient that
     returns a fixed JWKS response."""
     import httpx
+
     response = MagicMock(spec=httpx.Response)
     response.status_code = status_code
     response.json.return_value = {"keys": keys or [{"kty": "RSA", "kid": "test-key"}]}
@@ -48,6 +50,7 @@ def _mock_jwks_fetch(status_code: int = 200, keys: list | None = None):
 # ---------------------------------------------------------------------------
 # Happy path
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_verify_valid_token_returns_payload():
@@ -84,15 +87,20 @@ async def test_verify_valid_token_is_cached():
 # 401 cases
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_verify_invalid_token_returns_401():
     """An invalid/expired JWT raises 401."""
     _clear_cache()
     from jose import JWTError
+
     client = _mock_jwks_fetch()
 
     with patch("libs.auth.auth0_verify.httpx.AsyncClient", return_value=client):
-        with patch("libs.auth.auth0_verify.jwt.decode", side_effect=JWTError("Signature verification failed")):
+        with patch(
+            "libs.auth.auth0_verify.jwt.decode",
+            side_effect=JWTError("Signature verification failed"),
+        ):
             with pytest.raises(HTTPException) as exc_info:
                 await verify_token(credentials=_creds("bad.jwt.token"))
 
@@ -105,10 +113,14 @@ async def test_verify_expired_token_returns_401():
     """An expired JWT raises 401."""
     _clear_cache()
     from jose import ExpiredSignatureError
+
     client = _mock_jwks_fetch()
 
     with patch("libs.auth.auth0_verify.httpx.AsyncClient", return_value=client):
-        with patch("libs.auth.auth0_verify.jwt.decode", side_effect=ExpiredSignatureError("Token is expired")):
+        with patch(
+            "libs.auth.auth0_verify.jwt.decode",
+            side_effect=ExpiredSignatureError("Token is expired"),
+        ):
             with pytest.raises(HTTPException) as exc_info:
                 await verify_token(credentials=_creds("expired.jwt.token"))
 
@@ -136,6 +148,7 @@ async def test_verify_jwks_fetch_failure_returns_401():
     """A non-200 from JWKS endpoint surfaces as 401."""
     _clear_cache()
     import libs.auth.auth0_verify as mod
+
     mod._jwks_cache = None
     mod._jwks_fetched_at = 0.0
 
@@ -153,10 +166,12 @@ async def test_verify_jwks_network_error_returns_401():
     """A network error fetching JWKS surfaces as 401."""
     _clear_cache()
     import libs.auth.auth0_verify as mod
+
     mod._jwks_cache = None
     mod._jwks_fetched_at = 0.0
 
     import httpx
+
     client = AsyncMock()
     client.get = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
     client.__aenter__ = AsyncMock(return_value=client)
