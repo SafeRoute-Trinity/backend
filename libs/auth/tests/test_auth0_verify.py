@@ -1,262 +1,162 @@
 """
-Tests for Auth0 JWT verification module.
+Tests for Auth0 token verification module.
 
-Tests verify_token function behavior including:
-- Valid JWT verification
-- Expired token rejection
-- Invalid signature rejection
-- Invalid audience/issuer rejection
-- Missing claims handling
-- JWKS fetching and key selection
+verify_token now uses /userinfo introspection instead of local JWT parsing,
+so tests mock httpx.AsyncClient rather than JWKS/PyJWT internals.
 
-These are UNIT tests - they use mocked Auth0 endpoints.
-For integration tests with real Auth0, see test_auth0_integration.py
+These are UNIT tests — they use mocked Auth0 endpoints.
 """
 
 import pytest
+import httpx
+from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 
-from libs.auth.auth0_verify import verify_token
+from libs.auth.auth0_verify import verify_token, _cache, _cache_lock
 
-# Mark all tests in this file as unit tests
 pytestmark = pytest.mark.unit
 
 
-def test_verify_valid_jwt_with_correct_signature(mock_jwks_request, create_valid_jwt):
-    """
-    Test that a valid JWT with correct signature returns the payload.
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    This verifies the happy path where:
-    - JWT is properly signed
-    - JWT is not expired
-    - Audience and issuer match expected values
-    - JWKS can be fetched successfully
-    """
-    # Create a valid JWT
-    user_id = "auth0|test-user-123"
-    token = create_valid_jwt(user_id=user_id)
-
-    # Mock credentials object
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-    # Call verify_token
-    payload = verify_token(credentials=credentials)
-
-    # Verify payload is returned correctly
-    assert payload is not None
-    assert payload["sub"] == user_id
-    assert "aud" in payload
-    assert "iss" in payload
-    assert "exp" in payload
+def _creds(token: str) -> HTTPAuthorizationCredentials:
+    return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
 
 
-def test_verify_expired_jwt_returns_401(mock_jwks_request, create_expired_jwt):
-    """
-    Test that an expired JWT is rejected with 401 and 'Token expired' detail.
+def _clear_cache():
+    with _cache_lock:
+        _cache.clear()
 
-    Verifies that jwt.ExpiredSignatureError is caught and converted
-    to HTTPException with appropriate status code and message.
-    """
-    # Create an expired JWT
-    token = create_expired_jwt(user_id="test-user-expired")
 
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+def _mock_userinfo(status_code: int, json_body: dict | None = None):
+    """Return an async context-manager mock for httpx.AsyncClient that
+    returns a fixed response from GET /userinfo."""
+    response = MagicMock(spec=httpx.Response)
+    response.status_code = status_code
+    response.json.return_value = json_body or {}
 
-    # Verify that HTTPException is raised
-    with pytest.raises(HTTPException) as exc_info:
-        verify_token(credentials=credentials)
+    client_mock = AsyncMock()
+    client_mock.get = AsyncMock(return_value=response)
+    client_mock.__aenter__ = AsyncMock(return_value=client_mock)
+    client_mock.__aexit__ = AsyncMock(return_value=False)
+    return client_mock
 
-    # Verify status code and detail message
+
+def _mock_userinfo_raises(exc):
+    """Return an async context-manager mock whose GET raises exc."""
+    client_mock = AsyncMock()
+    client_mock.get = AsyncMock(side_effect=exc)
+    client_mock.__aenter__ = AsyncMock(return_value=client_mock)
+    client_mock.__aexit__ = AsyncMock(return_value=False)
+    return client_mock
+
+
+# ---------------------------------------------------------------------------
+# Happy path
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_verify_valid_token_returns_payload():
+    """A 200 from /userinfo returns the claims dict."""
+    _clear_cache()
+    client = _mock_userinfo(200, {"sub": "auth0|abc123", "email": "u@example.com"})
+
+    with patch("libs.auth.auth0_verify.httpx.AsyncClient", return_value=client):
+        payload = await verify_token(credentials=_creds("valid-token"))
+
+    assert payload["sub"] == "auth0|abc123"
+    assert payload["email"] == "u@example.com"
+
+
+@pytest.mark.asyncio
+async def test_verify_valid_token_is_cached():
+    """Second call with same token uses cache — only one /userinfo request made."""
+    _clear_cache()
+    client = _mock_userinfo(200, {"sub": "auth0|cached"})
+
+    with patch("libs.auth.auth0_verify.httpx.AsyncClient", return_value=client):
+        await verify_token(credentials=_creds("cached-token"))
+        await verify_token(credentials=_creds("cached-token"))
+
+    # Only one real HTTP call despite two verify_token calls
+    assert client.get.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# 401 cases
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_verify_invalid_token_returns_401():
+    """Auth0 returning 401 propagates as 401."""
+    _clear_cache()
+    client = _mock_userinfo(401, {"error": "invalid_token"})
+
+    with patch("libs.auth.auth0_verify.httpx.AsyncClient", return_value=client):
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_token(credentials=_creds("bad-token"))
+
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "Token expired" in exc_info.value.detail
+    assert "Invalid or expired token" in exc_info.value.detail
 
 
-def test_verify_jwt_with_wrong_signature_returns_401(
-    mock_jwks_request, create_invalid_signature_jwt
-):
-    """
-    Test that a JWT with wrong signature is rejected with 401.
+@pytest.mark.asyncio
+async def test_verify_auth0_non_200_non_401_returns_401():
+    """Any non-200 response (e.g. 500) from Auth0 surfaces as 401."""
+    _clear_cache()
+    client = _mock_userinfo(500)
 
-    Verifies that tampered tokens (signed with different key)
-    are detected and rejected.
-    """
-    # Create JWT signed with wrong key
-    token = create_invalid_signature_jwt(user_id="test-user-tampered")
+    with patch("libs.auth.auth0_verify.httpx.AsyncClient", return_value=client):
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_token(credentials=_creds("some-token"))
 
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-    # Verify that HTTPException is raised
-    with pytest.raises(HTTPException) as exc_info:
-        verify_token(credentials=credentials)
-
-    # Verify 401 status code
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    # Detail will contain "Token verification failed"
-    assert "Token verification failed" in exc_info.value.detail
+    assert "500" in exc_info.value.detail
 
 
-def test_verify_jwt_with_wrong_audience_returns_401(mock_jwks_request, create_invalid_audience_jwt):
-    """
-    Test that a JWT with wrong audience claim is rejected with 401.
+@pytest.mark.asyncio
+async def test_verify_missing_sub_returns_401():
+    """/userinfo response without 'sub' is rejected."""
+    _clear_cache()
+    client = _mock_userinfo(200, {"email": "u@example.com"})
 
-    Verifies that audience validation is performed and tokens
-    with incorrect audience are rejected.
-    """
-    # Create JWT with wrong audience
-    token = create_invalid_audience_jwt(user_id="test-user-wrong-aud")
+    with patch("libs.auth.auth0_verify.httpx.AsyncClient", return_value=client):
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_token(credentials=_creds("no-sub-token"))
 
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-    # Verify that HTTPException is raised
-    with pytest.raises(HTTPException) as exc_info:
-        verify_token(credentials=credentials)
-
-    # Verify status code and detail message
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "Invalid audience" in exc_info.value.detail
+    assert "sub" in exc_info.value.detail
 
 
-def test_verify_jwt_with_wrong_issuer_returns_401(mock_jwks_request, create_invalid_issuer_jwt):
-    """
-    Test that a JWT with wrong issuer claim is rejected with 401.
+# ---------------------------------------------------------------------------
+# Network error cases
+# ---------------------------------------------------------------------------
 
-    Verifies that issuer validation is performed and tokens
-    with incorrect issuer are rejected.
-    """
-    # Create JWT with wrong issuer
-    token = create_invalid_issuer_jwt(user_id="test-user-wrong-iss")
+@pytest.mark.asyncio
+async def test_verify_timeout_returns_401():
+    """A timeout reaching Auth0 surfaces as 401."""
+    _clear_cache()
+    client = _mock_userinfo_raises(httpx.TimeoutException("timed out"))
 
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+    with patch("libs.auth.auth0_verify.httpx.AsyncClient", return_value=client):
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_token(credentials=_creds("slow-token"))
 
-    # Verify that HTTPException is raised
-    with pytest.raises(HTTPException) as exc_info:
-        verify_token(credentials=credentials)
-
-    # Verify status code and detail message
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "Invalid issuer" in exc_info.value.detail
+    assert "timed out" in exc_info.value.detail.lower()
 
 
-def test_verify_jwt_missing_kid_header_returns_401(mock_jwks_request, create_jwt_without_kid):
-    """
-    Test that a JWT without 'kid' in header can still be verified.
+@pytest.mark.asyncio
+async def test_verify_connection_error_returns_401():
+    """A network error reaching Auth0 surfaces as 401."""
+    _clear_cache()
+    client = _mock_userinfo_raises(httpx.ConnectError("connection refused"))
 
-    PyJWKClient can still verify the token when the JWKS yields a
-    single usable signing key.
-    """
-    # Create JWT without kid header
-    token = create_jwt_without_kid(user_id="test-user-no-kid")
+    with patch("libs.auth.auth0_verify.httpx.AsyncClient", return_value=client):
+        with pytest.raises(HTTPException) as exc_info:
+            await verify_token(credentials=_creds("unreachable-token"))
 
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-    payload = verify_token(credentials=credentials)
-    assert payload["sub"] == "test-user-no-kid"
-
-
-def test_jwks_fetching_and_key_selection(mock_jwks_request, create_valid_jwt, test_kid, mock_jwks):
-    """
-    Test that JWKS is fetched and the correct signing key is selected by kid.
-
-    Verifies:
-    - PyJWKClient is initialized with the JWKS URL
-    - JWT verification succeeds with the correct key
-    - The JWKS fixture still contains the expected kid
-    """
-    from common.constants import JWKS_URL
-
-    # Create valid JWT
-    token = create_valid_jwt(user_id="test-jwks-user")
-
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-    # Call verify_token
-    payload = verify_token(credentials=credentials)
-
-    # Verify that PyJWKClient was initialized with JWKS URL
-    mock_jwks_request.assert_called_once()
-    call_args = mock_jwks_request.call_args
-    assert JWKS_URL in call_args.args[0]
-    assert call_args.kwargs["timeout"] == 10
-
-    # Verify payload contains expected data
-    assert payload["sub"] == "test-jwks-user"
-
-    # Verify the JWKS contains our test kid
-    assert any(key.get("kid") == test_kid for key in mock_jwks["keys"])
-
-
-def test_jwks_fetch_ssl_error_returns_401(mocker, create_valid_jwt):
-    """
-    Test that SSL errors when fetching JWKS return 401.
-
-    Verifies that JWKS client failures surface as 401 responses.
-    """
-    from jwt import PyJWKClientError
-
-    mock_client = mocker.Mock()
-    mock_client.get_signing_key_from_jwt.side_effect = PyJWKClientError(
-        "SSL certificate verification failed"
-    )
-    mocker.patch("libs.auth.auth0_verify.PyJWKClient", return_value=mock_client)
-
-    token = create_valid_jwt(user_id="test-ssl-error")
-
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-    # Verify that HTTPException is raised
-    with pytest.raises(HTTPException) as exc_info:
-        verify_token(credentials=credentials)
-
-    # Verify status code and detail message
     assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "Token verification failed" in exc_info.value.detail
-    assert "SSL certificate verification failed" in exc_info.value.detail
-
-
-def test_jwks_fetch_http_error_returns_401(mocker, create_valid_jwt):
-    """
-    Test that HTTP errors when fetching JWKS return 401.
-
-    Verifies that JWKS client fetch failures surface as 401 responses.
-    """
-    from jwt import PyJWKClientError
-
-    mock_client = mocker.Mock()
-    mock_client.get_signing_key_from_jwt.side_effect = PyJWKClientError("Connection timeout")
-    mocker.patch("libs.auth.auth0_verify.PyJWKClient", return_value=mock_client)
-
-    token = create_valid_jwt(user_id="test-http-error")
-
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-    # Verify that HTTPException is raised
-    with pytest.raises(HTTPException) as exc_info:
-        verify_token(credentials=credentials)
-
-    # Verify status code and detail message
-    assert exc_info.value.status_code == status.HTTP_401_UNAUTHORIZED
-    assert "Token verification failed" in exc_info.value.detail
-    assert "Connection timeout" in exc_info.value.detail
-
-
-def test_verify_jwt_with_custom_claims(mock_jwks_request, create_valid_jwt):
-    """
-    Test that custom claims in JWT are preserved in the payload.
-
-    Verifies that additional claims (beyond standard ones)
-    are included in the returned payload.
-    """
-    # Create JWT with custom claims
-    custom_claims = {"email": "test@example.com", "role": "admin", "permissions": ["read", "write"]}
-    token = create_valid_jwt(user_id="test-custom-claims", **custom_claims)
-
-    credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
-
-    # Call verify_token
-    payload = verify_token(credentials=credentials)
-
-    # Verify custom claims are in payload
-    assert payload["email"] == custom_claims["email"]
-    assert payload["role"] == custom_claims["role"]
-    assert payload["permissions"] == custom_claims["permissions"]
